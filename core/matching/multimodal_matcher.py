@@ -177,30 +177,39 @@ class MultiModalMatcher:
         
         return price_difference, price_difference_percent
 
-    def calculate_similarity(self, product1: Product, product2: Product) -> float:
+    def calculate_similarity(self, product1, product2) -> float:
         """
-        Calculate the combined similarity between two products.
+        Calculate the combined similarity between two products or combine pre-calculated similarities.
         
         Args:
-            product1: First product
-            product2: Second product
+            product1: First product or text similarity score
+            product2: Second product or image similarity score
             
         Returns:
             Combined similarity score between 0.0 and 1.0
         """
-        # Calculate text similarity
-        text_sim = self.text_matcher.calculate_similarity(
-            product1.name, 
-            product2.name
-        )
-        
-        # Calculate image similarity (if available)
-        image_sim = 0.0
-        if product1.image_url and product2.image_url:
-            image_sim = self.image_matcher.calculate_similarity(
-                product1.image_url, 
-                product2.image_url
+        # Check if inputs are already similarity scores
+        if isinstance(product1, (float, int)) and isinstance(product2, (float, int)):
+            # Inputs are similarity scores, combine them directly
+            text_sim = float(product1)
+            image_sim = float(product2)
+        elif isinstance(product1, Product) and isinstance(product2, Product):
+            # Calculate text similarity
+            text_sim = self.text_matcher.calculate_similarity(
+                product1.name, 
+                product2.name
             )
+            
+            # Calculate image similarity (if available)
+            image_sim = 0.0
+            if product1.image_url and product2.image_url:
+                image_sim = self.image_matcher.calculate_similarity(
+                    product1.image_url, 
+                    product2.image_url
+                )
+        else:
+            self.logger.error(f"Invalid argument types for calculate_similarity: {type(product1)}, {type(product2)}")
+            return 0.0
         
         # Combine similarities with weights
         combined_sim = (
