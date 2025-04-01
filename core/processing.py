@@ -248,6 +248,9 @@ class Processor:
     def _process_single_file(self, input_file: str) -> Tuple[Optional[str], Optional[str]]:
         """Process a single input file (internal method)"""
         try:
+            # Define start_time at the beginning of the method
+            start_time = datetime.now()
+            
             # Read input file
             df = self._read_excel_file(input_file)
             total_items = len(df)
@@ -383,8 +386,37 @@ class Processor:
             )
         ]
         
-        # Create result dataframe
-        # ... existing code ...
+        # Create result dataframe - this part was missing
+        report_data = []
+        for result in results:
+            row = {}
+            # Extract source product data
+            source_data = result.source_product.original_input_data
+            for key, value in source_data.items():
+                row[key] = value
+            
+            # Add match data from koryo
+            if result.best_koryo_match:
+                row['판매단가(V포함)(2)'] = result.best_koryo_match.matched_product.price
+                row['가격차이(2)'] = result.best_koryo_match.price_difference
+                row['가격차이(2)%'] = result.best_koryo_match.price_difference_percent
+                row['고려기프트 이미지'] = result.best_koryo_match.matched_product.image_url
+                row['고려기프트상품링크'] = result.best_koryo_match.matched_product.url
+            
+            # Add match data from naver
+            if result.best_naver_match:
+                row['판매단가(V포함)(3)'] = result.best_naver_match.matched_product.price
+                row['가격차이(3)'] = result.best_naver_match.price_difference
+                row['가격차이(3)%'] = result.best_naver_match.price_difference_percent
+                row['네이버 이미지'] = result.best_naver_match.matched_product.image_url
+                row['네이버쇼핑 링크'] = result.best_naver_match.matched_product.url
+                if hasattr(result.best_naver_match.matched_product, 'brand'):
+                    row['공급사명'] = result.best_naver_match.matched_product.brand
+            
+            report_data.append(row)
+        
+        # Create the DataFrame that was previously undefined
+        result_df = pd.DataFrame(report_data)
         
         # Generate output filename
         output_file = f"{os.path.splitext(input_file)[0]}-result.xlsx"
