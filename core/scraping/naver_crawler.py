@@ -108,6 +108,17 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         
         # 추출 전략 커스터마이징
         self._customize_extraction_strategies()
+        
+        # Setup logging
+        self.logger = logging.getLogger(__name__)
+        
+        # Setup image comparison parameters
+        self.require_image_match = True  # 매뉴얼 요구사항: 이미지와 규격이 동일한 경우만 동일상품으로 판단
+        
+        # Setup price filter
+        self.min_price_diff_percent = 10  # 매뉴얼 요구사항: 10% 이하 가격차이 제품 제외
+        
+        self.max_pages = 3  # 매뉴얼 요구사항: 최대 3페이지까지만 탐색
     
     def _customize_extraction_strategies(self):
         """특화된 추출 전략으로 기본 전략 확장"""
@@ -138,97 +149,115 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         # 전략 추가
         self.extraction_strategies.insert(0, NaverJsonExtractionStrategy())
     
-    # Add caching decorator if cache is available
-    def search_product(self, query: str, max_items: int = 50) -> List[Product]:
-        """캐싱을 적용한 제품 검색"""
+    def search_product(self, query: str, max_items: int = 50, reference_price: float = 0) -> List[Product]:
+        """
+        네이버 쇼핑에서 제품 검색
+        
+        Args:
+            query: 검색어
+            max_items: 최대 검색 결과 수
+            reference_price: 참조 가격 (10% 룰 적용용)
+        
+        Returns:
+            List[Product]: 검색된 제품 목록
+        """
         if self.cache:
-             @cache_result(self.cache, key_prefix="naver_search")
-             def cached_search(q, m):
-                 return self._search_product_logic(q, m)
-             return cached_search(query, max_items)
+            @cache_result(self.cache, key_prefix="naver_search")
+            def cached_search(q, m, p):
+                return self._search_product_logic(q, m, p)
+            return cached_search(query, max_items, reference_price)
         else:
-             return self._search_product_logic(query, max_items)
-
-    async def _search_product_async(self, query: str, max_items: int = 50) -> List[Product]:
+            return self._search_product_logic(query, max_items, reference_price)
+    
+    def _search_product_logic(self, query: str, max_items: int = 50, reference_price: float = 0) -> List[Product]:
+        """네이버 쇼핑 검색 핵심 로직"""
+        # 비동기 함수를 동기적으로 실행
+        return asyncio.run(self._search_product_async(query, max_items, reference_price))
+    
+    async def _search_product_async(self, query: str, max_items: int = 50, reference_price: float = 0) -> List[Product]:
         """비동기 방식으로 제품 검색 (병렬 처리)"""
         products = []
-        page = 1
-        total_processed = 0
-
-        while True:
-            try:
-                self.logger.debug(f"Naver Crawler: Searching for '{query}', page={page}")
-                items = await self._crawl_page_async(query, page)
-                
-                if not items:
-                    self.logger.warning(f"Naver Crawler: No items found for '{query}' at page={page}.")
-                    break
-                
-                # Process items
-                # 병렬로 제품 상세 정보 가져오기
-                tasks = []
-                for item in items[:max_items - len(products) if max_items > 0 else len(items)]:
-                    if 'link' in item:
-                        tasks.append(self._get_product_details_async(item))
-                    
-                if tasks:
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-                    for result in results:
-                        if isinstance(result, Exception):
-                            self.logger.error(f"Error getting product details: {str(result)}")
-                            continue
-                        if result:
-                            products.append(result)
-                        if max_items > 0 and len(products) >= max_items:
-                            break
-                
-                if max_items > 0 and len(products) >= max_items:
-                     break  # Reached max_items limit
-                
-                # Update page and total processed
-                page += 1
-                total_processed += len(items)
-
-                # 다음 페이지 존재 확인
-                has_next = await self._check_next_page_async(query, page)
-                if not has_next:
-                        self.logger.debug(f"Naver Crawler: No more pages available for '{query}'")
-                        break
-                
-                # Politeness delay
-                await asyncio.sleep(1.5)  # Longer delay for crawling to avoid IP blocking
-                
-                # Limit to 5 pages maximum
-                if page > 5:
-                    self.logger.debug(f"Naver Crawler: Reached maximum page limit (5)")
-                    break
-                
-            except Exception as e:
-                self.logger.error(f"Error during Naver crawling for '{query}': {str(e)}", exc_info=True)
-                break
         
-        self.logger.info(f"Naver Crawler: Found {len(products)} products for query '{query}'")
-        return products[:max_items] if max_items > 0 else products
+        try:
+            self.logger.info(f"Searching Naver Shopping for '{query}'")
+            
+            # 낮은 가격순 정렬 적용 (매뉴얼 요구사항)
+            sort_param = "price_asc"
+            
+            # 최대 3페이지까지 검색 (매뉴얼 요구사항)
+            for page in range(1, self.max_pages + 1):
+                page_products = await self._crawl_page_async(query, page, sort_param)
+                
+                if not page_products:
+                    break
+                
+                # Apply 10% rule if reference price is provided
+                if reference_price > 0:
+                    filtered_products = []
+                    for product in page_products:
+                        # Skip products with no price
+                        if not product.price:
+                            continue
+                            
+                        # Calculate price difference percentage
+                        price_diff_percent = ((product.price - reference_price) / reference_price) * 100
+                        
+                        # Include product if price difference is significant enough
+                        # (either lower price or at least min_price_diff_percent higher)
+                        if price_diff_percent < 0 or price_diff_percent >= self.min_price_diff_percent:
+                            filtered_products.append(product)
+                    
+                    page_products = filtered_products
+                
+                products.extend(page_products)
+                
+                # Stop if we have enough products or no more pages
+                if len(products) >= max_items:
+                    products = products[:max_items]
+                    break
+                
+                # Politeness delay between pages
+                await asyncio.sleep(1.0)
+            
+            if not products:
+                self.logger.info(f"No products found for '{query}' on Naver Shopping")
+            else:
+                self.logger.info(f"Found {len(products)} products for '{query}' on Naver Shopping")
+            
+            # 매뉴얼 요구사항: 찾지 못하면 "동일상품 없음"으로 처리
+            if not products:
+                # Create a dummy product to indicate "no match found"
+                no_match_product = Product(
+                    id="no_match",
+                    name=f"동일상품 없음 - {query}",
+                    source="naver_shopping",
+                    price=0,
+                    url="",
+                    image_url=""
+                )
+                products.append(no_match_product)
+                
+            return products
+            
+        except Exception as e:
+            self.logger.error(f"Error searching Naver Shopping for '{query}': {str(e)}", exc_info=True)
+            return []
     
-    # Core crawling logic
-    def _search_product_logic(self, query: str, max_items: int = 50) -> List[Product]:
-        """Core logic to search for products using Naver Shopping crawler"""
-        # 비동기 함수를 동기적으로 실행
-        return asyncio.run(self._search_product_async(query, max_items))
-    
-    async def _crawl_page_async(self, query: str, page: int = 1) -> List[Dict]:
+    async def _crawl_page_async(self, query: str, page: int, sort: str = "price_asc") -> List[Product]:
         """비동기 방식으로 페이지 크롤링"""
-        # 이미 캐시에 있는지 확인
-        cache_key = f"naver_page|{query}|{page}"
+        # Create cache key for this query and page
+        cache_key = f"naver_page|{query}|{page}|{sort}"
         cached_result = self.get_sparse_data(cache_key)
         if cached_result:
             return cached_result
         
-        # URL 인코딩
+        # Encode query for URL
         encoded_query = urllib.parse.quote(query)
-        url = f"{self.base_url}?query={encoded_query}&pagingIndex={page}"
+        url = f"{self.base_url}?query={encoded_query}&pagingIndex={page}&sort={sort}"
         
-        # 비동기로 HTTP 요청
+        self.logger.debug(f"Crawling Naver Shopping page {page} for '{query}'")
+        
+        # Make async HTTP request
         loop = asyncio.get_running_loop()
         try:
             # requests는 동기식이므로 ThreadPoolExecutor를 사용해 비동기로 변환
@@ -291,7 +320,7 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
             return items
             
         except Exception as e:
-            self.logger.error(f"Error crawling page {page} for query '{query}': {str(e)}", exc_info=True)
+            self.logger.error(f"Error crawling Naver Shopping page {page} for '{query}': {str(e)}")
             return []
     
     def _extract_from_json(self, item: Dict) -> Dict:

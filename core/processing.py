@@ -137,6 +137,15 @@ class Processor:
                 }
             }
 
+        # Add settings for file splitting and merging
+        self.auto_split_files = config['PROCESSING'].get('AUTO_SPLIT_FILES', True)
+        self.split_threshold = config['PROCESSING'].get('SPLIT_THRESHOLD', 300)
+        self.auto_merge_results = config['PROCESSING'].get('AUTO_MERGE_RESULTS', True)
+        self.auto_clean_product_names = config['PROCESSING'].get('AUTO_CLEAN_PRODUCT_NAMES', True)
+        
+        # Yellow fill for price differences
+        self.price_difference_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+
     def _configure_scrapers(self, scraping_config: Dict):
         """다중 레이어 스크래퍼에 고급 설정 적용"""
         scrapers = [self.koryo_scraper, self.naver_crawler]
@@ -195,16 +204,55 @@ class Processor:
             start_time = datetime.now()
             self.logger.info(f"Processing started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
             
-            # Read input file with improved error handling and validation
+            # Read input file
             try:
                 df = self._read_excel_file(input_file)
                 total_items = len(df)
                 self.logger.info(f"Loaded {total_items} items from {input_file}")
+                
+                # Auto-clean product names if enabled
+                if self.auto_clean_product_names:
+                    df = self._clean_product_names(df)
+                    self.logger.info("Product names cleaned automatically")
+                
             except Exception as e:
                 self.logger.error(f"Failed to read input file: {str(e)}", exc_info=True)
                 raise
+                
+            # Split files if needed
+            if self.auto_split_files and total_items > self.split_threshold:
+                split_files = self._split_input_file(df, input_file)
+                self.logger.info(f"Input file split into {len(split_files)} files")
+                
+                # Process each split file
+                result_files = []
+                for split_file in split_files:
+                    result_file, _ = self._process_single_file(split_file)
+                    if result_file:
+                        result_files.append(result_file)
+                
+                # Merge results if enabled
+                if self.auto_merge_results and len(result_files) > 1:
+                    merged_result = self._merge_result_files(result_files, input_file)
+                    return merged_result, None
+                
+                return result_files[0] if result_files else None, None
+            else:
+                # Process as a single file
+                return self._process_single_file(input_file)
+                
+        except Exception as e:
+            self.logger.error(f"Error in process_file: {str(e)}", exc_info=True)
+            return None, str(e)
+    
+    def _process_single_file(self, input_file: str) -> Tuple[Optional[str], Optional[str]]:
+        """Process a single input file (internal method)"""
+        try:
+            # Read input file
+            df = self._read_excel_file(input_file)
+            total_items = len(df)
             
-            # Process items in batches for better memory management
+            # Process items in batches
             results = []
             futures = []
             total_futures = 0
@@ -236,7 +284,6 @@ class Processor:
                         # Add failed result to maintain order
                         results.append(ProcessingResult(
                             product=product,
-                            matches=[],
                             error=str(e)
                         ))
                     
@@ -244,37 +291,133 @@ class Processor:
                     progress_percent = int((len(results) / total_items) * 100)
                     self.logger.info(f"Progress: {len(results)}/{total_items} ({progress_percent}%)")
             
+            # Generate output report with enhanced formatting
+            output_file = self._generate_enhanced_output(results, input_file)
+            
             end_time = datetime.now()
             processing_time = end_time - start_time
             self.logger.info(f"Processing finished at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
             self.logger.info(f"Total processing time: {processing_time}")
             
-            # Generate reports with improved error handling
-            try:
-                primary_report_path, secondary_report_path = self._generate_reports(
-                    results, 
-                    input_file, 
-                    start_time, 
-                    end_time
-                )
-                
-                self.logger.info(
-                    f"Reports generated successfully. "
-                    f"Primary: {primary_report_path}, "
-                    f"Secondary: {secondary_report_path}"
-                )
-                return primary_report_path, secondary_report_path
-                
-            except Exception as e:
-                self.logger.error(f"Failed to generate reports: {str(e)}", exc_info=True)
-                return None, None
-                
+            return output_file, None
+            
         except Exception as e:
-            self.logger.error(
-                f"Critical error processing file '{input_file}': {str(e)}", 
-                exc_info=True
+            self.logger.error(f"Error in _process_single_file: {str(e)}", exc_info=True)
+            return None, str(e)
+    
+    def _clean_product_names(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Clean product names according to manual requirements"""
+        if "상품명" in df.columns:
+            # Remove '1-' and numbers/hyphens before it
+            df["상품명"] = df["상품명"].str.replace(r'^\d+-', '', regex=True)
+            # Remove special characters and brackets with numbers
+            df["상품명"] = df["상품명"].str.replace(r'[/()]', '', regex=True)
+            # Remove numbers in parentheses
+            df["상품명"] = df["상품명"].str.replace(r'\(\d+\)', '', regex=True)
+            
+        return df
+    
+    def _split_input_file(self, df: pd.DataFrame, input_file: str) -> List[str]:
+        """Split input file into smaller chunks based on threshold"""
+        base_name = os.path.splitext(input_file)[0]
+        extension = os.path.splitext(input_file)[1]
+        
+        # Get processing type ('A' for approval, 'P' for price)
+        processing_type = "승인관리"
+        if "구분" in df.columns and df["구분"].iloc[0].upper() == "P":
+            processing_type = "가격관리"
+            
+        # Get current date
+        current_date = datetime.now().strftime("%Y%m%d")
+        
+        # Calculate number of files needed
+        total_rows = len(df)
+        num_files = (total_rows + self.split_threshold - 1) // self.split_threshold
+        
+        split_files = []
+        for i in range(num_files):
+            start_idx = i * self.split_threshold
+            end_idx = min((i + 1) * self.split_threshold, total_rows)
+            
+            # Create filename as per manual: 승인관리1(300)-날짜
+            file_count = i + 1
+            file_size = end_idx - start_idx
+            split_filename = f"{processing_type}{file_count}({file_size})-{current_date}{extension}"
+            split_path = os.path.join(os.path.dirname(input_file), split_filename)
+            
+            # Save the chunk
+            df.iloc[start_idx:end_idx].to_excel(split_path, index=False)
+            split_files.append(split_path)
+            
+        return split_files
+    
+    def _merge_result_files(self, result_files: List[str], original_input: str) -> str:
+        """Merge multiple result files into a single file"""
+        # Create merged dataframe
+        dfs = []
+        for file in result_files:
+            df = pd.read_excel(file)
+            dfs.append(df)
+        
+        merged_df = pd.concat(dfs, ignore_index=True)
+        
+        # Generate output filename
+        base_name = os.path.splitext(original_input)[0]
+        merged_filename = f"{base_name}-merged-result.xlsx"
+        
+        # Save merged file
+        merged_df.to_excel(merged_filename, index=False)
+        
+        # Apply formatting
+        self._apply_formatting_to_excel(merged_filename)
+        
+        return merged_filename
+    
+    def _generate_enhanced_output(self, results: List[ProcessingResult], input_file: str) -> str:
+        """Generate enhanced output file with proper formatting"""
+        # Filter products with price differences (lower prices)
+        filtered_results = [
+            r for r in results if (
+                (r.best_koryo_match and r.best_koryo_match.price_difference < 0) or
+                (r.best_naver_match and r.best_naver_match.price_difference < 0)
             )
-            return None, None
+        ]
+        
+        # Create result dataframe
+        # ... existing code ...
+        
+        # Generate output filename
+        output_file = f"{os.path.splitext(input_file)[0]}-result.xlsx"
+        
+        # Save to Excel
+        result_df.to_excel(output_file, index=False)
+        
+        # Apply formatting according to manual requirements
+        self._apply_formatting_to_excel(output_file)
+        
+        return output_file
+    
+    def _apply_formatting_to_excel(self, excel_file: str) -> None:
+        """Apply formatting requirements to the output Excel file"""
+        wb = load_workbook(excel_file)
+        ws = wb.active
+        
+        # Find columns with price differences
+        price_diff_cols = []
+        for col in range(1, ws.max_column + 1):
+            header = ws.cell(row=1, column=col).value
+            if header and ('가격차이' in str(header)):
+                price_diff_cols.append(col)
+        
+        # Apply yellow highlight to negative price differences
+        for col in price_diff_cols:
+            for row in range(2, ws.max_row + 1):
+                cell_value = ws.cell(row=row, column=col).value
+                if cell_value and (isinstance(cell_value, (int, float)) and cell_value < 0):
+                    ws.cell(row=row, column=col).fill = self.price_difference_fill
+        
+        # Save changes
+        wb.save(excel_file)
 
     def _read_excel_file(self, file_path: str) -> pd.DataFrame:
         """Read Excel file with enhanced validation and error handling."""
@@ -642,22 +785,4 @@ class Processor:
              return None
          
          # Return match with highest combined similarity among valid ones
-         return max(valid_matches, key=lambda x: x.combined_similarity)
-    
-    def _generate_reports(self, results: List[ProcessingResult], input_filepath: str, start_time: datetime, end_time: datetime) -> Tuple[Optional[str], Optional[str]]:
-        """Generate Primary (1차) and Secondary (2차) reports."""
-        primary_report_path = None
-        secondary_report_path = None
-        try:
-            # Pass input filename for secondary report naming convention
-            primary_report_path = generate_primary_report(
-                results, self.config, start_time, end_time
-            )
-            secondary_report_path = generate_secondary_report(
-                 results, self.config, input_filepath
-            )
-            return primary_report_path, secondary_report_path
-        except Exception as e:
-            self.logger.error(f"Failed to generate one or more reports: {e}", exc_info=True)
-            # Return whatever was generated successfully
-            return primary_report_path, secondary_report_path 
+         return max(valid_matches, key=lambda x: x.combined_similarity) 

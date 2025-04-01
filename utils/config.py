@@ -43,6 +43,28 @@ def load_config() -> Dict[str, Any]:
             'COMPRESSION_LEVEL': int(config['PROCESSING']['COMPRESSION_LEVEL'])
         }
         
+        # Add new settings for file handling based on manual workflow
+        if 'FILE_HANDLING' in config:
+            processed_config['PROCESSING']['AUTO_SPLIT_FILES'] = config['FILE_HANDLING'].get('AUTO_SPLIT_FILES', 'true').lower() == 'true'
+            processed_config['PROCESSING']['SPLIT_THRESHOLD'] = int(config['FILE_HANDLING'].get('SPLIT_THRESHOLD', '300'))
+            processed_config['PROCESSING']['AUTO_MERGE_RESULTS'] = config['FILE_HANDLING'].get('AUTO_MERGE_RESULTS', 'true').lower() == 'true'
+            processed_config['PROCESSING']['AUTO_CLEAN_PRODUCT_NAMES'] = config['FILE_HANDLING'].get('AUTO_CLEAN_PRODUCT_NAMES', 'true').lower() == 'true'
+        else:
+            # Default values if section doesn't exist
+            processed_config['PROCESSING']['AUTO_SPLIT_FILES'] = True
+            processed_config['PROCESSING']['SPLIT_THRESHOLD'] = 300
+            processed_config['PROCESSING']['AUTO_MERGE_RESULTS'] = True
+            processed_config['PROCESSING']['AUTO_CLEAN_PRODUCT_NAMES'] = True
+
+        # Add price comparison settings from manual
+        if 'PRICE_COMPARISON' in config:
+            processed_config['PROCESSING']['MIN_PRICE_DIFF_PERCENT'] = float(config['PRICE_COMPARISON'].get('MIN_PRICE_DIFF_PERCENT', '10.0'))
+            processed_config['PROCESSING']['HIGHLIGHT_PRICE_DIFF'] = config['PRICE_COMPARISON'].get('HIGHLIGHT_PRICE_DIFF', 'true').lower() == 'true'
+        else:
+            # Default values if section doesn't exist
+            processed_config['PROCESSING']['MIN_PRICE_DIFF_PERCENT'] = 10.0
+            processed_config['PROCESSING']['HIGHLIGHT_PRICE_DIFF'] = True
+        
         # SCRAPING section
         if 'SCRAPING' in config:
             processed_config['SCRAPING'] = {
@@ -67,6 +89,10 @@ def load_config() -> Dict[str, Any]:
                 'RETRY_ON_SPECIFIC_STATUS': [int(x.strip()) for x in config['SCRAPING']['RETRY_ON_SPECIFIC_STATUS'].split(',')],
                 'EXPONENTIAL_BACKOFF': config['SCRAPING']['EXPONENTIAL_BACKOFF'].lower() == 'true'
             }
+            
+            # Add Naver search settings as per manual
+            processed_config['SCRAPING']['MAX_PAGES'] = int(config['SCRAPING'].get('MAX_PAGES', '3'))
+            processed_config['SCRAPING']['REQUIRE_IMAGE_MATCH'] = config['SCRAPING'].get('REQUIRE_IMAGE_MATCH', 'true').lower() == 'true'
         
         # EXCEL section
         if 'EXCEL' in config:

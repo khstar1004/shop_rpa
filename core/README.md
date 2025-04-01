@@ -1,44 +1,51 @@
-# Core 모듈
+# Shop RPA Core Module
 
-이 디렉토리는 쇼핑 RPA 시스템의 핵심 기능을 담당하는 모듈들을 포함합니다.
+The core processing engine for the Shop RPA system, responsible for comparing product prices across Haeoreum Gift, Koryo Gift, and Naver Shopping.
 
-## 구조
+## New Features
 
-- `data_models.py`: 데이터 모델 및 구조체 정의
-- `processing.py`: 파일 처리, 제품 매칭 및 보고서 생성 로직
-- `scraping/`: 외부 사이트에서 데이터를 수집하는 모듈들
-- `matching/`: 텍스트 및 이미지 유사도 비교 알고리즘
+### Automatic File Management
+- **Auto File Splitting**: Files with more than 300 products are automatically split according to manual workflow requirements
+- **Auto File Merging**: Results are automatically merged back together after processing
+- **Product Name Cleaning**: Automatically removes prefixes like '1-' and special characters as per manual requirements
+- **Enhanced Excel Formatting**: Applies yellow highlighting to price differences
 
-## 주요 흐름
+### Configuration Options
+```yaml
+PROCESSING:
+  AUTO_SPLIT_FILES: true       # Enable/disable automatic file splitting
+  SPLIT_THRESHOLD: 300         # Threshold for splitting files
+  AUTO_MERGE_RESULTS: true     # Enable/disable automatic result merging
+  AUTO_CLEAN_PRODUCT_NAMES: true  # Enable/disable product name cleaning
+```
 
-1. `processing.py`에서 엑셀 파일을 로드하고 각 행을 `Product` 객체로 변환
-2. 각 `Product`에 대해 고려기프트와 네이버 쇼핑에서 매칭되는 상품 검색
-3. 텍스트 및 이미지 유사도 계산을 통해 최적의 매치 선택
-4. 매칭 결과에 따라 가격 차이 계산 및 보고서 생성
+## Main Components
 
-## 데이터 모델 (data_models.py)
+- **Text Matching**: Advanced Korean text similarity with Levenshtein and BERT embeddings
+- **Image Matching**: Background removal and feature comparison using ImageHash and EfficientNet
+- **Multimodal Matching**: Combined text/image matching scores with configurable weights 
+- **Price Analysis**: Automatic calculation of price differences and percentage discounts
 
-핵심 데이터 모델:
+## Workflow Integration
 
-- `Product`: 상품 정보를 담는 기본 클래스
-- `ProcessingResult`: 단일 제품의 처리 결과
-- `MatchResult`: 제품 매칭 결과와 유사도 점수
+This system integrates with the manual workflow described in 작업메뉴얼.txt:
+1. **승인관리/가격관리** identification via the '구분' column (A/P values)
+2. Automatic handling of the 300-product file split requirement
+3. Output formatting per specifications for price-differing products
 
-## 처리 로직 (processing.py)
+## Dependencies
 
-- `process_file()`: 엑셀 파일을 처리하고 결과 보고서 생성
-- `process_product()`: 개별 제품에 대한 매칭 처리
-- `_calculate_match_similarities()`: 매칭된 제품 간의 유사도 점수 계산
-- `_create_product_from_row()`: 엑셀 행에서 `Product` 객체 생성
-- `_generate_reports()`: 1차 및 2차 보고서 생성
+- Pandas and OpenpyXL for Excel processing
+- Sentence-Transformers for text similarity
+- EfficientNet and ImageHash for image matching
+- Rembg for product image background removal
 
-## 사용 예시
+## Usage
+
+The main entry point is the `Processor` class which handles all file operations, matching logic, and report generation.
 
 ```python
-from core.processing import process_file
-from utils.config import load_config
-
-config = load_config()
-input_file = "data/input/products.xlsx"
-primary_report, secondary_report = process_file(input_file, config)
+from core.processing import Processor
+processor = Processor(config)
+result_file, error = processor.process_file("input.xlsx")
 ``` 
