@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Data and Excel files
+data/
+*.xlsx
+*.xls
+~$*.xlsx
+~$*.xls
+
+# Logs
+*.log
+*.log.*
+*.log.*.*   
+*.log.*.*.*
+*.log.*.*.*.*
+*.log.*.*.*.*.*
+    

@@ -1,0 +1,24 @@
+# Core dependencies
+PyQt5>=5.15.0  # GUI framework
+pandas>=1.5.0  # Data processing
+openpyxl>=3.0.0  # Excel file handling
+numpy>=1.21.0  # Numerical operations
+Pillow>=9.0.0  # Image processing
+requests>=2.28.0  # HTTP requests
+beautifulsoup4>=4.9.0  # Web scraping
+sentence-transformers>=2.2.0
+torch>=2.0.0
+rembg>=2.0.0
+scikit-learn>=1.0.0
+efficientnet-pytorch>=0.7.0
+tqdm>=4.65.0
+python-dotenv>=0.19.0
+selenium>=4.0.0  # Web automation
+webdriver-manager>=3.8.0  # WebDriver management
+lxml>=4.9.0  # XML/HTML processing
+python-Levenshtein>=0.20.0  # Text similarity
+imagehash>=4.2.0  # Image hashing for similarity comparison
+torchvision>=0.15.0  # Image processing and transformations
+
+# Optional dependencies
+pytesseract>=0.3.10  # OCR functionality (requires Tesseract to be installed on the system)
