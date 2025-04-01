@@ -5,6 +5,7 @@ from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 import sys
 import traceback
 from typing import Optional
+import shutil
 
 def setup_logging(log_dir: Optional[str] = None) -> None:
     """Setup logging configuration with improved error handling and features."""
@@ -73,11 +74,11 @@ def setup_logging(log_dir: Optional[str] = None) -> None:
             error_file_handler.setFormatter(detailed_formatter)
             root_logger.addHandler(error_file_handler)
             
-            # Create a symlink to the latest log file
+            # Create a copy of the latest log file instead of symlink
             latest_log = os.path.join(log_dir, 'latest.log')
             if os.path.exists(latest_log):
                 os.remove(latest_log)
-            os.symlink(all_log_file, latest_log)
+            shutil.copy2(all_log_file, latest_log)
         
         # Add unhandled exception handler
         def handle_exception(exc_type, exc_value, exc_traceback):

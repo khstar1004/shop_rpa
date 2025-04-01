@@ -37,8 +37,7 @@ class Processor:
         
         # Initialize matchers with improved cache and settings
         self.text_matcher = TextMatcher(
-            cache=self.cache,
-            similarity_threshold=config['MATCHING']['TEXT_SIMILARITY_THRESHOLD']
+            cache=self.cache
         )
         self.image_matcher = ImageMatcher(
             cache=self.cache,
@@ -48,7 +47,8 @@ class Processor:
             text_weight=config['MATCHING']['TEXT_WEIGHT'],
             image_weight=config['MATCHING']['IMAGE_WEIGHT'],
             text_matcher=self.text_matcher,
-            image_matcher=self.image_matcher
+            image_matcher=self.image_matcher,
+            similarity_threshold=config['MATCHING'].get('TEXT_SIMILARITY_THRESHOLD', 0.75)
         )
         
         # Get scraping settings

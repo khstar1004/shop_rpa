@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from utils.caching import FileCache
 
 class ExtractionStrategy(ABC):
     """추출 전략 인터페이스"""
@@ -127,11 +128,13 @@ class CoordinateExtractionStrategy(ExtractionStrategy):
 class BaseMultiLayerScraper:
     """다중 레이어 추출 엔진을 구현한 기본 스크래퍼 클래스"""
     
-    def __init__(self, max_retries: int = 3, timeout: int = 30, cache=None):
+    def __init__(self, max_retries: int = 3, timeout: int = 30, cache: Optional[FileCache] = None):
+        self.logger = logging.getLogger(__name__)
         self.max_retries = max_retries
         self.timeout = timeout
         self.cache = cache
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.sparse_data = {}
+        self.sparse_data_ttl = {}
         
         # 추출 전략 등록
         self.extraction_strategies = [
@@ -145,9 +148,6 @@ class BaseMultiLayerScraper:
         
         # 현재 활성 작업 추적
         self.active_tasks = set()
-        
-        # 메모리 최적화를 위한 희소 데이터 구조
-        self._sparse_data_store = {}
     
     def extract(self, source, selector, **kwargs):
         """다중 레이어 추출 시스템으로 데이터 추출"""
@@ -232,21 +232,21 @@ class BaseMultiLayerScraper:
     def add_sparse_data(self, key, value, ttl=None):
         """희소 데이터 구조에 데이터 추가"""
         expire_time = time.time() + ttl if ttl else None
-        self._sparse_data_store[key] = {
+        self.sparse_data[key] = {
             'value': value,
             'expire_at': expire_time
         }
     
     def get_sparse_data(self, key):
         """희소 데이터 구조에서 데이터 가져오기"""
-        if key not in self._sparse_data_store:
+        if key not in self.sparse_data:
             return None
             
-        data = self._sparse_data_store[key]
+        data = self.sparse_data[key]
         
         # TTL 확인
         if data['expire_at'] and time.time() > data['expire_at']:
-            del self._sparse_data_store[key]
+            del self.sparse_data[key]
             return None
             
         return data['value']
@@ -255,12 +255,12 @@ class BaseMultiLayerScraper:
         """만료된 희소 데이터 정리"""
         current_time = time.time()
         keys_to_remove = [
-            key for key, data in self._sparse_data_store.items()
+            key for key, data in self.sparse_data.items()
             if data['expire_at'] and current_time > data['expire_at']
         ]
         
         for key in keys_to_remove:
-            del self._sparse_data_store[key]
+            del self.sparse_data[key]
     
     def shutdown(self):
         """자원 정리"""

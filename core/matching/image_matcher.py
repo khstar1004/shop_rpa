@@ -16,9 +16,10 @@ from efficientnet_pytorch import EfficientNet
 from torchvision import transforms
 
 class ImageMatcher:
-    def __init__(self, cache: Optional[FileCache] = None):
+    def __init__(self, cache: Optional[FileCache] = None, similarity_threshold: float = 0.8):
         self.logger = logging.getLogger(__name__)
         self.cache = cache
+        self.similarity_threshold = similarity_threshold
         
         # Initialize EfficientNet model
         self.model = EfficientNet.from_pretrained('efficientnet-b0')
