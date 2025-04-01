@@ -252,6 +252,20 @@ class MainWindow(QMainWindow):
             self.auto_save_timer.timeout.connect(self.auto_save)
             self.auto_save_timer.start(self.config['GUI']['AUTO_SAVE_INTERVAL'] * 1000)
 
+    def _setup_gui_logging(self):
+        """Setup GUI logging handler"""
+        # Create and configure GUI log handler
+        gui_handler = GUILogHandler(self.log_area)
+        gui_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        
+        # Add handler to root logger
+        root_logger = logging.getLogger()
+        root_logger.addHandler(gui_handler)
+        
+        # Set log level based on config
+        log_level = getattr(logging, self.config['GUI'].get('LOG_LEVEL', 'INFO').upper())
+        root_logger.setLevel(log_level)
+
     def auto_save(self):
         """Auto-save current state"""
         if self.input_file and self.processing_thread and self.processing_thread.isRunning():
