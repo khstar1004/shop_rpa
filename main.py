@@ -1,5 +1,6 @@
 import sys
 import os
+import argparse
 from PyQt5.QtWidgets import QApplication
 from gui.main_window import MainWindow
 from utils.config import load_config
@@ -7,9 +8,21 @@ from utils.preprocessing import setup_logging
 import logging
 
 def main():
+    # 명령줄 인자 처리
+    parser = argparse.ArgumentParser(description="쇼핑 자동화 프로그램")
+    parser.add_argument("--use_proxies", action="store_true", help="프록시 사용 여부")
+    args = parser.parse_args()
+    
     # Load configuration first to get paths
     try:
         config = load_config()
+        
+        # 명령줄 인자로 설정 값 업데이트
+        if args.use_proxies:
+            if 'NETWORK' not in config:
+                config['NETWORK'] = {}
+            config['NETWORK']['USE_PROXIES'] = 'True'
+            
     except FileNotFoundError as e:
         print(f"오류: 설정 파일(config.ini)을 찾을 수 없습니다. {e}", file=sys.stderr)
         # Optionally create a default config here or exit
@@ -36,6 +49,10 @@ def main():
     setup_logging(log_dir=log_dir)
     logger = logging.getLogger(__name__)
     logger.info("애플리케이션 시작")
+    
+    # 프록시 사용 여부 로깅
+    if args.use_proxies:
+        logger.info("프록시 사용 모드로 실행됩니다.")
     
     try:
         # Initialize and run GUI application

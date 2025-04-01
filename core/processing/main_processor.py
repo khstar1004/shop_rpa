@@ -72,10 +72,17 @@ class ProductProcessor:
             timeout=self.config['PROCESSING'].get('REQUEST_TIMEOUT', 30)
         )
         
+        # 프록시 사용 여부 확인
+        use_proxies = False
+        if 'NETWORK' in self.config and self.config['NETWORK'].get('USE_PROXIES') == 'True':
+            use_proxies = True
+            self.logger.info("프록시 사용 모드로 네이버 크롤러를 초기화합니다.")
+            
         self.naver_crawler = NaverShoppingCrawler(
             max_retries=self.config['PROCESSING']['MAX_RETRIES'],
             cache=self.cache,
-            timeout=self.config['PROCESSING'].get('REQUEST_TIMEOUT', 30)
+            timeout=self.config['PROCESSING'].get('REQUEST_TIMEOUT', 30),
+            use_proxies=use_proxies
         )
         
         # 스크래퍼 설정 적용

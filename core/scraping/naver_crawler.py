@@ -10,10 +10,19 @@ from datetime import datetime
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
+import random
 
 from ..data_models import Product
 from utils.caching import FileCache, cache_result
 from . import BaseMultiLayerScraper, DOMExtractionStrategy, TextExtractionStrategy
+
+# 무료 프록시 서비스 목록 (필요에 따라 업데이트 필요)
+FREE_PROXIES = [
+    # 실제 프로젝트에서는 유료 프록시 서비스나 프록시 풀을 사용하는 것이 좋습니다
+    # 아래는 예시일 뿐이므로 실제 작동하는 프록시로 교체해야 합니다
+    # "http://1.2.3.4:8080",
+    # "http://5.6.7.8:8080"
+]
 
 class NaverShoppingCrawler(BaseMultiLayerScraper):
     """
@@ -26,8 +35,13 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
     - 선택적 요소 관찰
     """
     
-    def __init__(self, max_retries: int = 3, cache: Optional[FileCache] = None, timeout: int = 30):
+    def __init__(self, max_retries: int = 3, cache: Optional[FileCache] = None, timeout: int = 30, use_proxies: bool = False):
         super().__init__(max_retries=max_retries, cache=cache, timeout=timeout)
+        
+        # 프록시 사용 설정
+        self.use_proxies = use_proxies
+        self.proxies = FREE_PROXIES
+        self.current_proxy_index = 0
         
         # Define promotional site keywords
         self.promo_keywords = [
@@ -47,8 +61,18 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         ]
         
         self.base_url = "https://search.shopping.naver.com/search/all"
+        
+        # 다양한 사용자 에이전트를 추가하여 차단 방지
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Safari/605.1.15",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
+        ]
+        
+        # 기본 헤더 설정
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
             "Accept-Encoding": "gzip, deflate, br",
@@ -216,8 +240,10 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
                     products = products[:max_items]
                     break
                 
-                # Politeness delay between pages
-                await asyncio.sleep(1.0)
+                # 페이지 간 지연 시간 증가 (차단 방지)
+                wait_time = 3.0 + random.uniform(2.0, 5.0)
+                self.logger.debug(f"Waiting {wait_time:.2f} seconds before fetching next page")
+                await asyncio.sleep(wait_time)
             
             if not products:
                 self.logger.info(f"No products found for '{query}' on Naver Shopping")
@@ -259,69 +285,115 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         
         # Make async HTTP request
         loop = asyncio.get_running_loop()
-        try:
-            # requests는 동기식이므로 ThreadPoolExecutor를 사용해 비동기로 변환
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: requests.get(url, headers=self.headers, timeout=self.timeout)
-            )
-            
-            if response.status_code != 200:
-                self.logger.error(f"Error fetching page {page} for query '{query}': HTTP {response.status_code}")
-                return []
-            
-            # 다중 추출 전략 활용
-            # 1. JSON 데이터 추출 시도 (최신 네이버 쇼핑은 JSON 데이터를 사용)
-            json_data = self.extract(response.text, self.patterns['json_data'], path='props.pageProps.initialState.products.list')
-            
-            if json_data and isinstance(json_data, list):
-                # JSON 데이터에서 제품 추출
-                items = []
-                for item in json_data:
-                    try:
-                        product_data = self._extract_from_json(item)
-                        if product_data:
-                            items.append(product_data)
-                    except Exception as e:
-                        self.logger.warning(f"Error parsing JSON product: {str(e)}")
-                        continue
-                        
-                # 캐시에 저장
-                if items:
-                    self.add_sparse_data(cache_key, items, ttl=3600)  # 1시간 캐싱
+        retry_count = 0
+        max_retries = self.max_retries
+        retry_delay = 2.0  # 초기 재시도 지연 시간
+        
+        while retry_count <= max_retries:
+            try:
+                # 매 요청마다 다른 사용자 에이전트 사용
+                current_headers = self.headers.copy()
+                current_headers["User-Agent"] = random.choice(self.user_agents)
                 
-                return items
-            
-            # 2. 실패하면 전통적인 HTML 파싱
-            soup = BeautifulSoup(response.text, 'lxml')
-            
-            # 다중 레이어 추출 활용
-            product_elements = self.extract(soup, self.selectors['product_list']['selector'], 
-                                           **self.selectors['product_list']['options'])
-            
-            if not product_elements:
-                self.logger.warning(f"No product elements found on page {page} for query '{query}'")
-                return []
-            
+                # 프록시 설정 (사용하는 경우)
+                proxy = None
+                if self.use_proxies and self.proxies:
+                    # 순차적으로 프록시 변경
+                    proxy = self.proxies[self.current_proxy_index % len(self.proxies)]
+                    self.current_proxy_index += 1
+                    self.logger.debug(f"Using proxy: {proxy}")
+                
+                # requests는 동기식이므로 ThreadPoolExecutor를 사용해 비동기로 변환
+                response = await loop.run_in_executor(
+                    self.executor,
+                    lambda: requests.get(
+                        url, 
+                        headers=current_headers, 
+                        timeout=self.timeout,
+                        proxies={"http": proxy, "https": proxy} if proxy else None
+                    )
+                )
+                
+                # 418 또는 기타 오류 상태 코드 처리
+                if response.status_code == 418:
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        # 지수 백오프로 대기 시간 증가 (차단 우회를 위해)
+                        wait_time = retry_delay * (2 ** (retry_count - 1)) + random.uniform(1, 5)
+                        self.logger.warning(f"Received 418 status code. Retrying in {wait_time:.2f} seconds (attempt {retry_count}/{max_retries})")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        self.logger.error(f"Error fetching page {page} for query '{query}': HTTP 418 (I'm a teapot) - Bot detection triggered")
+                        return []
+                
+                elif response.status_code != 200:
+                    self.logger.error(f"Error fetching page {page} for query '{query}': HTTP {response.status_code}")
+                    return []
+                
+                # 요청 성공 처리
+                break
+                
+            except Exception as e:
+                retry_count += 1
+                if retry_count <= max_retries:
+                    # 지수 백오프로 대기 시간 증가
+                    wait_time = retry_delay * (2 ** (retry_count - 1)) + random.uniform(1, 3)
+                    self.logger.warning(f"Error during request: {str(e)}. Retrying in {wait_time:.2f} seconds (attempt {retry_count}/{max_retries})")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    self.logger.error(f"Error crawling Naver Shopping page {page} for '{query}' after {max_retries} retries: {str(e)}")
+                    return []
+
+        # 다중 추출 전략 활용
+        # 1. JSON 데이터 추출 시도 (최신 네이버 쇼핑은 JSON 데이터를 사용)
+        json_data = self.extract(response.text, self.patterns['json_data'], path='props.pageProps.initialState.products.list')
+        
+        if json_data and isinstance(json_data, list):
+            # JSON 데이터에서 제품 추출
             items = []
-            for element in product_elements:
+            for item in json_data:
                 try:
-                    product_data = self._extract_product_data(element)
+                    product_data = self._extract_from_json(item)
                     if product_data:
                         items.append(product_data)
                 except Exception as e:
-                    self.logger.warning(f"Error parsing product element: {str(e)}")
+                    self.logger.warning(f"Error parsing JSON product: {str(e)}")
                     continue
-            
+                
             # 캐시에 저장
             if items:
                 self.add_sparse_data(cache_key, items, ttl=3600)  # 1시간 캐싱
             
             return items
-            
-        except Exception as e:
-            self.logger.error(f"Error crawling Naver Shopping page {page} for '{query}': {str(e)}")
+        
+        # 2. 실패하면 전통적인 HTML 파싱
+        soup = BeautifulSoup(response.text, 'lxml')
+        
+        # 다중 레이어 추출 활용
+        product_elements = self.extract(soup, self.selectors['product_list']['selector'], 
+                                       **self.selectors['product_list']['options'])
+        
+        if not product_elements:
+            self.logger.warning(f"No product elements found on page {page} for query '{query}'")
             return []
+        
+        items = []
+        for element in product_elements:
+            try:
+                product_data = self._extract_product_data(element)
+                if product_data:
+                    items.append(product_data)
+            except Exception as e:
+                self.logger.warning(f"Error parsing product element: {str(e)}")
+                continue
+        
+        # 캐시에 저장
+        if items:
+            self.add_sparse_data(cache_key, items, ttl=3600)  # 1시간 캐싱
+        
+        return items
     
     def _extract_from_json(self, item: Dict) -> Dict:
         """JSON 데이터에서 제품 정보 추출"""
