@@ -275,23 +275,58 @@ class ExcelManager:
                     for key, value in source_data.items():
                         row[key] = value
                     
+                    # 기본 데이터 설정 (원본 데이터가 없는 경우를 대비)
+                    if '기본수량(3)' not in row and '기본수량' in source_data:
+                        row['기본수량(3)'] = source_data.get('기본수량', 0)
+                    
+                    if '본사 이미지' not in row and result.source_product.image_url:
+                        row['본사 이미지'] = result.source_product.image_url
+                        
+                    if '본사상품링크' not in row and result.source_product.url:
+                        row['본사상품링크'] = result.source_product.url
+                    
                     # 고려기프트 매칭 데이터 추가
                     if hasattr(result, 'best_koryo_match') and result.best_koryo_match:
-                        row['판매단가(V포함)(2)'] = result.best_koryo_match.matched_product.price
-                        row['가격차이(2)'] = result.best_koryo_match.price_difference
-                        row['가격차이(2)%'] = result.best_koryo_match.price_difference_percent
+                        row['판매단가(V포함)(3)'] = result.best_koryo_match.matched_product.price
+                        row['가격차이(3)'] = result.best_koryo_match.price_difference
+                        row['가격차이(3)%'] = result.best_koryo_match.price_difference_percent
                         row['고려기프트 이미지'] = result.best_koryo_match.matched_product.image_url
-                        row['고려기프트상품링크'] = result.best_koryo_match.matched_product.url
+                        row['고려기프트 상품링크'] = result.best_koryo_match.matched_product.url
                     
                     # 네이버 매칭 데이터 추가
                     if hasattr(result, 'best_naver_match') and result.best_naver_match:
-                        row['판매단가(V포함)(3)'] = result.best_naver_match.matched_product.price
-                        row['가격차이(3)'] = result.best_naver_match.price_difference
-                        row['가격차이(3)%'] = result.best_naver_match.price_difference_percent
-                        row['네이버 이미지'] = result.best_naver_match.matched_product.image_url
-                        row['네이버쇼핑 링크'] = result.best_naver_match.matched_product.url
+                        # 공급사 정보
                         if hasattr(result.best_naver_match.matched_product, 'brand'):
                             row['공급사명'] = result.best_naver_match.matched_product.brand
+                        
+                        # 가격 정보
+                        if '판매단가(V포함)(3)' not in row or not row['판매단가(V포함)(3)']:
+                            row['판매단가(V포함)(3)'] = result.best_naver_match.matched_product.price
+                            row['가격차이(3)'] = result.best_naver_match.price_difference
+                            row['가격차이(3)%'] = result.best_naver_match.price_difference_percent
+                        
+                        # 이미지 및 링크 정보
+                        row['네이버 이미지'] = result.best_naver_match.matched_product.image_url
+                        row['네이버 쇼핑 링크'] = result.best_naver_match.matched_product.url
+                        row['공급사 상품링크'] = result.best_naver_match.matched_product.url
+                    
+                    # 빈 필드에 기본값 설정
+                    required_fields = [
+                        '고려기프트 상품링크', '기본수량(3)', '판매단가(V포함)(3)', 
+                        '가격차이(3)', '가격차이(3)%', '공급사명', '네이버 쇼핑 링크', 
+                        '공급사 상품링크', '본사 이미지', '고려기프트 이미지', '네이버 이미지'
+                    ]
+                    
+                    for field in required_fields:
+                        if field not in row or pd.isna(row[field]) or row[field] == '':
+                            if '단가' in field or '가격' in field:
+                                row[field] = 0
+                            elif '이미지' in field or '링크' in field:
+                                row[field] = ''
+                            elif '기본수량' in field:
+                                row[field] = 0
+                            elif '공급사명' in field:
+                                row[field] = ''
                     
                     report_data.append(row)
             

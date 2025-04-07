@@ -395,11 +395,22 @@ class ProductProcessor:
             matched_product.name
         )
         
-        # 이미지 유사도
-        image_sim = self.image_matcher.calculate_similarity(
-            source_product.original_input_data.get('본사 이미지', ''),  # 원본 이미지 URL
-            matched_product.image_url
-        )
+        # 이미지 유사도 계산 개선
+        # 소스 이미지 URL 확인
+        source_image_url = source_product.original_input_data.get('본사 이미지', '')
+        if not source_image_url and source_product.image_url:
+            source_image_url = source_product.image_url
+            
+        # 매치된 이미지 URL 확인
+        match_image_url = matched_product.image_url or ''
+        
+        # 이미지 유사도 계산
+        image_sim = 0.0  # 기본값
+        if source_image_url and match_image_url:
+            self.logger.debug(f"Calculating image similarity between: {source_image_url} and {match_image_url}")
+            image_sim = self.image_matcher.calculate_similarity(source_image_url, match_image_url)
+        else:
+            self.logger.warning(f"Missing image URL for similarity calculation: source={bool(source_image_url)}, match={bool(match_image_url)}")
         
         # 통합 유사도
         combined_sim = self.multimodal_matcher.calculate_similarity(

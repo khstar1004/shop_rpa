@@ -4,46 +4,47 @@ import logging
 import requests
 import hashlib
 from typing import List, Dict, Optional, Any, Union, Tuple
-from bs4 import BeautifulSoup
-import urllib.parse
 from datetime import datetime
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
 import random
+import urllib.parse
 
 from ..data_models import Product
 from utils.caching import FileCache, cache_result
-from . import BaseMultiLayerScraper, DOMExtractionStrategy, TextExtractionStrategy
+from . import BaseMultiLayerScraper
 
-# 무료 프록시 서비스 목록 (필요에 따라 업데이트 필요)
-FREE_PROXIES = [
-    # 실제 프로젝트에서는 유료 프록시 서비스나 프록시 풀을 사용하는 것이 좋습니다
-    # 아래는 예시일 뿐이므로 실제 작동하는 프록시로 교체해야 합니다
-    # "http://1.2.3.4:8080",
-    # "http://5.6.7.8:8080"
-]
-
-class NaverShoppingCrawler(BaseMultiLayerScraper):
+class NaverShoppingAPI(BaseMultiLayerScraper):
     """
-    네이버 쇼핑 크롤러 - 다중 레이어 추출 엔진 활용
+    네이버 쇼핑 API - 공식 API 활용 엔진
     
     특징:
-    - DOM, 텍스트, 좌표 기반 추출 전략
+    - 네이버 검색 API 활용
     - 비동기 작업 처리
     - 메모리 효율적 데이터 구조
-    - 선택적 요소 관찰
+    - 캐싱 지원
     """
     
-    def __init__(self, max_retries: int = 3, cache: Optional[FileCache] = None, timeout: int = 30, use_proxies: bool = False):
+    def __init__(self, client_id: str, client_secret: str, max_retries: int = 3, 
+                 cache: Optional[FileCache] = None, timeout: int = 30):
         super().__init__(max_retries=max_retries, cache=cache, timeout=timeout)
         
-        # 프록시 사용 설정
-        self.use_proxies = use_proxies
-        self.proxies = FREE_PROXIES
-        self.current_proxy_index = 0
+        # 네이버 API 인증 정보
+        self.client_id = client_id
+        self.client_secret = client_secret
         
-        # Define promotional site keywords
+        # API 기본 URL 및 설정
+        self.api_url = "https://openapi.naver.com/v1/search/shop.json"
+        
+        # 기본 헤더 설정
+        self.headers = {
+            "X-Naver-Client-Id": self.client_id,
+            "X-Naver-Client-Secret": self.client_secret,
+            "Accept": "application/json"
+        }
+        
+        # Define promotional site keywords (기존 코드에서 유지)
         self.promo_keywords = [
             "온오프마켓", "답례품", "기프트", "판촉", "기념품", 
             "인쇄", "각인", "제작", "홍보", "미스터몽키", "호갱탈출",
@@ -52,86 +53,13 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
             "기업답례품", "행사답례품", "기념품제작", "기업기념품"
         ]
         
-        # Define promotional product categories
+        # Define promotional product categories (기존 코드에서 유지)
         self.promo_categories = [
             "기업선물", "단체선물", "행사용품", "홍보물", "기업홍보",
             "로고인쇄", "로고각인", "로고제작", "기업답례품", "행사답례품",
             "기념품제작", "기업기념품", "기업홍보물", "기업홍보물제작",
             "기업홍보물인쇄", "기업홍보물각인", "기업홍보물제작"
         ]
-        
-        self.base_url = "https://search.shopping.naver.com/search/all"
-        
-        # 다양한 사용자 에이전트를 추가하여 차단 방지
-        self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Safari/605.1.15",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
-        ]
-        
-        # 기본 헤더 설정
-        self.headers = {
-            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Referer": "https://search.shopping.naver.com/",
-            "sec-ch-ua": '"Not A(Brand";v="99", "Google Chrome";v="91", "Chromium";v="91"',
-            "sec-ch-ua-mobile": "?0",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-            "Upgrade-Insecure-Requests": "1"
-        }
-        
-        # Define extraction selectors - structured for multi-layer approach
-        self.selectors = {
-            'product_list': {
-                'selector': 'div.basicList_item_inner__eY_mq',
-                'options': {'multiple': True}
-            },
-            'product_title': {
-                'selector': 'div.basicList_title__3P9Q7 a',
-                'options': {'multiple': False}
-            },
-            'product_link': {
-                'selector': 'div.basicList_title__3P9Q7 a',
-                'options': {'attribute': 'href'}
-            },
-            'mall_name': {
-                'selector': 'div.basicList_mall__1bQqQ a',
-                'options': {'multiple': False}
-            },
-            'price': {
-                'selector': 'div.basicList_price_box__1Hr7h span.price_num__2WUXn',
-                'options': {'multiple': False}
-            },
-            'price_unit': {
-                'selector': 'span.price_unit__BWL2W',
-                'options': {'multiple': False}
-            },
-            'next_page': {
-                'selector': 'a.pagination_next__3msKY',
-                'options': {'attribute': 'href'}
-            },
-            'related_keywords': {
-                'selector': 'div.relatedKeyword_related_keyword__Hph8J li button span.relatedKeyword_text__47X1f',
-                'options': {'multiple': True}
-            }
-        }
-        
-        # 텍스트 추출용 정규식 패턴
-        self.patterns = {
-            'json_data': re.compile(r'window\.__PRELOADED_STATE__\s*=\s*({.*?});', re.DOTALL),
-            'price_number': re.compile(r'[\d,]+'),
-            'quantity': re.compile(r'(\d+)(개|세트|묶음)')
-        }
-        
-        # 추출 전략 커스터마이징
-        self._customize_extraction_strategies()
         
         # Setup logging
         self.logger = logging.getLogger(__name__)
@@ -143,35 +71,9 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         self.min_price_diff_percent = 10  # 매뉴얼 요구사항: 10% 이하 가격차이 제품 제외
         
         self.max_pages = 3  # 매뉴얼 요구사항: 최대 3페이지까지만 탐색
-    
-    def _customize_extraction_strategies(self):
-        """특화된 추출 전략으로 기본 전략 확장"""
-        # JSON 데이터 추출 전략 추가 (네이버 쇼핑 특화)
-        class NaverJsonExtractionStrategy(TextExtractionStrategy):
-            def extract(self, source, selector, **kwargs):
-                if isinstance(selector, re.Pattern):
-                    matches = selector.findall(source)
-                    if matches:
-                        try:
-                            json_str = matches[0]
-                            json_data = json.loads(json_str)
-                            
-                            # 특정 데이터 접근 경로가 있는 경우
-                            if 'path' in kwargs:
-                                path = kwargs['path'].split('.')
-                                for key in path:
-                                    if key.isdigit():
-                                        json_data = json_data[int(key)]
-                                    else:
-                                        json_data = json_data.get(key, {})
-                            return json_data
-                        except (json.JSONDecodeError, IndexError, KeyError) as e:
-                            logging.debug(f"JSON extraction failed: {str(e)}")
-                            return None
-                return super().extract(source, selector, **kwargs)
         
-        # 전략 추가
-        self.extraction_strategies.insert(0, NaverJsonExtractionStrategy())
+        # 결과 개수 설정 (최대 100)
+        self.display = 100
     
     def search_product(self, query: str, max_items: int = 50, reference_price: float = 0) -> List[Product]:
         """
@@ -186,7 +88,7 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
             List[Product]: 검색된 제품 목록
         """
         if self.cache:
-            @cache_result(self.cache, key_prefix="naver_search")
+            @cache_result(self.cache, key_prefix="naver_api_search")
             def cached_search(q, m, p):
                 return self._search_product_logic(q, m, p)
             return cached_search(query, max_items, reference_price)
@@ -194,7 +96,7 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
             return self._search_product_logic(query, max_items, reference_price)
     
     def _search_product_logic(self, query: str, max_items: int = 50, reference_price: float = 0) -> List[Product]:
-        """네이버 쇼핑 검색 핵심 로직"""
+        """네이버 쇼핑 API 검색 핵심 로직"""
         # 비동기 함수를 동기적으로 실행
         return asyncio.run(self._search_product_async(query, max_items, reference_price))
     
@@ -203,14 +105,14 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         products = []
         
         try:
-            self.logger.info(f"Searching Naver Shopping for '{query}'")
+            self.logger.info(f"Searching Naver Shopping API for '{query}'")
             
             # 낮은 가격순 정렬 적용 (매뉴얼 요구사항)
-            sort_param = "price_asc"
+            sort = "asc"  # 가격 오름차순
             
             # 최대 3페이지까지 검색 (매뉴얼 요구사항)
             for page in range(1, self.max_pages + 1):
-                page_products = await self._crawl_page_async(query, page, sort_param)
+                page_products = await self._fetch_api_results(query, page, sort)
                 
                 if not page_products:
                     break
@@ -240,15 +142,15 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
                     products = products[:max_items]
                     break
                 
-                # 페이지 간 지연 시간 증가 (차단 방지)
-                wait_time = 3.0 + random.uniform(2.0, 5.0)
+                # 페이지 간 지연 시간 (API 호출 제한 고려)
+                wait_time = 0.5 + random.uniform(0.2, 0.5)
                 self.logger.debug(f"Waiting {wait_time:.2f} seconds before fetching next page")
                 await asyncio.sleep(wait_time)
             
             if not products:
-                self.logger.info(f"No products found for '{query}' on Naver Shopping")
+                self.logger.info(f"No products found for '{query}' on Naver Shopping API")
             else:
-                self.logger.info(f"Found {len(products)} products for '{query}' on Naver Shopping")
+                self.logger.info(f"Found {len(products)} products for '{query}' on Naver Shopping API")
             
             # 매뉴얼 요구사항: 찾지 못하면 "동일상품 없음"으로 처리
             if not products:
@@ -266,213 +168,154 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
             return products
             
         except Exception as e:
-            self.logger.error(f"Error searching Naver Shopping for '{query}': {str(e)}", exc_info=True)
+            self.logger.error(f"Error searching Naver Shopping API for '{query}': {str(e)}", exc_info=True)
             return []
     
-    async def _crawl_page_async(self, query: str, page: int, sort: str = "price_asc") -> List[Product]:
-        """비동기 방식으로 페이지 크롤링"""
+    async def _fetch_api_results(self, query: str, page: int, sort: str = "asc") -> List[Product]:
+        """네이버 쇼핑 API 호출하여 결과 가져오기"""
         # Create cache key for this query and page
-        cache_key = f"naver_page|{query}|{page}|{sort}"
+        cache_key = f"naver_api|{query}|{page}|{sort}"
         cached_result = self.get_sparse_data(cache_key)
         if cached_result:
             return cached_result
         
-        # Encode query for URL
-        encoded_query = urllib.parse.quote(query)
-        url = f"{self.base_url}?query={encoded_query}&pagingIndex={page}&sort={sort}"
+        # API 요청 파라미터 설정
+        params = {
+            "query": query,
+            "display": self.display,  # 한 페이지당 결과 수 (최대 100)
+            "start": (page - 1) * self.display + 1,  # 페이지 시작점
+            "sort": sort,  # 정렬 (asc: 가격 오름차순)
+            "filter": "naverpay",  # 네이버페이 연동 상품만 (선택적)
+            "exclude": "used:rental"  # 중고, 렌탈 제외
+        }
         
-        self.logger.debug(f"Crawling Naver Shopping page {page} for '{query}'")
-        
-        # Make async HTTP request
         loop = asyncio.get_running_loop()
         retry_count = 0
         max_retries = self.max_retries
-        retry_delay = 2.0  # 초기 재시도 지연 시간
+        retry_delay = 1.0
         
         while retry_count <= max_retries:
             try:
-                # 매 요청마다 다른 사용자 에이전트 사용
-                current_headers = self.headers.copy()
-                current_headers["User-Agent"] = random.choice(self.user_agents)
-                
-                # 프록시 설정 (사용하는 경우)
-                proxy = None
-                if self.use_proxies and self.proxies:
-                    # 순차적으로 프록시 변경
-                    proxy = self.proxies[self.current_proxy_index % len(self.proxies)]
-                    self.current_proxy_index += 1
-                    self.logger.debug(f"Using proxy: {proxy}")
-                
-                # requests는 동기식이므로 ThreadPoolExecutor를 사용해 비동기로 변환
+                # API 요청 실행
                 response = await loop.run_in_executor(
                     self.executor,
                     lambda: requests.get(
-                        url, 
-                        headers=current_headers, 
-                        timeout=self.timeout,
-                        proxies={"http": proxy, "https": proxy} if proxy else None
+                        self.api_url, 
+                        headers=self.headers, 
+                        params=params,
+                        timeout=self.timeout
                     )
                 )
                 
-                # 418 또는 기타 오류 상태 코드 처리
-                if response.status_code == 418:
+                # 더 자세한 응답 로깅 추가
+                self.logger.debug(f"API 요청: {self.api_url}")
+                self.logger.debug(f"헤더: {self.headers}")
+                self.logger.debug(f"파라미터: {params}")
+                self.logger.info(f"응답 상태 코드: {response.status_code}")
+                
+                # 응답 내용 전체 로깅 (디버깅용)
+                response_text = response.text
+                self.logger.info(f"응답 내용: {response_text[:200]}...")  # 응답의 처음 200자만 로그에 출력
+                
+                # 응답 상태 코드 확인
+                if response.status_code == 429:  # Too Many Requests
                     retry_count += 1
-                    if retry_count <= max_retries:
-                        # 지수 백오프로 대기 시간 증가 (차단 우회를 위해)
-                        wait_time = retry_delay * (2 ** (retry_count - 1)) + random.uniform(1, 5)
-                        self.logger.warning(f"Received 418 status code. Retrying in {wait_time:.2f} seconds (attempt {retry_count}/{max_retries})")
-                        await asyncio.sleep(wait_time)
-                        continue
-                    else:
-                        self.logger.error(f"Error fetching page {page} for query '{query}': HTTP 418 (I'm a teapot) - Bot detection triggered")
-                        return []
+                    wait_time = retry_delay * (2 ** (retry_count - 1))
+                    self.logger.warning(f"Rate limit exceeded. Retrying in {wait_time} seconds (attempt {retry_count}/{max_retries})")
+                    await asyncio.sleep(wait_time)
+                    continue
                 
                 elif response.status_code != 200:
-                    self.logger.error(f"Error fetching page {page} for query '{query}': HTTP {response.status_code}")
+                    self.logger.error(f"API request failed with status code {response.status_code}: {response.text}")
                     return []
                 
-                # 요청 성공 처리
-                break
+                # JSON 응답 파싱
+                data = response.json()
+                
+                # 검색 결과가 없는 경우
+                if data.get('total', 0) == 0 or not data.get('items'):
+                    self.logger.info(f"No results found for '{query}' on page {page}")
+                    return []
+                
+                # 결과 요약 로깅
+                self.logger.info(f"총 검색 결과: {data.get('total', 0)}개, 현재 페이지 아이템: {len(data.get('items', []))}개")
+                
+                # 제품 데이터 변환
+                products = []
+                for item in data.get('items', []):
+                    product = await self._convert_api_item_to_product(item, query)
+                    if product:
+                        products.append(product)
+                
+                # 캐시에 저장
+                if products:
+                    self.add_sparse_data(cache_key, products, ttl=3600)  # 1시간 캐싱
+                
+                return products
                 
             except Exception as e:
                 retry_count += 1
                 if retry_count <= max_retries:
-                    # 지수 백오프로 대기 시간 증가
-                    wait_time = retry_delay * (2 ** (retry_count - 1)) + random.uniform(1, 3)
-                    self.logger.warning(f"Error during request: {str(e)}. Retrying in {wait_time:.2f} seconds (attempt {retry_count}/{max_retries})")
+                    wait_time = retry_delay * (2 ** (retry_count - 1))
+                    self.logger.warning(f"Error during API request: {str(e)}. Retrying in {wait_time} seconds (attempt {retry_count}/{max_retries})")
                     await asyncio.sleep(wait_time)
-                    continue
                 else:
-                    self.logger.error(f"Error crawling Naver Shopping page {page} for '{query}' after {max_retries} retries: {str(e)}")
+                    self.logger.error(f"Failed to fetch API results after {max_retries} retries: {str(e)}")
                     return []
-
-        # 다중 추출 전략 활용
-        # 1. JSON 데이터 추출 시도 (최신 네이버 쇼핑은 JSON 데이터를 사용)
-        json_data = self.extract(response.text, self.patterns['json_data'], path='props.pageProps.initialState.products.list')
         
-        if json_data and isinstance(json_data, list):
-            # JSON 데이터에서 제품 추출
-            items = []
-            for item in json_data:
-                try:
-                    product_data = self._extract_from_json(item)
-                    if product_data:
-                        items.append(product_data)
-                except Exception as e:
-                    self.logger.warning(f"Error parsing JSON product: {str(e)}")
-                    continue
-                
-            # 캐시에 저장
-            if items:
-                self.add_sparse_data(cache_key, items, ttl=3600)  # 1시간 캐싱
-            
-            return items
-        
-        # 2. 실패하면 전통적인 HTML 파싱
-        soup = BeautifulSoup(response.text, 'lxml')
-        
-        # 다중 레이어 추출 활용
-        product_elements = self.extract(soup, self.selectors['product_list']['selector'], 
-                                       **self.selectors['product_list']['options'])
-        
-        if not product_elements:
-            self.logger.warning(f"No product elements found on page {page} for query '{query}'")
-            return []
-        
-        items = []
-        for element in product_elements:
-            try:
-                product_data = self._extract_product_data(element)
-                if product_data:
-                    items.append(product_data)
-            except Exception as e:
-                self.logger.warning(f"Error parsing product element: {str(e)}")
-                continue
-        
-        # 캐시에 저장
-        if items:
-            self.add_sparse_data(cache_key, items, ttl=3600)  # 1시간 캐싱
-        
-        return items
+        return []
     
-    def _extract_from_json(self, item: Dict) -> Dict:
-        """JSON 데이터에서 제품 정보 추출"""
+    async def _convert_api_item_to_product(self, item: Dict, query: str) -> Optional[Product]:
+        """API 응답 아이템을 Product 객체로 변환"""
         try:
-            product_data = {
-                'title': item.get('productTitle', ''),
-                'link': item.get('mallProductUrl', ''),
-                'image': item.get('imageUrl', ''),
-                'price': item.get('price', {}).get('value', 0),
-                'mall_name': item.get('mallName', ''),
-                'category': item.get('category1Name', ''),
-                'product_id': item.get('id', ''),
-                'is_promotional': False
-            }
+            # HTML 태그 제거
+            title = re.sub(r'<[^>]+>', '', item.get('title', ''))
             
-            # 홍보성 제품 여부 검사
-            product_data['is_promotional'] = self._is_promotional_product(
-                product_data['title'], 
-                product_data['mall_name'],
-                product_data['category']
-            )
+            # 가격 추출
+            price = int(item.get('lprice', 0))
             
-            return product_data
-        except Exception as e:
-            self.logger.warning(f"Error extracting JSON product data: {str(e)}")
-            return {}
-    
-    def _extract_product_data(self, element) -> Dict:
-        """HTML 요소에서 제품 정보 추출"""
-        try:
-            # 다중 레이어 추출을 통한 제품 정보 추출
-            title_element = self.extract(element, self.selectors['product_title']['selector'])
-            title = title_element.text.strip() if title_element else ""
-            
-            link_element = self.extract(element, self.selectors['product_link']['selector'])
-            link = link_element.get('href') if link_element else ""
-            
-            price_element = self.extract(element, self.selectors['price']['selector'])
-            price_text = price_element.text.strip() if price_element else "0"
-            price = int(re.sub(r'[^\d]', '', price_text)) if price_text else 0
-            
-            mall_element = self.extract(element, self.selectors['mall_name']['selector'])
-            mall_name = mall_element.text.strip() if mall_element else ""
-            
-            # 이미지 URL은 다양한 속성에 저장될 수 있음
-            image = ""
-            img_element = element.select_one('img')
-            if img_element:
-                image = img_element.get('src', '')
-                if not image:
-                    image = img_element.get('data-src', '')
+            # 제품 ID 생성
+            product_id = item.get('productId', '') or hashlib.md5(item.get('link', '').encode()).hexdigest()
             
             # 카테고리 정보
-            category = ""
-            category_element = element.select_one('div.basicList_depth__2QIie')
-            if category_element:
-                category = category_element.text.strip()
+            category = item.get('category1', '')
+            if item.get('category2'):
+                category += f" > {item.get('category2')}"
+            if item.get('category3'):
+                category += f" > {item.get('category3')}"
+            if item.get('category4'):
+                category += f" > {item.get('category4')}"
             
-            product_data = {
-                'title': title,
-                'link': link,
-                'image': image,
-                'price': price,
-                'mall_name': mall_name,
-                'category': category,
-                'product_id': hashlib.md5(link.encode()).hexdigest(),
-                'is_promotional': False
-            }
+            # 판매처 정보
+            mall_name = item.get('mallName', '')
             
-            # 홍보성 제품 여부 검사
-            product_data['is_promotional'] = self._is_promotional_product(title, mall_name, category)
+            # 이미지 URL
+            image_url = item.get('image', '')
             
-            return product_data
+            # 홍보성 제품 여부 확인
+            is_promotional = self._is_promotional_product(title, mall_name, category)
+            
+            # Product 객체 생성
+            product = Product(
+                id=product_id,
+                name=title,
+                price=price,
+                source='naver_api',
+                url=item.get('link', ''),
+                image_url=image_url,
+                brand=mall_name,
+                category=category,
+                is_promotional_site=is_promotional,
+                original_input_data=item
+            )
+            
+            return product
         except Exception as e:
-            self.logger.warning(f"Error extracting product data: {str(e)}")
-            return {}
-
+            self.logger.error(f"Error converting API item to Product: {str(e)}", exc_info=True)
+            return None
+    
     def _is_promotional_product(self, title: str, mall_name: str, category: str) -> bool:
-        """홍보성 제품 여부 확인"""
+        """홍보성 제품 여부 확인 (기존 코드에서 유지)"""
         if not title:
             return False
             
@@ -492,61 +335,131 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
             
         return False
 
-    async def _get_product_details_async(self, item: Dict) -> Optional[Product]:
-        """비동기 방식으로 제품 상세 정보 가져오기"""
-        # 기본 제품 객체 생성
-        try:
-            product = Product(
-                id=item.get('product_id', ''),
-                name=item.get('title', ''),
-                price=item.get('price', 0),
-                source='naver',
-                original_input_data=item
-            )
-            
-            # URL 및 이미지 URL 설정
-            product.url = item.get('link', '')
-            product.image_url = item.get('image', '')
-            
-            # 추가 정보 설정
-            product.brand = item.get('mall_name', '')
-            product.category = item.get('category', '')
-            product.is_promotional_site = item.get('is_promotional', False)
-            
-            # 가격 정보가 없는 경우 0으로 설정
-            if product.price == 0 and 'price' in item:
-                try:
-                    price_str = str(item['price'])
-                    price_digits = re.sub(r'[^\d]', '', price_str)
-                    if price_digits:
-                        product.price = int(price_digits)
-                except (ValueError, TypeError):
-                    pass
-            
-            return product
-        except Exception as e:
-            self.logger.error(f"Error creating Product object: {str(e)}", exc_info=True)
-            return None
-
-    async def _check_next_page_async(self, query: str, next_page: int) -> bool:
-        """비동기 방식으로 다음 페이지 존재 여부 확인"""
-        encoded_query = urllib.parse.quote(query)
-        url = f"{self.base_url}?query={encoded_query}&pagingIndex={next_page}"
-        
-        loop = asyncio.get_running_loop()
-        try:
-            # 가벼운 헤드 요청으로 확인
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: requests.head(url, headers=self.headers, timeout=self.timeout)
-            )
-            
-            return response.status_code == 200
-        except Exception as e:
-            self.logger.warning(f"Error checking next page: {str(e)}")
-            return False 
-
     def process_file(self, input_file: str) -> Tuple[Optional[str], Optional[str]]:
         """Process input Excel file and generate reports."""
         self.logger.error("This method is not fully implemented")
-        return None, None 
+        return None, None
+
+class NaverShoppingCrawler(BaseMultiLayerScraper):
+    """
+    네이버 쇼핑 크롤러 - 공식 API와 연결하는 브릿지 클래스
+    
+    특징:
+    - .env 파일 또는 설정에서 API 키 로드
+    - NaverShoppingAPI 클래스의 래퍼
+    - 재시도 및 예외 처리
+    """
+    
+    def __init__(self, max_retries: int = 3, cache: Optional[FileCache] = None, 
+                 timeout: int = 30, use_proxies: bool = False):
+        super().__init__(max_retries=max_retries, cache=cache, timeout=timeout)
+        
+        # API 키 로드
+        self.api_keys = self._load_api_keys()
+        
+        # Naver Shopping API 인스턴스 생성
+        self.api = NaverShoppingAPI(
+            client_id=self.api_keys['client_id'],
+            client_secret=self.api_keys['client_secret'],
+            max_retries=max_retries,
+            cache=cache,
+            timeout=timeout
+        )
+        
+        # Set up logging
+        self.logger = logging.getLogger(__name__)
+        
+        # 프록시 설정 (필요 시)
+        self.use_proxies = use_proxies
+    
+    def _load_api_keys(self) -> Dict[str, str]:
+        """
+        .env 파일이나 환경 변수에서 네이버 API 키 로드
+        config.ini 파일에서도 대체 값을 찾음
+        """
+        import os
+        from dotenv import load_dotenv
+        
+        # .env 파일 로드
+        load_dotenv()
+        
+        # API 키 로드 시도
+        client_id = os.getenv("client_id")
+        client_secret = os.getenv("client_secret")
+        
+        # .env에서 찾지 못하면 config.ini 파일에서 찾기 시도
+        if not client_id or not client_secret:
+            try:
+                config = configparser.ConfigParser()
+                config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config.ini')
+                
+                if os.path.exists(config_path):
+                    config.read(config_path, encoding='utf-8')
+                    
+                    if 'API' in config and 'NAVER_CLIENT_ID' in config['API'] and 'NAVER_CLIENT_SECRET' in config['API']:
+                        client_id = config['API']['NAVER_CLIENT_ID']
+                        client_secret = config['API']['NAVER_CLIENT_SECRET']
+                        self.logger.info("API 키를 config.ini 파일에서 로드했습니다.")
+            except Exception as e:
+                self.logger.warning(f"config.ini 파일에서 API 키를 로드하는 중 오류 발생: {e}")
+        
+        # 키가 없는 경우 로그에 오류 기록
+        if not client_id or not client_secret:
+            self.logger.error("네이버 API 키를 찾을 수 없습니다. .env 파일이나 config.ini에 client_id와 client_secret이 설정되어 있는지 확인하세요.")
+            raise ValueError("네이버 API 키를 찾을 수 없습니다.")
+        
+        # 인증 성공 시 간단한 로깅
+        self.logger.info(f"네이버 API 키 로드 성공 (client_id: {client_id[:4]}...)")
+        
+        return {
+            "client_id": client_id,
+            "client_secret": client_secret
+        }
+    
+    def search_product(self, query: str, max_items: int = 50, reference_price: float = 0) -> List[Product]:
+        """
+        네이버 쇼핑에서 제품 검색 - API를 통해 검색 수행
+        
+        Args:
+            query: 검색어
+            max_items: 최대 검색 결과 수
+            reference_price: 참조 가격 (10% 룰 적용용)
+        
+        Returns:
+            List[Product]: 검색된 제품 목록
+        """
+        try:
+            self.logger.info(f"네이버 쇼핑 검색 시작: '{query}'")
+            
+            # NaverShoppingAPI의 search_product 메서드 호출
+            products = self.api.search_product(
+                query=query,
+                max_items=max_items,
+                reference_price=reference_price
+            )
+            
+            if not products:
+                self.logger.warning(f"'{query}'에 대한 검색 결과가 없습니다.")
+            else:
+                self.logger.info(f"'{query}'에 대한 검색 결과 {len(products)}개 발견")
+            
+            return products
+            
+        except Exception as e:
+            self.logger.error(f"네이버 쇼핑 검색 중 오류 발생: {str(e)}", exc_info=True)
+            # 빈 결과 반환
+            return []
+            
+    def process_file(self, input_file: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Excel 파일 처리하고 보고서 생성
+        
+        Args:
+            input_file: 처리할 입력 파일 경로
+            
+        Returns:
+            Tuple[Optional[str], Optional[str]]: 생성된 보고서 파일 경로 및 로그 파일 경로
+        """
+        # 이 함수는 추후 구현이 필요함
+        self.logger.error("process_file 메서드는 아직 구현되지 않았습니다.")
+        return None, None
