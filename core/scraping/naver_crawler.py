@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import random
 import urllib.parse
+import configparser
 
 from ..data_models import Product
 from utils.caching import FileCache, cache_result
@@ -430,21 +431,26 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         """
         try:
             self.logger.info(f"네이버 쇼핑 검색 시작: '{query}'")
-            
-            # NaverShoppingAPI의 search_product 메서드 호출
+
+            # 가이드라인 반영: 상품명에서 '_'를 공백으로 치환
+            processed_query = query.replace('_', ' ')
+            if processed_query != query:
+                self.logger.info(f"검색어 전처리: '{query}' -> '{processed_query}'")
+
+            # NaverShoppingAPI의 search_product 메서드 호출 (처리된 검색어 사용)
             products = self.api.search_product(
-                query=query,
+                query=processed_query,
                 max_items=max_items,
                 reference_price=reference_price
             )
-            
+
             if not products:
-                self.logger.warning(f"'{query}'에 대한 검색 결과가 없습니다.")
+                self.logger.warning(f"'{processed_query}'에 대한 검색 결과가 없습니다.")
             else:
-                self.logger.info(f"'{query}'에 대한 검색 결과 {len(products)}개 발견")
-            
+                self.logger.info(f"'{processed_query}'에 대한 검색 결과 {len(products)}개 발견")
+
             return products
-            
+
         except Exception as e:
             self.logger.error(f"네이버 쇼핑 검색 중 오류 발생: {str(e)}", exc_info=True)
             # 빈 결과 반환

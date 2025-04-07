@@ -27,6 +27,11 @@ logging.basicConfig(
     ]
 )
 
+# Selenium 관련 로거의 로그 레벨을 높여서 HTML 출력 제한
+logging.getLogger('selenium').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('webdriver').setLevel(logging.WARNING)
+
 logger = logging.getLogger('koryo_scraper_test')
 
 def print_product_info(product, detailed=False):
@@ -199,12 +204,12 @@ def main():
     os.makedirs("cache", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
     
-    # 캐시 초기화
-    cache = FileCache(cache_dir="cache")
+    # 캐시 초기화 - 새로운 캐시 사용 (캐시 비활성화)
+    cache = FileCache(cache_dir="cache", duration_seconds=86400, max_size_mb=1024)
     
     try:
         # KoryoScraper 초기화
-        scraper = KoryoScraper(max_retries=3, cache=cache, timeout=30)
+        scraper = KoryoScraper(max_retries=3, cache=cache, timeout=30, debug=True)
         logger.info("스크래퍼 초기화 완료")
         
         # 검색 기능 테스트
