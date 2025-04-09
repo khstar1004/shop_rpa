@@ -2,7 +2,8 @@
 
 import os
 import psutil
-from typing import Optional
+import subprocess
+from typing import Optional, List
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QPushButton, QLabel, QProgressBar, QMessageBox, 
                             QPlainTextEdit, QFileDialog, QSplitter, QFrame,
@@ -25,31 +26,46 @@ from .i18n import translator as tr
 class MainWindow(QMainWindow):
     """Main window of the application"""
     
-    def __init__(self, config, parent=None):
-        super().__init__(parent)
+    def __init__(self, config, product_limit=None):
+        super().__init__()
         self.config = config
+        self.product_limit = product_limit
+        self.logger = logging.getLogger(__name__)
         
         # Initialize settings
         self.settings = Settings()
         
-        # Initialize processor with config
-        try:
-            from core.processing import Processor
-            self.processor = Processor(config)
-        except ImportError as e:
-            logging.error(f"Failed to import Processor: {e}")
-            self.processor = None
-            QMessageBox.critical(self, tr.get_text("error"),
-                               tr.get_text("processor_import_error"))
-        except Exception as e:
-            logging.error(f"Failed to initialize Processor: {e}")
-            self.processor = None
-            QMessageBox.critical(self, tr.get_text("error"),
-                               tr.get_text("processor_init_error", error=str(e)))
-        
+        # 필수 속성 초기화
         self.input_file = None
         self.processing_thread = None
         self.auto_save_timer = None
+        self.tab_widget = None
+        self.log_area = None
+        self.progress_bar = None
+        self.status_label = None
+        self.file_path_label = None
+        self.drop_area = None
+        self.start_button = None
+        self.stop_button = None
+        self.threads_spinbox = None
+        self.memory_label = QLabel()
+        
+        # recent_files_list는 create_dashboard_tab에서 참조되므로 먼저 생성
+        self.recent_files_list = QPlainTextEdit()
+        self.recent_files_list.setReadOnly(True)
+        
+        # Initialize processor with config
+        try:
+            from core.processing.main_processor import ProductProcessor
+            self.processor = ProductProcessor(self.config)
+            
+            # limit 설정이 있으면 로그에 기록
+            if self.product_limit:
+                self.logger.info(f"상품 처리 수 제한: {self.product_limit}개")
+                
+        except Exception as e:
+            self.logger.error(f"프로세서 초기화 중 오류 발생: {str(e)}", exc_info=True)
+            QMessageBox.critical(self, "초기화 오류", f"프로세서 초기화 중 오류가 발생했습니다: {str(e)}")
         
         # Set window properties
         self.setWindowTitle(tr.get_text("window_title", "상품 가격 비교 시스템"))
@@ -80,44 +96,53 @@ class MainWindow(QMainWindow):
         self.memory_timer.start(1000)  # Update every second
     
     def init_ui(self):
-        """Set up the user interface"""
+        """Initialize the user interface"""
+        self.setWindowTitle(tr.get_text("Shop_RPA"))
+        self.setMinimumSize(1200, 800)
+        
         # Create central widget and main layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(10)
         
-        # Add logo at the top
-        header_layout = QHBoxLayout()
-        logo = QSvgWidget(os.path.join(os.path.dirname(__file__), 'assets', 'logo.svg'))
-        logo.setFixedHeight(60)
-        header_layout.addWidget(logo)
-        header_layout.addStretch()
-        main_layout.addLayout(header_layout)
-        
-        # Create tabbed interface
+        # Create tab widget
         self.tab_widget = QTabWidget()
-        self.tab_widget.setDocumentMode(True)
-        self.tab_widget.setTabPosition(QTabWidget.North)
         main_layout.addWidget(self.tab_widget)
         
-        # Add tabs
-        self.tab_widget.addTab(self.create_analysis_tab(), tr.get_text("analysis_tab"))
-        self.tab_widget.addTab(self.create_settings_tab(), tr.get_text("settings"))
+        # Create tabs
+        self.create_dashboard_tab()  # Add dashboard tab
+        self.create_analysis_tab()
+        self.create_settings_tab()
         
-        # Status bar
-        self.status_bar, self.memory_label = WidgetFactory.create_status_bar()
-        self.setStatusBar(self.status_bar)
+        # 상품 수 제한 라벨 추가
+        limit_layout = QHBoxLayout()
+        if self.product_limit:
+            limit_label = QLabel(f"상품 수 제한: 최대 {self.product_limit}개")
+            limit_label.setStyleSheet("color: blue;")
+            limit_layout.addWidget(limit_label)
+        main_layout.addLayout(limit_layout)
+        
+        # 상태바 설정
+        status_bar = self.statusBar()
+        status_bar.addPermanentWidget(self.memory_label)
+        
+        # Apply theme
+        self.apply_theme()
+        
+        # Setup auto-save
+        self.setup_auto_save()
+        
+        # Setup GUI logging
+        self._setup_gui_logging()
         
         # Connect signals
         self.connect_signals()
         
-        # Initialize settings values
+        # Initialize settings
         self.initialize_settings()
         
-        # Setup logging
-        self._setup_gui_logging()
+        # Show the window
+        self.show()
     
     def create_analysis_tab(self):
         """Create analysis tab for file processing"""
@@ -166,6 +191,9 @@ class MainWindow(QMainWindow):
         
         # Set initial splitter sizes (60% top, 40% bottom)
         splitter.setSizes([int(self.height() * 0.6), int(self.height() * 0.4)])
+        
+        # Add tab to tab widget
+        self.tab_widget.addTab(tab, tr.get_text("analysis"))
         
         return tab
     
@@ -263,8 +291,56 @@ class MainWindow(QMainWindow):
         
         # Add stretch to push everything to the top
         layout.addStretch()
+
+        # Add tab to tab widget
+        self.tab_widget.addTab(tab, tr.get_text("settings"))
         
         return tab
+    
+    def create_dashboard_tab(self):
+        """Create the dashboard tab"""
+        dashboard_tab = QWidget()
+        layout = QVBoxLayout(dashboard_tab)
+        
+        # Recent files section
+        recent_files_group = QGroupBox(tr.get_text("recent_files"))
+        recent_files_layout = QVBoxLayout(recent_files_group)
+        recent_files_layout.addWidget(self.recent_files_list)
+        layout.addWidget(recent_files_group)
+        
+        # Statistics section
+        stats_layout = QHBoxLayout()
+        
+        # Products analyzed
+        products_group = QGroupBox(tr.get_text("products_analyzed"))
+        products_layout = QVBoxLayout(products_group)
+        products_label = QLabel("0")
+        products_label.setAlignment(Qt.AlignCenter)
+        products_layout.addWidget(products_label)
+        stats_layout.addWidget(products_group)
+        
+        # Average price difference
+        price_diff_group = QGroupBox(tr.get_text("avg_price_diff"))
+        price_diff_layout = QVBoxLayout(price_diff_group)
+        price_diff_label = QLabel("0%")
+        price_diff_label.setAlignment(Qt.AlignCenter)
+        price_diff_layout.addWidget(price_diff_label)
+        stats_layout.addWidget(price_diff_group)
+        
+        # Processing time
+        time_group = QGroupBox(tr.get_text("processing_time"))
+        time_layout = QVBoxLayout(time_group)
+        time_label = QLabel("0s")
+        time_label.setAlignment(Qt.AlignCenter)
+        time_layout.addWidget(time_label)
+        stats_layout.addWidget(time_group)
+        
+        layout.addLayout(stats_layout)
+        
+        # Add tab
+        self.tab_widget.addTab(dashboard_tab, tr.get_text("dashboard"))
+        
+        return dashboard_tab
     
     def apply_theme(self):
         """Apply current theme based on settings"""
@@ -490,7 +566,7 @@ class MainWindow(QMainWindow):
         # Record start time for statistics
         self.processing_start_time = time.time()
         
-        self.processing_thread = ProcessingThread(self.processor, self.input_file)
+        self.processing_thread = ProcessingThread(self.processor, self.input_file, self.product_limit)
         self.processing_thread.progress_updated.connect(self.update_progress)
         self.processing_thread.status_updated.connect(self.update_status)
         self.processing_thread.log_message.connect(self.append_log)
@@ -519,7 +595,15 @@ class MainWindow(QMainWindow):
     
     @pyqtSlot(int)
     def update_progress(self, value):
+        """Update progress bar value and ensure it's visible"""
+        if not self.progress_bar.isVisible():
+            self.progress_bar.show()
+        if value < 0:
+            value = 0
+        elif value > 100:
+            value = 100
         self.progress_bar.setValue(value)
+        self.progress_bar.repaint()  # Force immediate update
     
     @pyqtSlot(str)
     def update_status(self, message):
@@ -614,9 +698,19 @@ class MainWindow(QMainWindow):
     
     def update_memory_usage(self):
         """Update memory usage in status bar"""
-        process = psutil.Process(os.getpid())
-        memory_mb = process.memory_info().rss / 1024 / 1024
-        self.statusBar().showMessage(tr.get_text("memory_usage", memory=memory_mb))
+        try:
+            process = psutil.Process(os.getpid())
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            memory_text = tr.get_text("memory_usage", memory=memory_mb)
+            
+            # 메모리 라벨 업데이트
+            self.memory_label.setText(memory_text)
+            
+            # 상태바 메시지도 업데이트 (기존 호환성 유지)
+            self.statusBar().showMessage(memory_text)
+        except Exception as e:
+            self.logger.error(f"메모리 사용량 업데이트 중 오류 발생: {str(e)}")
+            self.memory_label.setText("Memory: Unknown")
     
     def toggle_dark_mode(self, enabled):
         self.settings.set("dark_mode", enabled)
@@ -710,6 +804,42 @@ class MainWindow(QMainWindow):
         )
         if filepath:
             self._handle_file_selected(filepath)
+
+    def processing_finished(self, output_files):
+        """처리 완료 시 호출되는 메서드"""
+        self.progress_bar.hide()
+        self.stop_button.setEnabled(False)
+        self.start_button.setEnabled(True)
+        
+        if not output_files:
+            self.status_label.setText("처리 실패: 출력 파일이 생성되지 않았습니다.")
+            return
+            
+        elapsed_time = time.time() - self.processing_start_time
+        self.status_label.setText(f"처리 완료! (소요 시간: {elapsed_time:.1f}초)")
+        
+        # 결과 표시
+        result_message = f"{len(output_files)}개 파일이 생성되었습니다:\n\n"
+        for file in output_files:
+            result_message += f"- {file}\n"
+            
+        # 사용자에게 결과 파일 경로 알림
+        QMessageBox.information(self, "처리 완료", result_message)
+        
+        # 결과 파일 열기
+        for file in output_files:
+            if file and os.path.exists(file):
+                try:
+                    # Windows에서는 start 명령 사용, 다른 OS는 적절한 명령 사용
+                    if os.name == 'nt':
+                        os.startfile(file)
+                    elif os.name == 'posix':
+                        subprocess.call(('xdg-open', file))
+                    else:
+                        self.logger.warning(f"알 수 없는 OS: {os.name}, 파일을 열 수 없습니다.")
+                except Exception as e:
+                    self.logger.error(f"결과 파일 열기 실패: {str(e)}", exc_info=True)
+                    QMessageBox.warning(self, "파일 열기 오류", f"결과 파일을 열 수 없습니다: {str(e)}")
 
 # Custom logging handler to emit logs to the GUI text area
 class GUILogHandler(logging.Handler):

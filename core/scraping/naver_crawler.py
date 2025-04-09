@@ -11,6 +11,7 @@ import json
 import random
 import urllib.parse
 import configparser
+import os
 
 from ..data_models import Product
 from utils.caching import FileCache, cache_result
@@ -290,8 +291,14 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
             # 판매처 정보
             mall_name = item.get('mallName', '')
             
-            # 이미지 URL
+            # 이미지 URL - 네이버 API 응답에서 image 필드는 항상 있어야 함
+            # 참고: 네이버 검색 API 문서에 따르면 모든 상품에는 이미지 URL이 포함됨
             image_url = item.get('image', '')
+            
+            # 이미지가 없는 경우 로깅 (디버깅 목적)
+            if not image_url:
+                self.logger.warning(f"🖼️ 네이버 API에서 반환된 상품 '{title}'의 이미지 URL이 없습니다")
+                self.logger.debug(f"네이버 API 응답 아이템 구조: {json.dumps(item, indent=2, ensure_ascii=False)}")
             
             # 홍보성 제품 여부 확인
             is_promotional = self._is_promotional_product(title, mall_name, category)
@@ -385,8 +392,8 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         load_dotenv()
         
         # API 키 로드 시도
-        client_id = os.getenv("client_id")
-        client_secret = os.getenv("client_secret")
+        client_id = os.getenv("NAVER_CLIENT_ID")
+        client_secret = os.getenv("NAVER_CLIENT_SECRET")
         
         # .env에서 찾지 못하면 config.ini 파일에서 찾기 시도
         if not client_id or not client_secret:
@@ -406,7 +413,7 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         
         # 키가 없는 경우 로그에 오류 기록
         if not client_id or not client_secret:
-            self.logger.error("네이버 API 키를 찾을 수 없습니다. .env 파일이나 config.ini에 client_id와 client_secret이 설정되어 있는지 확인하세요.")
+            self.logger.error("네이버 API 키를 찾을 수 없습니다. .env 파일이나 config.ini에 NAVER_CLIENT_ID와 NAVER_CLIENT_SECRET이 설정되어 있는지 확인하세요.")
             raise ValueError("네이버 API 키를 찾을 수 없습니다.")
         
         # 인증 성공 시 간단한 로깅

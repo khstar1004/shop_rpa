@@ -176,11 +176,18 @@ class BaseMultiLayerScraper:
             return self.cache.get(cache_key)
         return None
     
-    def set_cached_result(self, url, selector_key, value):
+    def set_cached_result(self, url, selector_key, value, ttl=None):
         """결과 캐싱 (내부 메모리 캐시 사용)"""
         if self.cache:
             cache_key = f"scraper|{url}|{selector_key}"
-            self.cache.set(cache_key, value)
+            try:
+                # Pass ttl to the cache if it's provided
+                if ttl:
+                    self.cache.set(cache_key, value, ttl=ttl)
+                else:
+                    self.cache.set(cache_key, value)
+            except Exception as e:
+                logging.error(f"Failed to cache results for key '{cache_key}': {str(e)}")
     
     async def extract_async(self, source, selectors, **kwargs):
         """여러 셀렉터를 비동기로 추출"""
@@ -236,6 +243,17 @@ class BaseMultiLayerScraper:
             'value': value,
             'expire_at': expire_time
         }
+        
+        # Also store in external cache if available
+        if self.cache:
+            try:
+                # Pass ttl to the cache if it's provided
+                if ttl:
+                    self.cache.set(key, value, ttl=ttl)
+                else:
+                    self.cache.set(key, value)
+            except Exception as e:
+                logging.error(f"Failed to cache results for query '{key}': {str(e)}")
     
     def get_sparse_data(self, key):
         """희소 데이터 구조에서 데이터 가져오기"""

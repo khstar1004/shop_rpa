@@ -41,12 +41,12 @@ def main():
     load_dotenv()
     
     # API 키 확인
-    client_id = os.getenv("client_id")
-    client_secret = os.getenv("client_secret")
+    client_id = os.getenv("NAVER_CLIENT_ID")
+    client_secret = os.getenv("NAVER_CLIENT_SECRET")
     
     if not client_id or not client_secret:
         logger.error(".env 파일에서 API 키를 찾을 수 없습니다.")
-        logger.error("client_id와 client_secret이 설정되어 있는지 확인하세요.")
+        logger.error("NAVER_CLIENT_ID와 NAVER_CLIENT_SECRET이 설정되어 있는지 확인하세요.")
         sys.exit(1)
     
     logger.info(f"API 키 확인: {client_id[:4]}... / {client_secret[:4]}...")

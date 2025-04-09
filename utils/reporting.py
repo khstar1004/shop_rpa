@@ -88,7 +88,7 @@ def _apply_common_formatting(worksheet):
     worksheet.freeze_panes = 'A2'
 
 def _apply_conditional_formatting(worksheet, col_map: Dict[str, int]):
-    """Applies conditional formatting (yellow fill) and number formats."""
+    """Applies conditional formatting (yellow fill for rows) and number formats."""
     yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
     currency_format = '#,##0' # Format as integer currency
     percent_format = '0.00%'
@@ -105,75 +105,82 @@ def _apply_conditional_formatting(worksheet, col_map: Dict[str, int]):
     naver_price_idx = col_map.get('판매단가(V포함)(3)', -1)
 
     for row in worksheet.iter_rows(min_row=2):
-        # Apply yellow fill for negative price differences
+        # Determine if the row should be highlighted yellow
+        highlight_row = False
+        if koryo_price_diff_idx != -1:
+            koryo_diff_cell = row[koryo_price_diff_idx]
+            if isinstance(koryo_diff_cell.value, (int, float)) and koryo_diff_cell.value < 0:
+                highlight_row = True
+        
+        if not highlight_row and naver_price_diff_idx != -1:
+            naver_diff_cell = row[naver_price_diff_idx]
+            if isinstance(naver_diff_cell.value, (int, float)) and naver_diff_cell.value < 0:
+                highlight_row = True
+
+        # Apply yellow fill to the entire row if needed
+        if highlight_row:
+            for cell in row:
+                cell.fill = yellow_fill
+
+        # --- Apply number formatting to specific cells regardless of highlight ---
+        
+        # Format koryo price difference and percentage
         if koryo_price_diff_idx != -1:
             cell = row[koryo_price_diff_idx]
-            if isinstance(cell.value, (int, float)) and cell.value < 0:
-                cell.fill = yellow_fill
-            # Apply number format only if it's actually a number
             if isinstance(cell.value, (int, float)):
                 cell.number_format = currency_format
-            # Clear non-numeric strings that shouldn't be there (except error messages)
+            elif isinstance(cell.value, str) and not cell.value in ['동일상품 없음', '매칭 실패']:
+                cell.value = '' # Clear invalid strings
+        if koryo_percent_diff_idx != -1:
+            cell = row[koryo_percent_diff_idx]
+            if isinstance(cell.value, (int, float)):
+                cell.value = cell.value / 100 # Convert to decimal
+                cell.number_format = percent_format
             elif isinstance(cell.value, str) and not cell.value in ['동일상품 없음', '매칭 실패']:
                 cell.value = ''
 
+        # Format naver price difference and percentage
         if naver_price_diff_idx != -1:
             cell = row[naver_price_diff_idx]
-            if isinstance(cell.value, (int, float)) and cell.value < 0:
-                cell.fill = yellow_fill
             if isinstance(cell.value, (int, float)):
                 cell.number_format = currency_format
             elif isinstance(cell.value, str) and not cell.value in ['동일상품 없음', '매칭 실패']:
-                cell.value = ''
-            
-        # Format percentages
-        if koryo_percent_diff_idx != -1:
-             cell = row[koryo_percent_diff_idx]
-             if isinstance(cell.value, (int, float)):
-                 cell.value = cell.value / 100 # Convert to decimal for percentage format
-                 cell.number_format = percent_format
-             elif isinstance(cell.value, str) and not cell.value in ['동일상품 없음', '매칭 실패']:
-                 cell.value = ''
-
+                cell.value = '' # Clear invalid strings
         if naver_percent_diff_idx != -1:
-             cell = row[naver_percent_diff_idx]
-             if isinstance(cell.value, (int, float)):
-                 cell.value = cell.value / 100 # Convert to decimal for percentage format
-                 cell.number_format = percent_format
-             elif isinstance(cell.value, str) and not cell.value in ['동일상품 없음', '매칭 실패']:
-                 cell.value = ''
-                 
-        # Format currency columns
+            cell = row[naver_percent_diff_idx]
+            if isinstance(cell.value, (int, float)):
+                cell.value = cell.value / 100 # Convert to decimal
+                cell.number_format = percent_format
+            elif isinstance(cell.value, str) and not cell.value in ['동일상품 없음', '매칭 실패']:
+                cell.value = ''
+                
+        # Format other currency columns
         for idx in [haeoreum_price_idx, koryo_price_idx, naver_price_idx]:
-             if idx != -1:
-                 cell = row[idx]
-                 if isinstance(cell.value, (int, float)):
-                     cell.number_format = currency_format
-                 elif isinstance(cell.value, str) and cell.value.strip() and not cell.value == '-':
-                     # Try to convert string to number
-                     try:
-                         cleaned = re.sub(r'[^\d.]', '', cell.value)
-                         if cleaned:
-                             cell.value = float(cleaned)
-                             cell.number_format = currency_format
-                         else:
-                             cell.value = ''
-                     except (ValueError, TypeError):
-                         cell.value = ''
+            if idx != -1:
+                cell = row[idx]
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = currency_format
+                elif isinstance(cell.value, str) and cell.value.strip() and not cell.value == '-':
+                    try:
+                        cleaned = re.sub(r'[^\d.]', '', cell.value)
+                        if cleaned:
+                            cell.value = float(cleaned)
+                            cell.number_format = currency_format
+                        else:
+                            cell.value = ''
+                    except (ValueError, TypeError):
+                        cell.value = ''
 
 def _apply_image_formula(url: str | None) -> str:
     """Converts a URL into an Excel IMAGE formula string if valid."""
     if pd.notna(url) and isinstance(url, str) and url.strip().startswith('http'):
-        # Escape double quotes within the URL for the formula string
-        escaped_url = url.replace('"', '""')
-        # 순수 IMAGE 함수 수식만 생성 (골뱅이 없음)
-        return f'=IMAGE("{escaped_url}")'
+        # 이미지 URL을 반환하되, 수식은 적용하지 않음 (직접 write_formula로 처리)
+        return url
     return ''
 
 def _remove_at_sign(formula: str) -> str:
     """Excel에서 추가될 수 있는 @ 기호를 제거합니다."""
-    if isinstance(formula, str) and formula.startswith('@='):
-        return formula.replace('@=', '=')
+    # 이 함수는 더 이상 사용하지 않지만 호환성을 위해 유지
     return formula
 
 def _generate_report(
@@ -302,27 +309,18 @@ def _generate_report(
                 timing_df.to_excel(writer, sheet_name=data_sheet_name, index=False, startrow=0)
                 data_start_row = 2  # Data starts below timing info
             
-            # Write the main data (with formulas applied) - 골뱅이 방지를 위한 방법
-            # 직접 문자열로 저장하여 Excel 엔진이 자동 변환하지 않도록 함
-            for col_name in image_columns:
-                if col_name in df_report_imagified.columns:
-                    # 강제로 문자열 타입으로 지정하여 Excel이 수식으로 해석하지 않도록 함
-                    df_report_imagified[col_name] = df_report_imagified[col_name].astype(str)
-            
+            # Write the main data (with formulas applied)
             df_report_imagified.to_excel(writer, sheet_name=data_sheet_name, index=False, startrow=data_start_row)
             
             # Get the worksheet and apply image-specific settings
             worksheet = writer.sheets[data_sheet_name]
-            
-            # 이미지 수식이 있는 셀의 형식을 설정하여 골뱅이 방지
-            header_offset = data_start_row + 1  # Header row is 1 below data_start_row
             
             # Better Cell Sizing for images
             image_row_height = 120  # Increased for better visibility
             image_col_width = 25    # Width for image columns
             
             # Set row height for data rows
-            for row_num in range(header_offset, header_offset + len(df_report_imagified) + 1):
+            for row_num in range(data_start_row, data_start_row + len(df_report_imagified) + 1):
                 worksheet.set_row(row_num, image_row_height)
             
             # Format all columns with appropriate width
@@ -340,22 +338,27 @@ def _generate_report(
                         width = 25
                     worksheet.set_column(col_idx, col_idx, width)
             
-            # 골뱅이(@) 기호 제거 처리
-            for row_idx in range(header_offset + 1, header_offset + len(df_report_imagified) + 1):
-                for col_idx, col_name in enumerate(df_report_imagified.columns):
-                    if col_name in image_columns:
-                        # 셀 주소 계산
-                        cell_addr = xl_rowcol_to_cell(row_idx, col_idx)
-                        # 이미지 수식 직접 쓰기 - 골뱅이 없이
-                        cell_value = df_report_imagified.iloc[row_idx - header_offset - 1][col_name]
-                        if isinstance(cell_value, str) and (cell_value.startswith('=IMAGE') or cell_value.startswith('@=IMAGE')):
-                            # 골뱅이 제거한 값으로 직접 설정
-                            clean_value = cell_value.replace('@=', '=')
+            # 이미지 URL을 수식으로 직접 입력 (텍스트가 아닌 실제 수식으로)
+            for row_idx in range(len(df_report)):
+                for col_idx, col_name in enumerate(df_report.columns):
+                    if col_name in image_columns and pd.notna(df_report.iloc[row_idx][col_name]):
+                        # 이미지 URL 가져오기
+                        url = df_report.iloc[row_idx][col_name]
+                        if pd.notna(url) and isinstance(url, str) and url.strip().startswith('http'):
+                            # 셀 주소 계산 (헤더와 오프셋 고려)
+                            cell_addr = xl_rowcol_to_cell(row_idx + data_start_row + 1, col_idx)
+                            # 큰따옴표 이스케이프 처리
+                            escaped_url = url.replace('"', '""')
+                            # 수식 직접 쓰기 (텍스트가 아닌 수식으로)
+                            formula = f'IMAGE("{escaped_url}")'
                             try:
-                                worksheet.write_formula(cell_addr, clean_value)
-                                logger.debug(f"Wrote clean formula to cell {cell_addr}: {clean_value}")
+                                # write_formula 메서드 사용하여 수식으로 인식되도록 함
+                                worksheet.write_formula(cell_addr, formula)
+                                logger.debug(f"이미지 수식을 셀 {cell_addr}에 직접 입력: {formula}")
                             except Exception as e:
-                                logger.warning(f"Failed to write formula to cell {cell_addr}: {e}")
+                                logger.warning(f"이미지 수식 입력 실패 (셀 {cell_addr}): {e}")
+                                # 실패 시 텍스트로라도 URL 입력
+                                worksheet.write_string(cell_addr, f"URL: {url}")
             
             # --- Add detailed instructions sheet ---
             instructions_sheet = workbook.add_worksheet('이미지 표시 방법')
@@ -396,30 +399,30 @@ def _generate_report(
             instructions_sheet.write(row, 0, "Excel에서 외부 이미지를 표시하기 위해서는 다음 단계를 따라주세요:", content_format)
             row += 2
             
-            # Step 1
-            instructions_sheet.write(row, 0, "1. Excel 파일을 열었을 때 상단에 '보안 경고: 외부 데이터 연결이 사용 안 함으로 설정되었습니다'라는 노란색 메시지가 표시됩니다.", step_format)
+            # Step 1 - Updated with manual correction instructions
+            instructions_sheet.write(row, 0, "1. 이미지가 보이지 않고 @IMAGE(...)로 표시될 경우, 다음 두 가지 방법으로 해결할 수 있습니다:", step_format)
+            row += 1
+            instructions_sheet.write(row, 0, "   방법 1: 해당 셀을 더블클릭하여 편집 모드로 들어간 후, @ 기호를 지우고 앞에 = 기호를 넣은 다음 Enter를 누릅니다.", content_format)
+            row += 1
+            instructions_sheet.write(row, 0, "   방법 2: 셀을 선택하고 Enter 키를 누르면 나타나는 자동 수정 대화상자에서 '확인'을 클릭합니다.", content_format)
+            row += 2
+            
+            # Step 2
+            instructions_sheet.write(row, 0, "2. Excel 파일을 열었을 때 상단에 '보안 경고: 외부 데이터 연결이 사용 안 함으로 설정되었습니다'라는 노란색 메시지가 표시됩니다.", step_format)
             row += 1
             instructions_sheet.write(row, 0, "   - '콘텐츠 사용' 버튼을 클릭하세요.", content_format)
             row += 2
             
-            # Step 2
-            instructions_sheet.write(row, 0, "2. 그래도 이미지가 보이지 않는 경우, Excel의 '파일' 메뉴 > '옵션' > '트러스트 센터' > '트러스트 센터 설정' 버튼을 클릭하세요.", step_format)
-            row += 2
-            
             # Step 3
-            instructions_sheet.write(row, 0, "3. '트러스트 센터' 창에서 '외부 콘텐츠' 항목을 선택하고, '모든 외부 데이터 연결 사용' 옵션을 선택한 후 '확인'을 클릭하세요.", step_format)
+            instructions_sheet.write(row, 0, "3. 그래도 이미지가 보이지 않는 경우, Excel의 '파일' 메뉴 > '옵션' > '트러스트 센터' > '트러스트 센터 설정' 버튼을 클릭하세요.", step_format)
             row += 2
             
             # Step 4
-            instructions_sheet.write(row, 0, "4. Excel을 다시 시작하세요.", step_format)
+            instructions_sheet.write(row, 0, "4. '트러스트 센터' 창에서 '외부 콘텐츠' 항목을 선택하고, '모든 외부 데이터 연결 사용' 옵션을 선택한 후 '확인'을 클릭하세요.", step_format)
             row += 2
             
             # Step 5
-            instructions_sheet.write(row, 0, "5. 특정 이미지만 보이지 않는 경우, 해당 셀을 선택하고 수식 표시줄에서 '=IMAGE(\"http://....\")' 형식의 수식을 클릭한 후 Enter 키를 눌러보세요.", step_format)
-            row += 2
-            
-            # Step 6
-            instructions_sheet.write(row, 0, "6. 여전히 이미지가 표시되지 않는 경우, 인터넷 설정이나 회사 보안 정책으로 외부 이미지가 차단되었을 수 있습니다. IT 담당자에게 문의하세요.", step_format)
+            instructions_sheet.write(row, 0, "5. Excel을 다시 시작하세요.", step_format)
             row += 2
             
             # Tip for manual image updates

@@ -1,9 +1,12 @@
 import configparser
 import os
 from typing import Dict, Any
+from dotenv import load_dotenv
 
 def load_config() -> Dict[str, Any]:
-    """Load configuration from config.ini file"""
+    """Load configuration from config.ini file and .env file"""
+    load_dotenv()
+    
     config = configparser.ConfigParser()
     config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.ini')
     
@@ -19,8 +22,12 @@ def load_config() -> Dict[str, Any]:
     processed_config = {}
     
     try:
-        # API section
-        processed_config['API'] = dict(config['API'])
+        # API section - Load keys from environment variables first, then config.ini as fallback
+        processed_config['API'] = {
+            'naver_client_id': os.getenv('NAVER_CLIENT_ID', config['API'].get('NAVER_CLIENT_ID')),
+            'naver_client_secret': os.getenv('NAVER_CLIENT_SECRET', config['API'].get('NAVER_CLIENT_SECRET'))
+        }
+        # Add other API keys if needed
         
         # MATCHING section
         processed_config['MATCHING'] = {

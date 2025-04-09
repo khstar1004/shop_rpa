@@ -68,9 +68,9 @@ class FileCache:
                     logger.warning(f"Failed to decompress cache entry: {e}. Treating as uncompressed.")
                     # Assume it's not compressed and continue
                 
-            data, timestamp = pickle.loads(data)
+            data, expiration_time = pickle.loads(data)
             
-            if time.time() - timestamp > self.duration:
+            if time.time() > expiration_time:
                 logger.debug(f"Cache miss (expired) for key: {key[:50]}...")
                 os.remove(filepath) # Remove expired file
                 return None
@@ -89,16 +89,25 @@ class FileCache:
                 pass
             return None
 
-    def set(self, key: str, value: Any) -> None:
-        """Store an item in the cache."""
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+        """Store an item in the cache.
+        
+        Args:
+            key: Unique identifier for the cache entry
+            value: The data to cache
+            ttl: Optional time-to-live in seconds. If provided, this overrides the default duration.
+        """
         # First check if we need to clean up the cache
         if self._should_cleanup_cache():
             self._cleanup_cache()
             
         filepath = self._get_cache_filepath(key)
         try:
+            # Use provided ttl or default duration
+            expiration_time = time.time() + (ttl if ttl is not None else self.duration)
+            
             # Serialize the data with timestamp
-            data = pickle.dumps((value, time.time()))
+            data = pickle.dumps((value, expiration_time))
             
             # Compress if enabled
             if self.enable_compression:
@@ -208,7 +217,7 @@ class FileCache:
                    f"New size: {current_size / 1024 / 1024:.2f}MB")
 
 # Decorator for function caching
-def cache_result(cache: Optional[FileCache], key_prefix: str = "func") -> Callable:
+def cache_result(cache: Optional[FileCache], key_prefix: str = "func", ttl: Optional[int] = None) -> Callable:
     """Decorator to cache the result of a function."""
     def decorator(func: Callable) -> Callable:
         def wrapper(*args, **kwargs) -> Any:
@@ -229,7 +238,10 @@ def cache_result(cache: Optional[FileCache], key_prefix: str = "func") -> Callab
             
             # Execute function and cache result
             result = func(*args, **kwargs)
-            cache.set(cache_key, result)
+            try:
+                cache.set(cache_key, result, ttl=ttl)
+            except Exception as e:
+                logger.error(f"Failed to cache results for key '{cache_key}': {str(e)}")
             return result
         return wrapper
     return decorator 

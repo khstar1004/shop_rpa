@@ -7,6 +7,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 import os
 import re
+from datetime import datetime
 
 class ExcelManager:
     """Excel 파일 읽기, 쓰기, 포맷팅 관련 기능을 담당하는 클래스"""
@@ -267,71 +268,62 @@ class ExcelManager:
         try:
             # 결과 데이터 준비
             report_data = []
+            processed_count = 0
+            
             for result in results:
                 if hasattr(result, 'source_product') and result.source_product:
+                    processed_count += 1
                     row = {}
+                    
                     # 원본 제품 데이터 추출
                     source_data = result.source_product.original_input_data
-                    for key, value in source_data.items():
-                        row[key] = value
+                    if isinstance(source_data, dict):
+                        for key, value in source_data.items():
+                            row[key] = value
                     
-                    # 기본 데이터 설정 (원본 데이터가 없는 경우를 대비)
-                    if '기본수량(3)' not in row and '기본수량' in source_data:
-                        row['기본수량(3)'] = source_data.get('기본수량', 0)
+                    # 필수 필드 확인
+                    self._ensure_required_fields(row, result)
                     
-                    if '본사 이미지' not in row and result.source_product.image_url:
-                        row['본사 이미지'] = result.source_product.image_url
-                        
-                    if '본사상품링크' not in row and result.source_product.url:
-                        row['본사상품링크'] = result.source_product.url
+                    # 중요 필드가 비어있지 않은지 재확인
+                    self._validate_critical_fields(row, result)
                     
                     # 고려기프트 매칭 데이터 추가
                     if hasattr(result, 'best_koryo_match') and result.best_koryo_match:
-                        row['판매단가(V포함)(3)'] = result.best_koryo_match.matched_product.price
-                        row['가격차이(3)'] = result.best_koryo_match.price_difference
-                        row['가격차이(3)%'] = result.best_koryo_match.price_difference_percent
-                        row['고려기프트 이미지'] = result.best_koryo_match.matched_product.image_url
-                        row['고려기프트 상품링크'] = result.best_koryo_match.matched_product.url
+                        self._add_koryo_match_data(row, result.best_koryo_match)
                     
                     # 네이버 매칭 데이터 추가
                     if hasattr(result, 'best_naver_match') and result.best_naver_match:
-                        # 공급사 정보
-                        if hasattr(result.best_naver_match.matched_product, 'brand'):
-                            row['공급사명'] = result.best_naver_match.matched_product.brand
-                        
-                        # 가격 정보
-                        if '판매단가(V포함)(3)' not in row or not row['판매단가(V포함)(3)']:
-                            row['판매단가(V포함)(3)'] = result.best_naver_match.matched_product.price
-                            row['가격차이(3)'] = result.best_naver_match.price_difference
-                            row['가격차이(3)%'] = result.best_naver_match.price_difference_percent
-                        
-                        # 이미지 및 링크 정보
-                        row['네이버 이미지'] = result.best_naver_match.matched_product.image_url
-                        row['네이버 쇼핑 링크'] = result.best_naver_match.matched_product.url
-                        row['공급사 상품링크'] = result.best_naver_match.matched_product.url
+                        self._add_naver_match_data(row, result.best_naver_match)
+                    elif hasattr(result, 'naver_matches') and result.naver_matches:
+                        # 최적 매칭이 없지만 다른 후보가 있는 경우 첫 번째 후보 사용
+                        self._add_naver_match_data(row, result.naver_matches[0])
+                        self.logger.info(f"최적 네이버 매칭이 없어 첫 번째 후보({result.naver_matches[0].matched_product.name})를 사용합니다.")
                     
                     # 빈 필드에 기본값 설정
-                    required_fields = [
-                        '고려기프트 상품링크', '기본수량(3)', '판매단가(V포함)(3)', 
-                        '가격차이(3)', '가격차이(3)%', '공급사명', '네이버 쇼핑 링크', 
-                        '공급사 상품링크', '본사 이미지', '고려기프트 이미지', '네이버 이미지'
-                    ]
-                    
-                    for field in required_fields:
-                        if field not in row or pd.isna(row[field]) or row[field] == '':
-                            if '단가' in field or '가격' in field:
-                                row[field] = 0
-                            elif '이미지' in field or '링크' in field:
-                                row[field] = ''
-                            elif '기본수량' in field:
-                                row[field] = 0
-                            elif '공급사명' in field:
-                                row[field] = ''
+                    self._set_default_values(row)
                     
                     report_data.append(row)
             
+            # 로깅 - 처리된 결과 수
+            self.logger.info(f"총 {processed_count}개 제품 처리됨, 엑셀 파일에 {len(report_data)}행 작성")
+            
+            # 결과 데이터가 비어있는지 확인
+            if not report_data:
+                self.logger.warning("엑셀 보고서에 작성할 데이터 없음! 기본 데이터 생성")
+                # 최소한의 데이터 생성
+                empty_row = {
+                    '상품명': '데이터 처리 중 오류 발생',
+                    '판매단가(V포함)': 0,
+                    '상품Code': 'ERROR',
+                    '구분': 'ERROR'
+                }
+                report_data.append(empty_row)
+            
             # DataFrame 생성
             result_df = pd.DataFrame(report_data)
+            
+            # 컬럼 순서 정렬
+            result_df = self._reorder_columns(result_df)
             
             # 파일명 생성
             output_file = f"{os.path.splitext(input_file)[0]}-result.xlsx"
@@ -342,8 +334,163 @@ class ExcelManager:
             # 포맷팅 적용
             self.apply_formatting_to_excel(output_file)
             
+            self.logger.info(f"결과 파일 생성 완료: {output_file} (총 {len(report_data)}행)")
+            
             return output_file
             
         except Exception as e:
-            self.logger.error(f"Error generating output: {str(e)}", exc_info=True)
-            return "" 
+            self.logger.error(f"결과 파일 생성 중 오류 발생: {str(e)}", exc_info=True)
+            
+            # 오류가 발생해도 파일은 생성 시도
+            try:
+                # 기본 데이터로 빈 파일 생성
+                error_data = [{
+                    '오류': str(e),
+                    '상품명': '데이터 처리 중 오류 발생',
+                    '시간': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }]
+                
+                error_df = pd.DataFrame(error_data)
+                output_file = f"{os.path.splitext(input_file)[0]}-error-result.xlsx"
+                error_df.to_excel(output_file, index=False)
+                
+                self.logger.warning(f"오류 정보가 포함된 파일을 생성했습니다: {output_file}")
+                return output_file
+                
+            except Exception as inner_e:
+                self.logger.critical(f"오류 파일 생성 중 추가 오류 발생: {str(inner_e)}")
+                return ""
+
+    def _ensure_required_fields(self, row: Dict, result: object) -> None:
+        """필수 필드가 존재하는지 확인하고 없으면 생성"""
+        # 기본 필드 확인
+        required_fields = [
+            '구분', '담당자', '업체명', '업체코드', 'Code', '상품Code', '중분류카테고리', '상품명', 
+            '기본수량(1)', '판매단가(V포함)', '본사상품링크'
+        ]
+        
+        for field in required_fields:
+            if field not in row:
+                # Code와 상품Code는 상호 대체 가능
+                if field == 'Code' and '상품Code' in row:
+                    row['Code'] = row['상품Code']
+                elif field == '상품Code' and 'Code' in row:
+                    row['상품Code'] = row['Code'] 
+                else:
+                    row[field] = ''
+        
+        # 기본 이미지 URL 설정
+        if '본사 이미지' not in row and hasattr(result.source_product, 'image_url'):
+            row['본사 이미지'] = result.source_product.image_url
+            
+        # 기본 URL 설정
+        if '본사상품링크' not in row and hasattr(result.source_product, 'url'):
+            row['본사상품링크'] = result.source_product.url
+
+    def _validate_critical_fields(self, row: Dict, result: object) -> None:
+        """중요 필드 검증 및 수정"""
+        # 상품명 필드 확인
+        if not row.get('상품명') and hasattr(result.source_product, 'name'):
+            row['상품명'] = result.source_product.name
+        
+        # 가격 필드 확인
+        if not row.get('판매단가(V포함)') and hasattr(result.source_product, 'price'):
+            row['판매단가(V포함)'] = result.source_product.price
+        
+        # 상품코드 확인
+        if not row.get('상품Code') and not row.get('Code') and hasattr(result.source_product, 'id'):
+            row['상품Code'] = result.source_product.id
+
+    def _add_koryo_match_data(self, row: Dict, koryo_match: object) -> None:
+        """고려기프트 매칭 데이터 추가"""
+        if hasattr(koryo_match, 'matched_product'):
+            match_product = koryo_match.matched_product
+            
+            # 가격 정보
+            if hasattr(match_product, 'price'):
+                row['판매단가(V포함)(2)'] = match_product.price
+            
+            # 가격 차이 정보
+            if hasattr(koryo_match, 'price_difference'):
+                row['가격차이(2)'] = koryo_match.price_difference
+            
+            if hasattr(koryo_match, 'price_difference_percent'):
+                row['가격차이(2)%'] = koryo_match.price_difference_percent
+            
+            # 이미지 및 링크
+            if hasattr(match_product, 'image_url'):
+                row['고려기프트 이미지'] = match_product.image_url
+            
+            if hasattr(match_product, 'url'):
+                row['고려기프트 상품링크'] = match_product.url
+
+    def _add_naver_match_data(self, row: Dict, naver_match: object) -> None:
+        """네이버 매칭 데이터 추가"""
+        if hasattr(naver_match, 'matched_product'):
+            match_product = naver_match.matched_product
+            
+            # 공급사 정보
+            if hasattr(match_product, 'brand'):
+                row['공급사명'] = match_product.brand
+            
+            # 가격 정보
+            if hasattr(match_product, 'price'):
+                row['판매단가(V포함)(3)'] = match_product.price
+            
+            # 가격 차이 정보
+            if hasattr(naver_match, 'price_difference'):
+                row['가격차이(3)'] = naver_match.price_difference
+            
+            if hasattr(naver_match, 'price_difference_percent'):
+                row['가격차이(3)%'] = naver_match.price_difference_percent
+            
+            # 이미지 및 링크
+            if hasattr(match_product, 'image_url'):
+                row['네이버 이미지'] = match_product.image_url
+            
+            if hasattr(match_product, 'url'):
+                row['네이버 쇼핑 링크'] = match_product.url
+                row['공급사 상품링크'] = match_product.url
+
+    def _set_default_values(self, row: Dict) -> None:
+        """빈 필드에 기본값 설정"""
+        # 기본 값이 필요한 필드
+        default_fields = {
+            '고려기프트 상품링크': '', 
+            '기본수량(3)': 0, 
+            '판매단가(V포함)(3)': 0, 
+            '가격차이(3)': 0, 
+            '가격차이(3)%': 0, 
+            '공급사명': '', 
+            '네이버 쇼핑 링크': '', 
+            '공급사 상품링크': '', 
+            '본사 이미지': '', 
+            '고려기프트 이미지': '', 
+            '네이버 이미지': ''
+        }
+        
+        for field, default_value in default_fields.items():
+            if field not in row or pd.isna(row[field]) or row[field] == '':
+                row[field] = default_value
+
+    def _reorder_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """컬럼 순서 정렬"""
+        # 원하는 컬럼 순서
+        preferred_order = [
+            '구분', '담당자', '업체명', '업체코드', '상품Code', '중분류카테고리', '상품명', 
+            '기본수량(1)', '판매단가(V포함)', '본사상품링크', 
+            '기본수량(2)', '판매가(V포함)(2)', '판매단가(V포함)(2)', '가격차이(2)', '가격차이(2)%', '고려기프트 상품링크', 
+            '기본수량(3)', '판매단가(V포함)(3)', '가격차이(3)', '가격차이(3)%', '공급사명', '네이버 쇼핑 링크', '공급사 상품링크',
+            '본사 이미지', '고려기프트 이미지', '네이버 이미지'
+        ]
+        
+        # 현재 컬럼과 원하는 순서를 비교
+        current_columns = list(df.columns)
+        ordered_columns = [col for col in preferred_order if col in current_columns]
+        
+        # 기존 DF에 있지만 preferred_order에 없는 컬럼들을 추가
+        remaining_columns = [col for col in current_columns if col not in preferred_order]
+        final_columns = ordered_columns + remaining_columns
+        
+        # 최종 순서로 정렬된 데이터프레임 반환
+        return df[final_columns] 

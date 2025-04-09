@@ -251,10 +251,10 @@ class KoryoScraper(BaseMultiLayerScraper):
         # 결과를 캐시에 저장
         if self.cache:
             try:
-                self.cache.set(cache_key, products, ttl=3600) # 1시간 캐싱
+                self.cache.set(cache_key, products)  # 기본 캐시 기간 사용
                 self.logger.debug(f"Result for query '{query}' cached.")
             except Exception as e:
-                 self.logger.error(f"Failed to cache results for query '{query}': {str(e)}")
+                self.logger.error(f"Failed to cache results for query '{query}': {str(e)}")
 
         return products
 
@@ -639,7 +639,7 @@ class KoryoScraper(BaseMultiLayerScraper):
                 product.model_number = item['model_number']
             
             # 캐시에 저장
-            self.add_sparse_data(cache_key, product, ttl=86400)  # 24시간 캐싱
+            self.add_sparse_data(cache_key, product)  # 기본 캐시 기간 사용
             
             # 이전 페이지로 돌아가기
             self.driver.get(current_url)
