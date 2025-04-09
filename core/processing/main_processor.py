@@ -13,6 +13,7 @@ from ..matching.image_matcher import ImageMatcher
 from ..matching.multimodal_matcher import MultiModalMatcher
 from ..scraping.koryo_scraper import KoryoScraper
 from ..scraping.naver_crawler import NaverShoppingCrawler
+from ..scraping.haeoeum_scraper import HaeoeumScraper
 from utils.caching import FileCache
 
 from .excel_manager import ExcelManager
@@ -476,11 +477,40 @@ class ProductProcessor:
             if not source_image_url and source_product.image_url:
                 source_image_url = source_product.image_url
                 
-            # 3. 본사상품링크 확인 (이미지가 없는 경우 대체 가능한지)
+            # 3. 본사상품링크 확인 (이미지가 없는 경우 직접 스크래핑하여 이미지 추출)
             if not source_image_url and '본사상품링크' in source_product.original_input_data and source_product.original_input_data['본사상품링크']:
                 product_link = str(source_product.original_input_data['본사상품링크']).strip()
-                if product_link:
-                    self.logger.debug(f"No image URL found, but product link exists: {product_link}")
+                if product_link and 'jclgift.com' in product_link and 'p_idx=' in product_link:
+                    self.logger.info(f"No image URL found, scraping from product link: {product_link}")
+                    
+                    try:
+                        # URL에서 p_idx 파라미터 추출
+                        import re
+                        from ..scraping.haeoeum_scraper import HaeoeumScraper
+                        
+                        p_idx_match = re.search(r'p_idx=(\d+)', product_link)
+                        if p_idx_match:
+                            p_idx = p_idx_match.group(1)
+                            
+                            # 해오름 스크래퍼를 사용하여 이미지 추출
+                            scraper = HaeoeumScraper(cache=self.cache)
+                            scraped_product = scraper.get_product(p_idx)
+                            
+                            if scraped_product and scraped_product.image_url:
+                                source_image_url = scraped_product.image_url
+                                self.logger.info(f"Successfully extracted image URL: {source_image_url}")
+                                
+                                # 결과물을 소스 제품에 저장 (향후 사용)
+                                source_product.image_url = source_image_url
+                                
+                                # 이미지 갤러리도 있으면 저장
+                                if scraped_product.image_gallery:
+                                    source_product.image_gallery = scraped_product.image_gallery
+                                    self.logger.info(f"Added {len(scraped_product.image_gallery)} images to gallery")
+                            else:
+                                self.logger.warning(f"Failed to extract image from {product_link}")
+                    except Exception as e:
+                        self.logger.error(f"Error scraping image from product link: {str(e)}")
         else:
             # 다른 소스의 경우 단순히 image_url 속성 사용
             source_image_url = source_product.image_url

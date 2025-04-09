@@ -22,16 +22,16 @@ logger = logging.getLogger(__name__)
 PRIMARY_REPORT_HEADERS = [
     '구분', '담당자', '업체명', '업체코드', '상품Code', '중분류카테고리', '상품명', 
     '기본수량(1)', '판매단가(V포함)', '본사상품링크', 
-    '기본수량(2)', '판매가(V포함)(2)', '판매단가(V포함)(2)', '가격차이(2)', '가격차이(2)%', '고려기프트상품링크', 
-    '기본수량(3)', '판매단가(V포함)(3)', '가격차이(3)', '가격차이(3)%', '공급사명', '네이버쇼핑 링크', '공급사 상품링크',
+    '기본수량(2)', '판매가(V포함)(2)', '판매단가(V포함)(2)', '가격차이(2)', '가격차이(2)%', '매칭_상황(2)', '텍스트유사도(2)', '고려기프트상품링크', 
+    '기본수량(3)', '판매단가(V포함)(3)', '가격차이(3)', '가격차이(3)%', '매칭_상황(3)', '텍스트유사도(3)', '공급사명', '네이버쇼핑 링크', '공급사 상품링크',
     '본사 이미지', '고려기프트 이미지', '네이버 이미지'
 ]
 
 SECONDARY_REPORT_HEADERS = [ # Should match the input file's structure closely
     '구분', '담당자', '업체명', '업체코드', '상품Code', '중분류카테고리', '상품명', 
     '기본수량(1)', '판매단가(V포함)', '본사상품링크', 
-    '기본수량(2)', '판매가(V포함)(2)', '판매단가(V포함)(2)', '가격차이(2)', '가격차이(2)%', '고려기프트상품링크', 
-    '기본수량(3)', '판매단가(V포함)(3)', '가격차이(3)', '가격차이(3)%', '공급사명', '네이버쇼핑 링크', '공급사 상품링크',
+    '기본수량(2)', '판매가(V포함)(2)', '판매단가(V포함)(2)', '가격차이(2)', '가격차이(2)%', '매칭_상황(2)', '텍스트유사도(2)', '고려기프트상품링크', 
+    '기본수량(3)', '판매단가(V포함)(3)', '가격차이(3)', '가격차이(3)%', '매칭_상황(3)', '텍스트유사도(3)', '공급사명', '네이버쇼핑 링크', '공급사 상품링크',
     '본사 이미지', '고려기프트 이미지', '네이버 이미지' # Links only
 ]
 
@@ -172,15 +172,28 @@ def _apply_conditional_formatting(worksheet, col_map: Dict[str, int]):
                         cell.value = ''
 
 def _apply_image_formula(url: str | None) -> str:
-    """Converts a URL into an Excel IMAGE formula string if valid."""
-    if pd.notna(url) and isinstance(url, str) and url.strip().startswith('http'):
-        # 이미지 URL을 반환하되, 수식은 적용하지 않음 (직접 write_formula로 처리)
-        return url
-    return ''
+    """Converts a URL to an Excel IMAGE formula."""
+    if not url or not isinstance(url, str):
+        return ''
+        
+    # Check if this is an error message rather than a URL
+    error_messages = ["이미지를 찾을 수 없음", "상품을 찾을 수 없음"]
+    if any(msg in url for msg in error_messages):
+        return url  # Return the error message as is, don't convert to formula
+        
+    # Only create formula for actual URLs
+    if url.strip().startswith('http'):
+        # Properly escape URL for Excel formula
+        clean_url = url.replace('"', '""').strip()
+        # Create Excel formula with improved parameters for better image display
+        return f'=IMAGE("{clean_url}",1,0,0,1)'
+    
+    return url  # Return the original text if not a URL
 
 def _remove_at_sign(formula: str) -> str:
-    """Excel에서 추가될 수 있는 @ 기호를 제거합니다."""
-    # 이 함수는 더 이상 사용하지 않지만 호환성을 위해 유지
+    """Removes @ sign from formulas if present - sometimes Excel adds this."""
+    if isinstance(formula, str) and formula.startswith('@'):
+        return formula[1:]
     return formula
 
 def _generate_report(
@@ -227,7 +240,17 @@ def _generate_report(
             row_data['고려기프트 이미지'] = result.best_koryo_match.matched_product.image_url
             row_data['가격차이(2)'] = result.best_koryo_match.price_difference
             row_data['가격차이(2)(%)'] = f"{result.best_koryo_match.price_difference_percent:.2f}%" if result.best_koryo_match.price_difference_percent is not None else ''
-            row_data['매칭_텍스트유사도(고려)'] = f"{result.best_koryo_match.text_similarity:.3f}" if result.best_koryo_match.text_similarity is not None else ''
+            row_data['텍스트유사도(2)'] = f"{result.best_koryo_match.text_similarity:.3f}" if result.best_koryo_match.text_similarity is not None else ''
+            
+            # Add matching status message if text similarity is below threshold
+            threshold = config.get('MATCHING', {}).get('TEXT_SIMILARITY_THRESHOLD', 0.75)
+            if result.best_koryo_match.text_similarity < threshold:
+                row_data['매칭_상황(2)'] = f"일정 정확도({threshold:.2f}) 이상의 텍스트 유사율({result.best_koryo_match.text_similarity:.2f})을 가진 상품이 없음"
+        else:
+            # 매칭된 상품이 없는 경우 메시지 설정
+            row_data['매칭_상황(2)'] = "고려기프트에서 매칭된 상품이 없음"
+            row_data['고려기프트 이미지'] = "상품을 찾을 수 없음"
+            row_data['고려기프트 상품링크'] = "상품을 찾을 수 없음"
 
         if result.best_naver_match:
             # 네이버 관련 컬럼 매핑
@@ -237,7 +260,25 @@ def _generate_report(
             row_data['네이버 이미지'] = result.best_naver_match.matched_product.image_url
             row_data['가격차이(3)'] = result.best_naver_match.price_difference
             row_data['가격차이(3)(%)'] = f"{result.best_naver_match.price_difference_percent:.2f}%" if result.best_naver_match.price_difference_percent is not None else ''
-            row_data['매칭_텍스트유사도(네이버)'] = f"{result.best_naver_match.text_similarity:.3f}" if result.best_naver_match.text_similarity is not None else ''
+            row_data['텍스트유사도(3)'] = f"{result.best_naver_match.text_similarity:.3f}" if result.best_naver_match.text_similarity is not None else ''
+            
+            # Add price range check
+            min_price = config.get('EXCEL', {}).get('PRICE_MIN', 0)
+            max_price = config.get('EXCEL', {}).get('PRICE_MAX', 10000000000)
+            price = result.best_naver_match.matched_product.price
+            if price is not None and (price < min_price or price > max_price):
+                row_data['매칭_상황(3)'] = f"가격이 범위 내에 없음 (최소: {min_price}, 최대: {max_price})"
+            
+            # Add matching status message if text similarity is below threshold
+            threshold = config.get('MATCHING', {}).get('TEXT_SIMILARITY_THRESHOLD', 0.75)
+            if result.best_naver_match.text_similarity < threshold and '매칭_상황(3)' not in row_data:
+                row_data['매칭_상황(3)'] = f"일정 정확도({threshold:.2f}) 이상의 텍스트 유사율({result.best_naver_match.text_similarity:.2f})을 가진 상품이 없음"
+        else:
+            # 매칭된 상품이 없는 경우 메시지 설정
+            row_data['매칭_상황(3)'] = "네이버에서 검색된 상품이 없음"
+            row_data['네이버 이미지'] = "상품을 찾을 수 없음"
+            row_data['네이버 쇼핑 링크'] = "상품을 찾을 수 없음"
+            row_data['공급사 상품링크'] = "상품을 찾을 수 없음"
 
         # Ensure all defined columns are present, even if empty
         for col in columns_to_include:
@@ -344,13 +385,27 @@ def _generate_report(
                     if col_name in image_columns and pd.notna(df_report.iloc[row_idx][col_name]):
                         # 이미지 URL 가져오기
                         url = df_report.iloc[row_idx][col_name]
-                        if pd.notna(url) and isinstance(url, str) and url.strip().startswith('http'):
-                            # 셀 주소 계산 (헤더와 오프셋 고려)
-                            cell_addr = xl_rowcol_to_cell(row_idx + data_start_row + 1, col_idx)
+                        
+                        # 셀 주소 계산 (헤더와 오프셋 고려)
+                        cell_addr = xl_rowcol_to_cell(row_idx + data_start_row + 1, col_idx)
+                        
+                        # Check if this is an error message rather than a URL
+                        error_messages = ["이미지를 찾을 수 없음", "상품을 찾을 수 없음"]
+                        
+                        if pd.notna(url) and isinstance(url, str) and any(msg in url for msg in error_messages):
+                            # It's an error message, apply error text formatting
+                            error_format = writer.book.add_format({
+                                'color': 'red',
+                                'italic': True,
+                                'align': 'center',
+                                'valign': 'center'
+                            })
+                            worksheet.write_string(cell_addr, url, error_format)
+                        elif pd.notna(url) and isinstance(url, str) and url.strip().startswith('http'):
                             # 큰따옴표 이스케이프 처리
                             escaped_url = url.replace('"', '""')
-                            # 수식 직접 쓰기 (텍스트가 아닌 수식으로)
-                            formula = f'IMAGE("{escaped_url}")'
+                            # Enhanced formula with parameters for better display
+                            formula = f'IMAGE("{escaped_url}",1,0,0,1)'
                             try:
                                 # write_formula 메서드 사용하여 수식으로 인식되도록 함
                                 worksheet.write_formula(cell_addr, formula)
@@ -359,6 +414,23 @@ def _generate_report(
                                 logger.warning(f"이미지 수식 입력 실패 (셀 {cell_addr}): {e}")
                                 # 실패 시 텍스트로라도 URL 입력
                                 worksheet.write_string(cell_addr, f"URL: {url}")
+            
+            # Add matching status column formatting
+            for row_idx in range(len(df_report)):
+                for col_name in ['매칭_상황(2)', '매칭_상황(3)']:
+                    if col_name in df_report.columns and pd.notna(df_report.iloc[row_idx][col_name]):
+                        status_message = df_report.iloc[row_idx][col_name]
+                        if status_message:  # If there's an error message
+                            col_idx = df_report.columns.get_loc(col_name)
+                            cell_addr = xl_rowcol_to_cell(row_idx + data_start_row + 1, col_idx)
+                            status_format = writer.book.add_format({
+                                'color': 'red',
+                                'bold': True,
+                                'text_wrap': True
+                            })
+                            worksheet.write_string(cell_addr, status_message, status_format)
+                            # Make the row height taller for wrapped text
+                            worksheet.set_row(row_idx + data_start_row + 1, 60)
             
             # --- Add detailed instructions sheet ---
             instructions_sheet = workbook.add_worksheet('이미지 표시 방법')
@@ -376,7 +448,8 @@ def _generate_report(
                 'font_size': 16,
                 'align': 'center',
                 'valign': 'vcenter',
-                'bg_color': '#DDEBF7'  # Light blue background
+                'bg_color': '#DDEBF7',  # Light blue background
+                'border': 1
             })
             
             # Content formatting
@@ -392,6 +465,13 @@ def _generate_report(
                 'font_size': 12
             })
             
+            # Important notice formatting
+            important_format = workbook.add_format({
+                'bold': True,
+                'font_size': 12,
+                'color': 'red'
+            })
+            
             # Write instructions
             instructions_sheet.merge_range('A1:A2', '이미지 표시 활성화 방법', title_format)
             
@@ -400,35 +480,93 @@ def _generate_report(
             row += 2
             
             # Step 1 - Updated with manual correction instructions
-            instructions_sheet.write(row, 0, "1. 이미지가 보이지 않고 @IMAGE(...)로 표시될 경우, 다음 두 가지 방법으로 해결할 수 있습니다:", step_format)
+            instructions_sheet.write(row, 0, "1. 이미지가 보이지 않고 @IMAGE(...)로 표시될 경우:", step_format)
             row += 1
             instructions_sheet.write(row, 0, "   방법 1: 해당 셀을 더블클릭하여 편집 모드로 들어간 후, @ 기호를 지우고 앞에 = 기호를 넣은 다음 Enter를 누릅니다.", content_format)
             row += 1
             instructions_sheet.write(row, 0, "   방법 2: 셀을 선택하고 Enter 키를 누르면 나타나는 자동 수정 대화상자에서 '확인'을 클릭합니다.", content_format)
             row += 2
             
-            # Step 2
-            instructions_sheet.write(row, 0, "2. Excel 파일을 열었을 때 상단에 '보안 경고: 외부 데이터 연결이 사용 안 함으로 설정되었습니다'라는 노란색 메시지가 표시됩니다.", step_format)
+            # Step 2 - Security warning information
+            instructions_sheet.write(row, 0, "2. 보안 경고 처리 방법:", step_format)
+            row += 1
+            instructions_sheet.write(row, 0, "   Excel을 열었을 때 상단에 '보안 경고: 외부 데이터 연결이 사용 안 함으로 설정되었습니다'라는 노란색 메시지가 표시되면:", content_format)
             row += 1
             instructions_sheet.write(row, 0, "   - '콘텐츠 사용' 버튼을 클릭하세요.", content_format)
             row += 2
             
-            # Step 3
-            instructions_sheet.write(row, 0, "3. 그래도 이미지가 보이지 않는 경우, Excel의 '파일' 메뉴 > '옵션' > '트러스트 센터' > '트러스트 센터 설정' 버튼을 클릭하세요.", step_format)
+            # Step 3 - Trust Center settings
+            instructions_sheet.write(row, 0, "3. 트러스트 센터 설정 변경 (영구적 해결):", step_format)
+            row += 1
+            instructions_sheet.write(row, 0, "   a. Excel의 '파일' 메뉴 > '옵션' > '트러스트 센터' > '트러스트 센터 설정' 버튼을 클릭하세요.", content_format)
+            row += 1
+            instructions_sheet.write(row, 0, "   b. '외부 콘텐츠' 항목을 선택하고, '모든 외부 데이터 연결 사용' 옵션을 선택한 후 '확인'을 클릭하세요.", content_format)
+            row += 1
+            instructions_sheet.write(row, 0, "   c. Excel을 다시 시작하세요.", content_format)
             row += 2
             
-            # Step 4
-            instructions_sheet.write(row, 0, "4. '트러스트 센터' 창에서 '외부 콘텐츠' 항목을 선택하고, '모든 외부 데이터 연결 사용' 옵션을 선택한 후 '확인'을 클릭하세요.", step_format)
+            # Step 4 - Manual refresh
+            instructions_sheet.write(row, 0, "4. 이미지 수동 새로고침 방법:", step_format)
+            row += 1
+            instructions_sheet.write(row, 0, "   이미지가 보이지 않거나 깨진 경우:", content_format)
+            row += 1
+            instructions_sheet.write(row, 0, "   - 이미지 셀을 더블클릭한 후 Enter 키를 누르면 Excel이 해당 이미지를 다시 로드합니다.", content_format)
+            row += 1
+            instructions_sheet.write(row, 0, "   - 여러 셀을 선택한 후 F9 키를 누르면 선택한 모든 셀의 내용이 새로고침됩니다.", content_format)
             row += 2
             
-            # Step 5
-            instructions_sheet.write(row, 0, "5. Excel을 다시 시작하세요.", step_format)
+            # Add a new section about error messages
+            row += 2
+            instructions_sheet.write(row, 0, "6. 오류 메시지 안내:", step_format)
+            row += 1
+            
+            # Create error format for examples
+            error_format = workbook.add_format({
+                'color': 'red',
+                'bold': True,
+                'text_wrap': True
+            })
+            
+            instructions_sheet.write(row, 0, "다음과 같은 빨간색 메시지는 상품 매칭 과정에서 발생한 문제를 나타냅니다:", content_format)
+            row += 1
+            
+            # Error message examples
+            instructions_sheet.write(row, 0, "   a. 일정 정확도(0.75) 이상의 텍스트 유사율을 가진 상품이 없음", error_format)
+            row += 1
+            instructions_sheet.write(row, 0, "      → 검색된 상품이 원본 상품과 충분히 유사하지 않음을 의미합니다. 텍스트 유사도가 임계값보다 낮습니다.", content_format)
             row += 2
             
-            # Tip for manual image updates
-            instructions_sheet.write(row, 0, "※ 팁: 이미지 수식이 있는 셀을 더블클릭한 후 Enter 키를 누르면 Excel이 해당 이미지를 다시 로드하려고 시도합니다.", content_format)
+            instructions_sheet.write(row, 0, "   b. 상품을 찾을 수 없음", error_format)
+            row += 1
+            instructions_sheet.write(row, 0, "      → 해당 상품이 검색 결과에 전혀 없음을 의미합니다.", content_format)
+            row += 2
             
-            logger.info(f"Added detailed instructions sheet to help with image display settings.")
+            instructions_sheet.write(row, 0, "   c. 이미지를 찾을 수 없음", error_format)
+            row += 1
+            instructions_sheet.write(row, 0, "      → 매칭된 상품의 이미지 URL을 찾을 수 없음을 의미합니다.", content_format)
+            row += 2
+            
+            instructions_sheet.write(row, 0, "   d. 가격이 범위 내에 없음", error_format)
+            row += 1
+            instructions_sheet.write(row, 0, "      → 찾은 상품의 가격이 설정된 최소/최대 가격 범위를 벗어났음을 의미합니다.", content_format)
+            row += 2
+            
+            # Important notice about negative price differences
+            instructions_sheet.write(row, 0, "※ 중요 알림: 노란색으로 표시된 셀은 가격 차이가 음수인 항목입니다.", important_format)
+            row += 1
+            instructions_sheet.write(row, 0, "※ 이미지는 인터넷 연결이 있어야 정상적으로 표시됩니다.", important_format)
+            row += 2
+            
+            # Common error solutions
+            instructions_sheet.write(row, 0, "7. 일반적인 문제 해결:", step_format)
+            row += 1
+            instructions_sheet.write(row, 0, "   - '#VALUE!' 오류가 표시될 경우: 해당 셀 수식을 다시 확인하고 Enter 키를 눌러보세요.", content_format)
+            row += 1
+            instructions_sheet.write(row, 0, "   - 이미지가 깨지거나 불완전하게 표시될 경우: 네트워크 연결을 확인하세요.", content_format)
+            row += 1
+            instructions_sheet.write(row, 0, "   - 모든 이미지가 동시에 로드되지 않을 수 있습니다. 필요한 셀마다 개별적으로 확인하세요.", content_format)
+            
+            logger.info(f"Added detailed instructions sheet to help with image display settings and error messages.")
 
         logger.info(f"Excel 보고서가 성공적으로 생성되었습니다: {output_file}")
         return output_file

@@ -23,6 +23,7 @@ class ImageMatcher:
         self.logger = logging.getLogger(__name__)
         self.cache = cache
         self.similarity_threshold = similarity_threshold
+        self.remove_background = False  # 기본값은 배경 제거 비활성화
         
         # 더 최신 모델로 업그레이드 (b0 → b3)
         try:
@@ -430,3 +431,13 @@ class ImageMatcher:
         except Exception as e:
             self.logger.warning(f"Image download/preprocessing failed: {str(e)}")
             return None 
+
+    def _remove_background(self, img: Image.Image) -> Image.Image:
+        """배경을 제거한 이미지 반환"""
+        try:
+            # 배경 제거 후 이미지 반환
+            img = remove(img)
+            return img
+        except Exception as e:
+            self.logger.error(f"Error removing background: {e}", exc_info=True)
+            return img 

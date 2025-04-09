@@ -57,7 +57,7 @@ class ProductFactory:
             # 제품명 확인
             product_name = None
             if '상품명' in row and not pd.isna(row['상품명']):
-                product_name = self.data_cleaner.clean_product_name(str(row['상품명']))
+                product_name = self.data_cleaner.clean_product_names(str(row['상품명']))
             
             if not product_name:
                 self.logger.error("No product name found, cannot create product")

@@ -27,8 +27,30 @@ class ExcelManager:
         self.excel_settings = config.get('EXCEL', {})
         self._ensure_default_excel_settings()
         
-        # Yellow fill for price differences
-        self.price_difference_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        # Styling fills for different purposes (enhanced with more colors)
+        self.price_difference_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # Yellow for price differences
+        self.header_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")  # Light yellow for headers
+        self.alt_row_fill = PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid")  # Light gray for alternate rows
+        self.group_header_fill = PatternFill(start_color="E6E6FA", end_color="E6E6FA", fill_type="solid")  # Lavender for group headers
+        
+        # Font styles
+        self.bold_font = Font(bold=True)
+        
+        # Border styles
+        self.thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        
+        # Alignment
+        self.center_align = Alignment(horizontal='center', vertical='center')
+        self.left_align = Alignment(horizontal='left', vertical='center')
+        
+        # Height settings
+        self.row_height = 18  # Default row height
+        self.image_row_height = 110  # Height for rows with images
     
     def _ensure_default_excel_settings(self):
         """설정에 필요한 기본값을 설정합니다."""
@@ -301,30 +323,169 @@ class ExcelManager:
             wb = load_workbook(excel_file)
             ws = wb.active
             
-            # 가격차이 컬럼 찾기
-            price_diff_cols = []
+            # 1. Format header row
+            for col in range(1, ws.max_column + 1):
+                cell = ws.cell(row=1, column=col)
+                cell.font = self.bold_font
+                cell.alignment = self.center_align
+                cell.fill = self.header_fill
+                cell.border = self.thin_border
+            
+            # 2. Format image columns - set wider columns and taller rows
+            image_col_indices = []
+            status_col_indices = []
+            
             for col in range(1, ws.max_column + 1):
                 header = ws.cell(row=1, column=col).value
-                if header and ('가격차이' in str(header)):
-                    price_diff_cols.append(col)
+                if header and ('이미지' in str(header)):
+                    image_col_indices.append(col)
+                    # Make columns with images wider
+                    col_letter = get_column_letter(col)
+                    ws.column_dimensions[col_letter].width = 20
+                elif header and ('매칭_상황' in str(header) or '텍스트유사도' in str(header)):
+                    status_col_indices.append(col)
+                    # 상태 메시지 컬럼 넓게 설정
+                    col_letter = get_column_letter(col)
+                    ws.column_dimensions[col_letter].width = 30
             
-            # 음수 가격차이에 노란색 하이라이트 적용
-            for col in price_diff_cols:
-                for row in range(2, ws.max_row + 1):
+            # 3. Apply zebra striping and set appropriate row heights
+            for row in range(2, ws.max_row + 1):
+                # Set row height - taller for rows with images or error messages
+                has_image = False
+                has_error = False
+                
+                for col in image_col_indices:
+                    cell_value = ws.cell(row=row, column=col).value
+                    if cell_value and isinstance(cell_value, str) and (cell_value.startswith('http') or cell_value.startswith('=IMAGE')):
+                        has_image = True
+                        break
+                
+                for col in status_col_indices:
+                    cell_value = ws.cell(row=row, column=col).value
+                    if cell_value and isinstance(cell_value, str) and len(cell_value) > 10:  # 긴 메시지가 있는 경우
+                        has_error = True
+                        break
+                
+                if has_image:
+                    ws.row_dimensions[row].height = self.image_row_height
+                elif has_error:
+                    ws.row_dimensions[row].height = 60  # 오류 메시지를 위한 높이
+                else:
+                    ws.row_dimensions[row].height = self.row_height
+                
+                # Apply zebra striping (alternate row coloring)
+                if row % 2 == 0:  # Even rows get light coloring
+                    for col in range(1, ws.max_column + 1):
+                        cell = ws.cell(row=row, column=col)
+                        if not cell.fill or cell.fill.start_color.index == 'FFFFFF':  # Only if not already colored
+                            cell.fill = self.alt_row_fill
+                
+                # Apply border to all cells
+                for col in range(1, ws.max_column + 1):
+                    cell = ws.cell(row=row, column=col)
+                    cell.border = self.thin_border
+                    
+                    # 오류 메시지에 빨간색 폰트 적용
+                    if col in status_col_indices:
+                        cell_value = cell.value
+                        if cell_value and isinstance(cell_value, str) and "상품이 없음" in cell_value:
+                            cell.font = Font(color="FF0000", bold=True)
+                            cell.alignment = Alignment(wrap_text=True, vertical='center')
+            
+            # 4. Find price difference columns and apply formatting
+            price_diff_cols = []
+            price_percent_cols = []
+            for col in range(1, ws.max_column + 1):
+                header = ws.cell(row=1, column=col).value
+                if header:
+                    if '가격차이' in str(header) and '%' not in str(header):
+                        price_diff_cols.append(col)
+                    elif '가격차이' in str(header) and '%' in str(header):
+                        price_percent_cols.append(col)
+            
+            # 5. Apply highlighting for negative price differences
+            for row in range(2, ws.max_row + 1):
+                should_highlight_row = False
+                
+                # Check if any price difference column has negative value
+                for col in price_diff_cols:
                     cell = ws.cell(row=row, column=col)
                     try:
                         value = float(cell.value) if cell.value is not None else 0
                         if value < 0:
                             cell.fill = self.price_difference_fill
+                            should_highlight_row = True  # Mark for row highlighting
                     except:
                         pass  # 숫자가 아닌 셀은 무시
+                
+                # Apply number formatting to percentage columns
+                for col in price_percent_cols:
+                    cell = ws.cell(row=row, column=col)
+                    if isinstance(cell.value, (int, float)):
+                        cell.number_format = '0.0%'
+                    elif isinstance(cell.value, str):
+                        # Try to convert string percentage to number format
+                        try:
+                            if cell.value.endswith('%'):
+                                value = float(cell.value.rstrip('%')) / 100
+                                cell.value = value
+                                cell.number_format = '0.0%'
+                        except:
+                            pass
+                
+                # 오류 메시지가 있는 텍스트 셀 포맷팅
+                for col in status_col_indices:
+                    cell = ws.cell(row=row, column=col)
+                    value = cell.value
+                    if value and isinstance(value, str):
+                        if "일정 정확도" in value or "범위 내에 없음" in value or "찾을 수 없음" in value:
+                            cell.font = Font(color="FF0000", bold=True)
+                            cell.alignment = Alignment(wrap_text=True, vertical='center')
             
-            # 변경사항 저장
+            # 6. Adjust column widths based on content
+            for col in range(1, ws.max_column + 1):
+                if col in status_col_indices:
+                    # 상태 메시지 컬럼은 이미 설정했으므로 건너뜀
+                    continue
+                
+                if col in image_col_indices:
+                    # 이미지 컬럼은 이미 설정했으므로 건너뜀
+                    continue
+                
+                max_length = 0
+                column = get_column_letter(col)
+                
+                # Check all values in the column
+                for row in range(1, ws.max_row + 1):
+                    cell = ws.cell(row=row, column=col)
+                    if cell.value:
+                        try:
+                            cell_length = len(str(cell.value))
+                            if cell_length > max_length:
+                                max_length = cell_length
+                        except:
+                            pass
+                
+                # Adjust column width based on content
+                adjusted_width = min(max_length + 4, 50)  # Cap width at 50
+                if '상품명' in str(ws.cell(row=1, column=col).value):
+                    adjusted_width = max(adjusted_width, 35)  # Product names need more space
+                elif '링크' in str(ws.cell(row=1, column=col).value):
+                    adjusted_width = max(adjusted_width, 25)  # Links need more space
+                else:
+                    adjusted_width = max(adjusted_width, 12)  # Minimum width for readability
+                
+                ws.column_dimensions[column].width = adjusted_width
+            
+            # 7. Freeze panes at A2 (keep header visible while scrolling)
+            ws.freeze_panes = "A2"
+            
+            # 8. Save the formatted workbook
             wb.save(excel_file)
-            self.logger.info(f"Formatting applied to {excel_file}")
+            self.logger.info(f"Enhanced formatting applied to {excel_file}")
             
         except Exception as e:
-            self.logger.error(f"Error applying formatting: {str(e)}", exc_info=True)
+            self.logger.error(f"Error applying enhanced formatting: {str(e)}", exc_info=True)
     
     def generate_enhanced_output(self, results: List, input_file: str) -> str:
         """처리 결과를 엑셀로 저장하고 포맷팅을 적용합니다."""
@@ -385,6 +546,9 @@ class ExcelManager:
             # DataFrame 생성
             result_df = pd.DataFrame(report_data)
             
+            # 가격 차이 데이터 정확하게 계산하고 기록 (필요한 경우 다시 계산)
+            self._calculate_price_differences(result_df)
+            
             # 컬럼 순서 정렬
             result_df = self._reorder_columns(result_df)
             
@@ -423,6 +587,82 @@ class ExcelManager:
             except Exception as inner_e:
                 self.logger.critical(f"오류 파일 생성 중 추가 오류 발생: {str(inner_e)}")
                 return ""
+
+    def _calculate_price_differences(self, df: pd.DataFrame) -> None:
+        """가격 차이 및 백분율 계산을 확인하고 필요한 경우 다시 계산"""
+        try:
+            # 1. 고려기프트 가격 차이 계산
+            if '판매단가(V포함)' in df.columns and '판매단가(V포함)(2)' in df.columns:
+                # 기존 열이 있으면 삭제 
+                if '가격차이(2)' in df.columns:
+                    del df['가격차이(2)']
+                if '가격차이(2)(%)' in df.columns:
+                    del df['가격차이(2)(%)']
+                
+                # 가격 차이 계산 (고려기프트 가격 - 본사 가격)
+                df['가격차이(2)'] = df.apply(
+                    lambda row: row['판매단가(V포함)(2)'] - row['판매단가(V포함)'] 
+                    if pd.notna(row.get('판매단가(V포함)(2)')) and pd.notna(row.get('판매단가(V포함)'))
+                    else None, 
+                    axis=1
+                )
+                
+                # 가격 차이 백분율 계산
+                df['가격차이(2)(%)'] = df.apply(
+                    lambda row: ((row['판매단가(V포함)(2)'] - row['판매단가(V포함)']) / row['판매단가(V포함)']) * 100
+                    if pd.notna(row.get('판매단가(V포함)(2)')) and pd.notna(row.get('판매단가(V포함)')) and row['판매단가(V포함)'] != 0
+                    else None,
+                    axis=1
+                )
+            
+            # 2. 네이버 가격 차이 계산
+            if '판매단가(V포함)' in df.columns and '판매단가(V포함)(3)' in df.columns:
+                # 기존 열이 있으면 삭제
+                if '가격차이(3)' in df.columns:
+                    del df['가격차이(3)']
+                if '가격차이(3)(%)' in df.columns:
+                    del df['가격차이(3)(%)']
+                
+                # 가격 차이 계산 (네이버 가격 - 본사 가격)
+                df['가격차이(3)'] = df.apply(
+                    lambda row: row['판매단가(V포함)(3)'] - row['판매단가(V포함)']
+                    if pd.notna(row.get('판매단가(V포함)(3)')) and pd.notna(row.get('판매단가(V포함)'))
+                    else None,
+                    axis=1
+                )
+                
+                # 가격 차이 백분율 계산
+                df['가격차이(3)(%)'] = df.apply(
+                    lambda row: ((row['판매단가(V포함)(3)'] - row['판매단가(V포함)']) / row['판매단가(V포함)']) * 100
+                    if pd.notna(row.get('판매단가(V포함)(3)')) and pd.notna(row.get('판매단가(V포함)')) and row['판매단가(V포함)'] != 0 
+                    else None,
+                    axis=1
+                )
+        except Exception as e:
+            self.logger.warning(f"가격 차이 계산 중 오류 발생: {str(e)}")
+
+    def _reorder_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """컬럼 순서를 예시와 일치하도록 정렬합니다."""
+        # 참고 컬럼 순서 (예시 엑셀과 일치)
+        column_order = [
+            '구분', '담당자', '업체명', '업체코드', 'Code', '중분류카테고리', '상품명',
+            '기본수량(1)', '판매단가(V포함)', '본사상품링크', '기본수량(2)', '판매단가(V포함)(2)', '판매가(V포함)(2)',
+            '가격차이(2)', '가격차이(2)(%)', '매칭_상황(2)', '텍스트유사도(2)', '고려기프트 상품링크', '기본수량(3)', '판매단가(V포함)(3)', 
+            '가격차이(3)', '가격차이(3)(%)', '매칭_상황(3)', '텍스트유사도(3)', '공급사명', '네이버 쇼핑 링크', '공급사 상품링크', 
+            '본사 이미지', '고려기프트 이미지', '네이버 이미지'
+        ]
+        
+        # 실제 존재하는 컬럼만 정렬에 포함
+        existing_columns = [col for col in column_order if col in df.columns]
+        
+        # 누락된 컬럼은 원래 위치에 보존
+        missing_columns = [col for col in df.columns if col not in column_order]
+        
+        # 누락된 컬럼이 있을 경우 기본 순서 뒤에 추가
+        ordered_columns = existing_columns + missing_columns
+        
+        # 재정렬된 DataFrame 반환
+        return df[ordered_columns]
 
     def _ensure_required_fields(self, row: Dict, result: object) -> None:
         """필수 필드가 존재하는지 확인하고 없으면 생성"""
@@ -469,6 +709,9 @@ class ExcelManager:
         if hasattr(koryo_match, 'matched_product'):
             match_product = koryo_match.matched_product
             
+            # 매칭 성공 여부 확인
+            match_success = getattr(koryo_match, 'text_similarity', 0) >= self.config.get('MATCHING', {}).get('TEXT_SIMILARITY_THRESHOLD', 0.75)
+            
             # 가격 정보
             if hasattr(match_product, 'price'):
                 row['판매단가(V포함)(2)'] = match_product.price
@@ -480,25 +723,58 @@ class ExcelManager:
             if hasattr(koryo_match, 'price_difference_percent'):
                 row['가격차이(2)%'] = koryo_match.price_difference_percent
             
-            # 이미지 및 링크
-            if hasattr(match_product, 'image_url'):
-                row['고려기프트 이미지'] = match_product.image_url
+            # 텍스트 유사도
+            if hasattr(koryo_match, 'text_similarity'):
+                row['텍스트유사도(2)'] = koryo_match.text_similarity
             
-            if hasattr(match_product, 'url'):
+            # 이미지 및 링크
+            if hasattr(match_product, 'image_url') and match_product.image_url:
+                row['고려기프트 이미지'] = match_product.image_url
+            else:
+                # 이미지 URL이 없는 경우 메시지 설정
+                row['고려기프트 이미지'] = "이미지를 찾을 수 없음"
+            
+            if hasattr(match_product, 'url') and match_product.url:
                 row['고려기프트 상품링크'] = match_product.url
+            else:
+                # 링크가 없는 경우 메시지 설정
+                row['고려기프트 상품링크'] = "상품 링크를 찾을 수 없음"
+            
+            # 매칭 실패 시 메시지 설정
+            if not match_success:
+                text_similarity = getattr(koryo_match, 'text_similarity', 0)
+                threshold = self.config.get('MATCHING', {}).get('TEXT_SIMILARITY_THRESHOLD', 0.75)
+                row['매칭_상황(2)'] = f"일정 정확도({threshold:.2f}) 이상의 텍스트 유사율({text_similarity:.2f})을 가진 상품이 없음"
+        else:
+            # 매칭된 상품이 없는 경우
+            row['매칭_상황(2)'] = "고려기프트에서 매칭된 상품이 없음"
+            row['판매단가(V포함)(2)'] = 0
+            row['가격차이(2)'] = 0
+            row['가격차이(2)%'] = 0
+            row['고려기프트 이미지'] = "상품을 찾을 수 없음"
+            row['고려기프트 상품링크'] = "상품을 찾을 수 없음"
 
     def _add_naver_match_data(self, row: Dict, naver_match: object) -> None:
         """네이버 매칭 데이터 추가"""
         if hasattr(naver_match, 'matched_product'):
             match_product = naver_match.matched_product
             
+            # 매칭 성공 여부 확인
+            match_success = getattr(naver_match, 'text_similarity', 0) >= self.config.get('MATCHING', {}).get('TEXT_SIMILARITY_THRESHOLD', 0.75)
+            
             # 공급사 정보
-            if hasattr(match_product, 'brand'):
+            if hasattr(match_product, 'brand') and match_product.brand:
                 row['공급사명'] = match_product.brand
+            else:
+                row['공급사명'] = "정보 없음"
             
             # 가격 정보
             if hasattr(match_product, 'price'):
+                price_in_range = self._is_price_in_range(match_product.price)
                 row['판매단가(V포함)(3)'] = match_product.price
+                
+                if not price_in_range:
+                    row['매칭_상황(3)'] = "가격이 범위 내에 없음"
             
             # 가격 차이 정보
             if hasattr(naver_match, 'price_difference'):
@@ -507,13 +783,50 @@ class ExcelManager:
             if hasattr(naver_match, 'price_difference_percent'):
                 row['가격차이(3)%'] = naver_match.price_difference_percent
             
-            # 이미지 및 링크
-            if hasattr(match_product, 'image_url'):
-                row['네이버 이미지'] = match_product.image_url
+            # 텍스트 유사도
+            if hasattr(naver_match, 'text_similarity'):
+                row['텍스트유사도(3)'] = naver_match.text_similarity
             
-            if hasattr(match_product, 'url'):
+            # 이미지 및 링크
+            if hasattr(match_product, 'image_url') and match_product.image_url:
+                row['네이버 이미지'] = match_product.image_url
+            else:
+                # 이미지 URL이 없는 경우 메시지 설정
+                row['네이버 이미지'] = "이미지를 찾을 수 없음"
+            
+            if hasattr(match_product, 'url') and match_product.url:
                 row['네이버 쇼핑 링크'] = match_product.url
                 row['공급사 상품링크'] = match_product.url
+            else:
+                # 링크가 없는 경우 메시지 설정
+                row['네이버 쇼핑 링크'] = "상품 링크를 찾을 수 없음"
+                row['공급사 상품링크'] = "상품 링크를 찾을 수 없음"
+            
+            # 매칭 실패 시 메시지 설정
+            if not match_success and not row.get('매칭_상황(3)'):
+                text_similarity = getattr(naver_match, 'text_similarity', 0)
+                threshold = self.config.get('MATCHING', {}).get('TEXT_SIMILARITY_THRESHOLD', 0.75)
+                row['매칭_상황(3)'] = f"일정 정확도({threshold:.2f}) 이상의 텍스트 유사율({text_similarity:.2f})을 가진 상품이 없음"
+        else:
+            # 매칭된 상품이 없는 경우
+            row['매칭_상황(3)'] = "네이버에서 검색된 상품이 없음"
+            row['판매단가(V포함)(3)'] = 0
+            row['가격차이(3)'] = 0
+            row['가격차이(3)%'] = 0
+            row['공급사명'] = "상품을 찾을 수 없음"
+            row['네이버 이미지'] = "상품을 찾을 수 없음"
+            row['네이버 쇼핑 링크'] = "상품을 찾을 수 없음"
+            row['공급사 상품링크'] = "상품을 찾을 수 없음"
+    
+    def _is_price_in_range(self, price) -> bool:
+        """가격이 설정된 범위 내에 있는지 확인"""
+        if price is None:
+            return False
+            
+        min_price = self.config.get('EXCEL', {}).get('PRICE_MIN', 0)
+        max_price = self.config.get('EXCEL', {}).get('PRICE_MAX', 10000000000)
+        
+        return min_price <= price <= max_price
 
     def _set_default_values(self, row: Dict) -> None:
         """빈 필드에 기본값 설정"""
@@ -529,31 +842,13 @@ class ExcelManager:
             '공급사 상품링크': '', 
             '본사 이미지': '', 
             '고려기프트 이미지': '', 
-            '네이버 이미지': ''
+            '네이버 이미지': '',
+            '매칭_상황(2)': '',
+            '매칭_상황(3)': '',
+            '텍스트유사도(2)': 0,
+            '텍스트유사도(3)': 0
         }
         
         for field, default_value in default_fields.items():
             if field not in row or pd.isna(row[field]) or row[field] == '':
-                row[field] = default_value
-
-    def _reorder_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        """컬럼 순서 정렬"""
-        # 원하는 컬럼 순서
-        preferred_order = [
-            '구분', '담당자', '업체명', '업체코드', '상품Code', '중분류카테고리', '상품명', 
-            '기본수량(1)', '판매단가(V포함)', '본사상품링크', 
-            '기본수량(2)', '판매가(V포함)(2)', '판매단가(V포함)(2)', '가격차이(2)', '가격차이(2)%', '고려기프트 상품링크', 
-            '기본수량(3)', '판매단가(V포함)(3)', '가격차이(3)', '가격차이(3)%', '공급사명', '네이버 쇼핑 링크', '공급사 상품링크',
-            '본사 이미지', '고려기프트 이미지', '네이버 이미지'
-        ]
-        
-        # 현재 컬럼과 원하는 순서를 비교
-        current_columns = list(df.columns)
-        ordered_columns = [col for col in preferred_order if col in current_columns]
-        
-        # 기존 DF에 있지만 preferred_order에 없는 컬럼들을 추가
-        remaining_columns = [col for col in current_columns if col not in preferred_order]
-        final_columns = ordered_columns + remaining_columns
-        
-        # 최종 순서로 정렬된 데이터프레임 반환
-        return df[final_columns] 
+                row[field] = default_value 

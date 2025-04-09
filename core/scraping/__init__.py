@@ -259,15 +259,15 @@ class BaseMultiLayerScraper:
         """희소 데이터 구조에서 데이터 가져오기"""
         if key not in self.sparse_data:
             return None
-            
-        data = self.sparse_data[key]
         
+        data_obj = self.sparse_data[key]
         # TTL 확인
-        if data['expire_at'] and time.time() > data['expire_at']:
+        if data_obj.get('expire_at') and data_obj['expire_at'] < time.time():
+            # 만료된 데이터 삭제
             del self.sparse_data[key]
             return None
-            
-        return data['value']
+        
+        return data_obj['value']
     
     def clean_expired_data(self):
         """만료된 희소 데이터 정리"""
@@ -287,3 +287,15 @@ class BaseMultiLayerScraper:
         # 실행 중인 모든 작업 취소
         for task in self.active_tasks:
             task.cancel()
+
+# 공개 클래스/함수들
+from .koryo_scraper import KoryoScraper
+from .naver_crawler import NaverShoppingCrawler
+from .haeoeum_scraper import HaeoeumScraper
+
+__all__ = [
+    'BaseMultiLayerScraper',
+    'KoryoScraper',
+    'NaverShoppingCrawler',
+    'HaeoeumScraper'
+]
