@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QPlainTextEdit, QFileDialog, QSplitter, QFrame,
                             QScrollArea, QTabWidget, QGroupBox, QSpinBox, QCheckBox,
                             QComboBox)
-from PyQt5.QtCore import Qt, pyqtSlot, QTimer, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSlot, QTimer, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon
 from PyQt5.QtSvg import QSvgWidget
 import logging
@@ -308,7 +308,7 @@ class MainWindow(QMainWindow):
         recent_files_layout.addWidget(self.recent_files_list)
         layout.addWidget(recent_files_group)
         
-        # Statistics section
+        # Statistics section (hidden)
         stats_layout = QHBoxLayout()
         
         # Products analyzed
@@ -318,6 +318,7 @@ class MainWindow(QMainWindow):
         products_label.setAlignment(Qt.AlignCenter)
         products_layout.addWidget(products_label)
         stats_layout.addWidget(products_group)
+        products_group.hide()  # Hide instead of removing
         
         # Average price difference
         price_diff_group = QGroupBox(tr.get_text("avg_price_diff"))
@@ -326,6 +327,7 @@ class MainWindow(QMainWindow):
         price_diff_label.setAlignment(Qt.AlignCenter)
         price_diff_layout.addWidget(price_diff_label)
         stats_layout.addWidget(price_diff_group)
+        price_diff_group.hide()  # Hide instead of removing
         
         # Processing time
         time_group = QGroupBox(tr.get_text("processing_time"))
@@ -334,6 +336,7 @@ class MainWindow(QMainWindow):
         time_label.setAlignment(Qt.AlignCenter)
         time_layout.addWidget(time_label)
         stats_layout.addWidget(time_group)
+        time_group.hide()  # Hide instead of removing
         
         layout.addLayout(stats_layout)
         
@@ -403,10 +406,13 @@ class MainWindow(QMainWindow):
     
     def _setup_gui_logging(self):
         """Setup logging handler for GUI"""
-        gui_handler = GUILogHandler(self.log_area)
-        gui_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.gui_handler = GUILogHandler() # Initialize GUILogHandler correctly
+        self.gui_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        # Connect the handler's signal to the main window's slot
+        self.gui_handler.log_signal.connect(self.append_log_message)
+
         root_logger = logging.getLogger()
-        root_logger.addHandler(gui_handler)
+        root_logger.addHandler(self.gui_handler)
         root_logger.setLevel(self.settings.get_log_level())
     
     def connect_signals(self):
@@ -463,33 +469,33 @@ class MainWindow(QMainWindow):
             else:
                 self.recent_files_list.appendPlainText(tr.get_text("no_recent_files"))
             
-            # Update statistics cards
-            # Find the statistics cards by traversing the tab's children
-            dashboard_tab = self.tab_widget.widget(0)
+            # # Update statistics cards - Commented out historical metrics
+            # # Find the statistics cards by traversing the tab's children
+            # dashboard_tab = self.tab_widget.widget(0)
             
-            # Products count
-            products_count = self.settings.get("processed_count", 0)
-            for child in dashboard_tab.findChildren(QGroupBox):
-                if child.title() == tr.get_text("products_analyzed"):
-                    for label in child.findChildren(QLabel):
-                        label.setText(str(products_count))
+            # # Products count
+            # products_count = self.settings.get("processed_count", 0)
+            # for child in dashboard_tab.findChildren(QGroupBox):
+            #     if child.title() == tr.get_text("products_analyzed"):
+            #         for label in child.findChildren(QLabel):
+            #             label.setText(str(products_count))
             
-            # Avg price diff (placeholder)
-            for child in dashboard_tab.findChildren(QGroupBox):
-                if child.title() == tr.get_text("avg_price_diff"):
-                    for label in child.findChildren(QLabel):
-                        label.setText("~15%")  # Placeholder value
+            # # Avg price diff (placeholder)
+            # for child in dashboard_tab.findChildren(QGroupBox):
+            #     if child.title() == tr.get_text("avg_price_diff"):
+            #         for label in child.findChildren(QLabel):
+            #             label.setText("~15%")  # Placeholder value
             
-            # Processing time
-            if self.settings.get("processed_count", 0) > 0:
-                total_time = self.settings.get("total_processing_time", 0)
-                avg_time = total_time / self.settings.get("processed_count", 1)
-                time_text = f"{avg_time:.1f}s"
+            # # Processing time
+            # if self.settings.get("processed_count", 0) > 0:
+            #     total_time = self.settings.get("total_processing_time", 0)
+            #     avg_time = total_time / self.settings.get("processed_count", 1)
+            #     time_text = f"{avg_time:.1f}s"
                 
-                for child in dashboard_tab.findChildren(QGroupBox):
-                    if child.title() == tr.get_text("processing_time"):
-                        for label in child.findChildren(QLabel):
-                            label.setText(time_text)
+            #     for child in dashboard_tab.findChildren(QGroupBox):
+            #         if child.title() == tr.get_text("processing_time"):
+            #             for label in child.findChildren(QLabel):
+            #                 label.setText(time_text)
                 
         except Exception as e:
             logging.error(f"Error updating dashboard: {e}")
@@ -614,46 +620,34 @@ class MainWindow(QMainWindow):
         self.log_area.appendPlainText(message)
     
     @pyqtSlot(str, str)
-    def on_processing_complete(self, primary_report_path, secondary_report_path):
-        self.status_label.setText(tr.get_text("analysis_complete"))
-        logging.info(tr.get_text("processing_finished"))
-        
-        has_primary = primary_report_path and os.path.exists(primary_report_path)
-        has_secondary = secondary_report_path and os.path.exists(secondary_report_path)
-        
-        # Update statistics if we have results
-        if has_primary or has_secondary:
-            self._update_statistics(primary_report_path or secondary_report_path)
-            self._show_completion_message(primary_report_path, secondary_report_path)
-            self._open_output_directory(primary_report_path or secondary_report_path)
-        else:
-            QMessageBox.warning(self, tr.get_text("complete"), 
-                              tr.get_text("no_reports_generated"))
-    
-    def _update_statistics(self, report_path):
-        """Update dashboard statistics based on results"""
+    def on_processing_complete(self, primary_path, secondary_path):
+        """Handle processing completion"""
         try:
-            # Increment processed files count
-            processed_count = self.settings.get("processed_count", 0) + 1
-            self.settings.set("processed_count", processed_count)
+            self.status_label.setText(tr.get_text("processing_finished"))
+            self._show_completion_message(primary_path, secondary_path)
             
-            # Record processing time
-            if hasattr(self, 'processing_start_time') and self.processing_start_time:
-                elapsed_time = time.time() - self.processing_start_time
+            # # Commented out historical metrics update
+            # # Increment processed files count
+            # processed_count = self.settings.get("processed_count", 0) + 1
+            # self.settings.set("processed_count", processed_count)
+            
+            # # Record processing time
+            # if hasattr(self, 'processing_start_time') and self.processing_start_time:
+            #     elapsed_time = time.time() - self.processing_start_time
                 
-                # Update average processing time
-                total_time = self.settings.get("total_processing_time", 0) + elapsed_time
-                self.settings.set("total_processing_time", total_time)
+            #     # Update average processing time
+            #     total_time = self.settings.get("total_processing_time", 0) + elapsed_time
+            #     self.settings.set("total_processing_time", total_time)
                 
-                # Store this processing time
-                self.settings.set("last_processing_time", elapsed_time)
+            #     # Store this processing time
+            #     self.settings.set("last_processing_time", elapsed_time)
             
-            # Save settings
-            self.settings.save_settings()
+            # # Save settings
+            # self.settings.save_settings()
             
-            # Update dashboard if it's visible
-            if self.tab_widget.currentIndex() == 0:
-                self.update_dashboard()
+            # # Update dashboard if it's visible
+            # if self.tab_widget.currentIndex() == 0:
+            #     self.update_dashboard()
             
         except Exception as e:
             logging.error(f"Error updating statistics: {e}")
@@ -841,16 +835,41 @@ class MainWindow(QMainWindow):
                     self.logger.error(f"결과 파일 열기 실패: {str(e)}", exc_info=True)
                     QMessageBox.warning(self, "파일 열기 오류", f"결과 파일을 열 수 없습니다: {str(e)}")
 
+    @pyqtSlot(str) # Decorator to mark this as a slot that accepts a string
+    def append_log_message(self, msg):
+        """Append a log message to the log area safely from any thread."""
+        try:
+            self.log_area.appendPlainText(msg)
+            # Optional: Limit the number of lines in the log area
+            max_lines = self.settings.get("max_log_lines", 1000)
+            if self.log_area.document().lineCount() > max_lines:
+                cursor = self.log_area.textCursor()
+                cursor.movePosition(cursor.Start)
+                cursor.movePosition(cursor.Down, cursor.KeepAnchor, self.log_area.document().lineCount() - max_lines)
+                cursor.removeSelectedText()
+                cursor.movePosition(cursor.End)
+                self.log_area.setTextCursor(cursor)
+
+            self.log_area.ensureCursorVisible() # Ensure the latest message is visible
+        except Exception as e:
+            # Fallback logging if GUI update fails
+            print(f"Fallback log: {msg}\nError updating log area: {e}")
+
 # Custom logging handler to emit logs to the GUI text area
-class GUILogHandler(logging.Handler):
-    def __init__(self, text_widget):
-        super().__init__()
-        self.widget = text_widget
-        self.widget.setReadOnly(True)
+class GUILogHandler(logging.Handler, QObject):
+    log_signal = pyqtSignal(str)  # Define a signal that carries a string
+
+    def __init__(self, parent=None): # parent=None is good practice for QObject
+        logging.Handler.__init__(self)
+        QObject.__init__(self, parent)
+        # Don't store the widget directly, connect the signal instead
+        # self.widget = text_widget
+        # self.widget.setReadOnly(True)
 
     def emit(self, record):
-        msg = self.format(record)
-        # Ensure this runs in the GUI thread if logs come from other threads
-        # QMetaObject.invokeMethod(self.widget, "appendPlainText", Qt.QueuedConnection, Q_ARG(str, msg))
-        # For simplicity, assuming logs primarily come from GUI or signals handle threading:
-        self.widget.appendPlainText(msg) 
+        try:
+            msg = self.format(record)
+            # Emit the signal instead of directly updating the widget
+            self.log_signal.emit(msg)
+        except Exception:
+            self.handleError(record) 

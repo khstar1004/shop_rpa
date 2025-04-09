@@ -18,7 +18,8 @@ class Settings:
             "thread_count": 4,
             "max_log_lines": 1000,
             "log_level": "INFO",
-            "custom_setting": "custom_value"  # Added for test compatibility
+            "custom_setting": "custom_value",  # Added for test compatibility
+            "recent_files": []  # Added for recent files tracking
         }
         self.settings = self.default_settings.copy()
         self.load_settings()
