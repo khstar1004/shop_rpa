@@ -25,49 +25,53 @@ class ProductFactory:
     
     def create_product_from_row(self, row: pd.Series) -> Optional[Product]:
         """
-        데이터프레임 행으로부터 Product 객체 생성
+        DataFrame 행에서 Product 객체 생성
         
         Args:
-            row: 판다스 Series 객체 (DataFrame의 한 행)
+            row: DataFrame의 한 행
             
         Returns:
-            Product 객체 또는 None (생성 실패 시)
+            Product 객체 또는 None (오류 시)
         """
         try:
-            # 필수 필드 추출 및 기본값 설정
-            product_name = ""
+            # 필수 필드 확인
+            required_fields = ['상품Code', '상품명', '판매단가(V포함)']
+            for field in required_fields:
+                if field not in row or pd.isna(row[field]):
+                    self.logger.warning(f"Required field '{field}' missing in product data")
+            
+            # 제품 코드 확인
+            product_code = None
+            if '상품Code' in row and not pd.isna(row['상품Code']):
+                product_code = str(row['상품Code']).strip()
+            elif 'Code' in row and not pd.isna(row['Code']):
+                product_code = str(row['Code']).strip()
+            elif '상품코드' in row and not pd.isna(row['상품코드']):
+                product_code = str(row['상품코드']).strip()
+            
+            if not product_code:
+                # 고유 코드 생성
+                product_code = f"GEN-{int(datetime.now().timestamp())}"
+                self.logger.warning(f"No product code found, generated: {product_code}")
+            
+            # 제품명 확인
+            product_name = None
             if '상품명' in row and not pd.isna(row['상품명']):
-                product_name = str(row['상품명']).strip()
+                product_name = self.data_cleaner.clean_product_name(str(row['상품명']))
             
             if not product_name:
-                self.logger.warning("Cannot create product: Empty product name")
+                self.logger.error("No product name found, cannot create product")
                 return None
             
-            # 가격 추출 및 정제
-            price = 0.0
-            if '판매단가(V포함)' in row:
-                price = self.data_cleaner.clean_price(
-                    row['판매단가(V포함)'], 
-                    0, 
-                    float('inf'),
-                    True
-                )
-            
-            # 제품 코드 추출 및 정제
-            product_code = ""
-            for code_col in ['상품Code', 'Code', '업체코드']:
-                if code_col in row and not pd.isna(row[code_col]):
-                    product_code = str(row[code_col]).strip()
-                    if product_code:
-                        break
-            
-            # 코드가 없으면 생성
-            if not product_code:
-                product_code = f"PROD-{int(datetime.now().timestamp())}"
-                self.logger.debug(f"Generated product code: {product_code}")
-            else:
-                # 기존 코드 정제
-                product_code = self.data_cleaner.clean_product_code(product_code, True)
+            # 가격 확인
+            price = 0
+            if '판매단가(V포함)' in row and not pd.isna(row['판매단가(V포함)']):
+                try:
+                    price_str = str(row['판매단가(V포함)']).strip().replace(',', '').replace('원', '')
+                    price = float(price_str)
+                except ValueError:
+                    self.logger.warning(f"Invalid price format: {row['판매단가(V포함)']}, using 0")
+                    price = 0
             
             # 기본 Product 객체 생성
             product = Product(
@@ -79,11 +83,11 @@ class ProductFactory:
             )
             
             # 선택적 필드 설정
-            if '본사 이미지' in row and not pd.isna(row['본사 이미지']):
-                product.image_url = self.data_cleaner.clean_url(row['본사 이미지'], True)
+            if '본사 이미지' in row and not pd.isna(row['본사 이미지']) and str(row['본사 이미지']).strip():
+                product.image_url = self.data_cleaner.clean_url(str(row['본사 이미지']).strip(), True)
             
-            if '본사상품링크' in row and not pd.isna(row['본사상품링크']):
-                product.url = self.data_cleaner.clean_url(row['본사상품링크'], True)
+            if '본사상품링크' in row and not pd.isna(row['본사상품링크']) and str(row['본사상품링크']).strip():
+                product.url = self.data_cleaner.clean_url(str(row['본사상품링크']).strip(), True)
             
             # 추가 정보가 있으면 설정
             if '공급사명' in row and not pd.isna(row['공급사명']):

@@ -10,6 +10,7 @@ from PIL import Image
 import imagehash
 from rembg import remove
 import cv2
+import concurrent.futures
 
 from ..data_models import Product
 from utils.caching import FileCache, cache_result
@@ -64,7 +65,18 @@ class ImageMatcher:
             'black': ([0, 0, 0], [180, 30, 70]) # 검정
         }
     
-    def calculate_similarity(self, url1: Optional[str], url2: Optional[str]) -> float:
+    def calculate_similarity(self, url1: Optional[str], url2: Optional[str], max_dimension: int = None) -> float:
+        """
+        두 이미지의 유사도를 계산합니다.
+        
+        Args:
+            url1: 첫 번째 이미지 URL
+            url2: 두 번째 이미지 URL
+            max_dimension: 이미지 처리를 위한 최대 해상도 (속도 최적화)
+            
+        Returns:
+            유사도 점수 (0.0 ~ 1.0)
+        """
         if not url1 or not url2:
             return 0.0
             
@@ -72,42 +84,58 @@ class ImageMatcher:
         if url1 > url2:
              url1, url2 = url2, url1
              
+        # 캐시 키에 해상도 정보 포함
+        resolution_suffix = f"_res{max_dimension}" if max_dimension else ""
+        
         if self.cache:
-            return self._cached_calculate_similarity(url1, url2)
+            return self._cached_calculate_similarity(url1, url2, max_dimension, resolution_suffix)
         else:
-            return self._calculate_similarity_logic(url1, url2)
+            return self._calculate_similarity_logic(url1, url2, max_dimension)
 
-    def _cached_calculate_similarity(self, url1: str, url2: str) -> float:
-        @cache_result(self.cache, key_prefix="image_sim")
-        def cached_logic(u1, u2):
-            return self._calculate_similarity_logic(u1, u2)
-        return cached_logic(url1, url2)
+    def _cached_calculate_similarity(self, url1: str, url2: str, max_dimension: int = None, resolution_suffix: str = "") -> float:
+        """캐시를 활용한 이미지 유사도 계산"""
+        @cache_result(self.cache, key_prefix=f"image_sim{resolution_suffix}")
+        def cached_logic(u1, u2, max_dim):
+            return self._calculate_similarity_logic(u1, u2, max_dim)
+        return cached_logic(url1, url2, max_dimension)
 
-    def _calculate_similarity_logic(self, url1: str, url2: str) -> float:
+    def _calculate_similarity_logic(self, url1: str, url2: str, max_dimension: int = None) -> float:
         """Core logic for calculating image similarity"""
         try:
-            # Download and preprocess images (cached)
-            img1 = self._get_processed_image(url1)
-            img2 = self._get_processed_image(url2)
+            # 병렬로 이미지 다운로드 및 전처리
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future1 = executor.submit(self._get_processed_image, url1, max_dimension)
+                future2 = executor.submit(self._get_processed_image, url2, max_dimension)
+                
+                img1 = future1.result()
+                img2 = future2.result()
             
             if img1 is None or img2 is None:
                 return 0.0
             
+            # 높은 성능: 이미지가 너무 유사한 경우 (동일한 이미지) - 빠른 체크
+            if self._check_exact_match(img1, img2):
+                return 1.0
+            
             # 1. 퍼셉추얼 해시 유사도 (20%)
             hash_sim = self._get_hash_similarity(img1, img2)
             
-            # 높은 해시 유사도면 빠른 리턴
+            # 높은 해시 유사도면 빠른 리턴 - 성능 최적화
             if hash_sim > 0.95:
-                return 1.0
+                return 0.95 + (hash_sim - 0.95) * 0.05  # 0.95 ~ 1.0 사이 값 매핑
             
             # 2. 딥 특징 유사도 (40%)
             feature_sim = self._get_feature_similarity(img1, img2)
             
-            # 3. 색상 히스토그램 유사도 (20%) - 새로운 기능
+            # 3. 색상 히스토그램 유사도 (20%)
             color_sim = self._get_color_similarity(img1, img2)
             
-            # 4. 백업 모델 유사도 (ResNet) (20%) - 새로운 기능
-            resnet_sim = self._get_resnet_similarity(img1, img2)
+            # 4. 백업 모델 유사도 (ResNet) (20%)
+            # 성능 최적화: 앞의 유사도가 낮으면 생략
+            if (hash_sim + feature_sim + color_sim) / 3 < 0.3:
+                resnet_sim = 0.0  # 앞의 유사도가 너무 낮으면 무거운 ResNet 계산 생략
+            else:
+                resnet_sim = self._get_resnet_similarity(img1, img2)
             
             # 결합 유사도 계산 (가중치 조정)
             combined_sim = (0.2 * hash_sim + 
@@ -121,17 +149,44 @@ class ImageMatcher:
             self.logger.error(f"Error calculating image similarity between {url1} and {url2}: {str(e)}", exc_info=True)
             return 0.0
 
-    def _get_processed_image(self, url: str) -> Optional[Image.Image]:
+    def _check_exact_match(self, img1: Image.Image, img2: Image.Image) -> bool:
+        """빠른 동일 이미지 체크 (비용이 적은 방법)"""
+        # 크기가 다르면 동일하지 않음
+        if img1.size != img2.size:
+            return False
+            
+        # 해상도가 낮으면 픽셀 직접 비교
+        if img1.width * img1.height < 10000:  # 100x100 픽셀 이하
+            try:
+                # NumPy 배열로 변환하여 비교
+                arr1 = np.array(img1)
+                arr2 = np.array(img2)
+                return np.array_equal(arr1, arr2)
+            except:
+                return False
+                
+        # 더 큰 이미지는 이미지 해시만 비교 (더 빠름)
+        try:
+            hash1 = imagehash.average_hash(img1, hash_size=8)
+            hash2 = imagehash.average_hash(img2, hash_size=8)
+            return hash1 - hash2 < 5  # 거의 동일한 이미지 (약간의 여유 허용)
+        except:
+            return False
+
+    def _get_processed_image(self, url: str, max_dimension: int = None) -> Optional[Image.Image]:
         """Downloads, preprocesses (removes bg), and caches the image."""
+        # 캐시 키에 해상도 정보 포함
+        resolution_suffix = f"_res{max_dimension}" if max_dimension else ""
+        cache_key = f"processed_image{resolution_suffix}|{url}"
+        
         if self.cache:
-            cache_key = f"processed_image|{url}"
             cached_image = self.cache.get(cache_key)
             if cached_image is not None:
                 return cached_image
         
-        img = self._download_and_preprocess(url)
+        img = self._download_and_preprocess(url, max_dimension)
         if img and self.cache:
-            self.cache.set(cache_key, img)
+            self.cache.set(cache_key, img, ttl=86400)  # 1일 캐싱
         return img
         
     def _get_hash_similarity(self, img1: Image.Image, img2: Image.Image) -> float:
@@ -316,49 +371,62 @@ class ImageMatcher:
             self.logger.error(f"Error calculating ResNet similarity: {e}", exc_info=True)
             return 0.5  # 오류 발생 시 중간값 반환
 
-    def _download_and_preprocess(self, url: str) -> Optional[Image.Image]:
-        """Download and preprocess image from URL"""
-        if not url or not url.startswith('http'):
-            self.logger.warning(f"Invalid image URL: {url}")
-            return None
-            
+    def _download_and_preprocess(self, url: str, max_dimension: int = None) -> Optional[Image.Image]:
+        """이미지 다운로드 및 전처리"""
         try:
-            # Download image (타임아웃 증가 및 리트라이 추가)
-            try:
-                response = requests.get(url, timeout=15)
-                response.raise_for_status()
-            except requests.exceptions.RequestException:
-                # 실패시 1회 재시도
-                self.logger.warning(f"Retrying download for URL: {url}")
-                response = requests.get(url, timeout=20)
-                response.raise_for_status()
-            
-            img = Image.open(BytesIO(response.content)).convert('RGB')
-            
-            # Basic image validation
-            if img.width < 10 or img.height < 10:
-                self.logger.warning(f"Image too small: {img.width}x{img.height} for URL: {url}")
-                return img  # Return as is, don't try background removal
-            
-            try:
-                # Try to remove background, but continue if it fails
-                img_no_bg = remove(img)
+            # 이미지 URL 유효성 확인
+            if not url or not url.strip():
+                self.logger.warning(f"Empty or invalid image URL")
+                return None
                 
-                # Convert back to PIL Image if needed
-                if isinstance(img_no_bg, bytes):
-                    img_no_bg = Image.open(BytesIO(img_no_bg))
+            # 파일 확장자 확인
+            if not url.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')):
+                self.logger.warning(f"Unsupported file type: {url}")
+                # 일부 URL은 확장자가 없을 수 있으므로 계속 진행
                 
-                return img_no_bg
-            except Exception as bg_error:
-                self.logger.warning(f"Background removal failed for {url}: {str(bg_error)}. Using original image.")
-                return img  # Return original image if background removal fails
+            # 요청 헤더 설정
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Referer': 'https://google.com',
+                'Connection': 'keep-alive',
+            }
             
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Network error downloading image from {url}: {str(e)}")
-            return None
-        except (IOError, OSError) as e:
-            self.logger.error(f"Error processing image from {url}: {str(e)}")
-            return None
+            # 이미지 다운로드 (타임아웃 설정)
+            response = requests.get(url, headers=headers, timeout=5)
+            response.raise_for_status()
+            
+            # 이미지 열기
+            img = Image.open(BytesIO(response.content))
+            
+            # 이미지 모드 확인 및 RGB로 변환
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+                
+            # 해상도 제한 (성능 최적화)
+            if max_dimension and (img.width > max_dimension or img.height > max_dimension):
+                # 큰 쪽에 맞춰 비율 유지하며 리사이즈
+                if img.width > img.height:
+                    new_width = max_dimension
+                    new_height = int(img.height * (max_dimension / img.width))
+                else:
+                    new_height = max_dimension
+                    new_width = int(img.width * (max_dimension / img.height))
+                    
+                img = img.resize((new_width, new_height), Image.LANCZOS)
+            
+            # 이미지 전처리 (필요시)
+            # 배경 제거는 선택적으로 수행
+            if self.remove_background and img.size[0] * img.size[1] <= 1000000:  # 백만 픽셀 이하 이미지만
+                try:
+                    img = self._remove_background(img)
+                except Exception as e:
+                    self.logger.warning(f"Background removal failed: {e}")
+                    # 실패해도 원본 이미지 사용
+            
+            return img
+            
         except Exception as e:
-            self.logger.error(f"Unexpected error handling image from {url}: {str(e)}", exc_info=True)
+            self.logger.warning(f"Image download/preprocessing failed: {str(e)}")
             return None 

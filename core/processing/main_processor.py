@@ -52,6 +52,11 @@ class ProductProcessor:
         # 매칭 컴포넌트 초기화
         self.text_matcher = TextMatcher(cache=self.cache)
         
+        # 이미지 처리 최대 해상도 설정 추가
+        if 'MAX_IMAGE_DIMENSION' not in self.config['MATCHING']:
+            self.config['MATCHING']['MAX_IMAGE_DIMENSION'] = 256
+            self.logger.info(f"Setting default MAX_IMAGE_DIMENSION to 256px")
+        
         self.image_matcher = ImageMatcher(
             cache=self.cache,
             similarity_threshold=self.config['MATCHING']['IMAGE_SIMILARITY_THRESHOLD']
@@ -90,11 +95,24 @@ class ProductProcessor:
         if scraping_config:
             self._configure_scrapers(scraping_config)
         
+        # 최적화된 병렬 처리 설정
+        # 시스템 코어 수 기반 max_workers 자동 설정
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        default_workers = max(4, min(cpu_count * 2, 16))  # 최소 4, 최대 16 워커
+        
         # 스레드풀 초기화
+        max_workers = self.config['PROCESSING'].get('MAX_WORKERS', default_workers)
+        self.logger.info(f"병렬 처리 워커 수: {max_workers} (CPU 코어: {cpu_count})")
         self.executor = ThreadPoolExecutor(
-            max_workers=self.config['PROCESSING']['MAX_WORKERS'],
+            max_workers=max_workers,
             thread_name_prefix='ProductProcessor'
         )
+        
+        # 배치 크기 최적화
+        default_batch = min(20, max(5, cpu_count))  # 코어 수에 맞게 조정, 최소 5, 최대 20
+        self.batch_size = self.config['PROCESSING'].get('BATCH_SIZE', default_batch)
+        self.logger.info(f"배치 크기 설정: {self.batch_size}")
         
         # 유틸리티 컴포넌트 초기화
         self.excel_manager = ExcelManager(self.config, self.logger)
@@ -306,54 +324,125 @@ class ProductProcessor:
             ProductResult 객체
         """
         self.logger.info(f"Processing product: {product.name} (ID: {product.id})")
+        self.logger.info(f"Product source: {product.source}")
+        
+        # 해오름기프트 상품 확인
+        if product.source.lower() != 'haeoreum':
+            self.logger.warning(f"Product source is not Haeoreum Gift: {product.source}")
+            # 해오름 소스로 설정
+            product.source = 'haeoreum'
+            self.logger.info(f"Reset product source to Haeoreum Gift")
+        
         processing_result = ProcessingResult(source_product=product)
+        
+        # 텍스트 유사도 임계값 설정
+        text_threshold = self.config['MATCHING'].get('TEXT_SIMILARITY_THRESHOLD', 0.65)
+        # 텍스트 초기 필터링을 위한 낮은 임계값 (성능 개선을 위한 필터링용)
+        initial_text_threshold = text_threshold * 0.7  # 임계값의 70%
         
         # 고려기프트 매칭 검색
         try:
+            self.logger.info(f"Searching Koryo Gift for: {product.name}")
             koryo_matches = self.koryo_scraper.search_product(product.name)
-            self.logger.debug(f"Found {len(koryo_matches)} Koryo matches for {product.name}")
             
-            # 매칭 결과 계산
-            for match in koryo_matches:
-                match_result = self._calculate_match_similarities(product, match)
-                processing_result.koryo_matches.append(match_result)
+            if not koryo_matches:
+                self.logger.info(f"❌ 고려기프트에서 '{product.name}' 상품을 찾을 수 없음")
+            else:
+                self.logger.debug(f"✅ 고려기프트에서 '{product.name}' 상품 {len(koryo_matches)}개 발견")
+                
+                # 1단계: 텍스트 유사도만 먼저 계산하여 후보군 추리기
+                text_filtered_matches = []
+                for match in koryo_matches:
+                    text_sim = self.text_matcher.calculate_similarity(product.name, match.name)
+                    if text_sim >= initial_text_threshold:
+                        text_filtered_matches.append((match, text_sim))
+                
+                self.logger.info(f"🔍 텍스트 유사도로 {len(text_filtered_matches)}/{len(koryo_matches)}개 후보 추려냄 (임계값: {initial_text_threshold:.2f})")
+                
+                # 2단계: 텍스트 유사도가 높은 후보들에 대해서만 이미지 유사도 계산
+                for match, text_sim in text_filtered_matches:
+                    # 기본 MatchResult 생성
+                    match_result = MatchResult(
+                        source_product=product,
+                        matched_product=match,
+                        text_similarity=text_sim,
+                        image_similarity=0.0,
+                        combined_similarity=0.0,
+                        price_difference=0.0,
+                        price_difference_percent=0.0
+                    )
+                    
+                    # 이미지 유사도 및 가격 차이 계산
+                    self._calculate_image_similarity_and_price(match_result)
+                    
+                    # 결과 추가
+                    processing_result.koryo_matches.append(match_result)
             
             # 최적 매칭 찾기
             processing_result.best_koryo_match = self._find_best_match(processing_result.koryo_matches)
             
             if processing_result.best_koryo_match:
-                self.logger.info(
-                    f"Best Koryo match for {product.name}: "
-                    f"{processing_result.best_koryo_match.matched_product.name} "
-                    f"({processing_result.best_koryo_match.combined_similarity:.2f})"
-                )
+                if processing_result.best_koryo_match.image_similarity > 0:
+                    self.logger.info(f"✅ 고려기프트 매칭 (이미지 포함): {processing_result.best_koryo_match.matched_product.name}")
+                else:
+                    self.logger.info(f"📝 고려기프트 매칭 (텍스트만): {processing_result.best_koryo_match.matched_product.name}")
+            
         except Exception as e:
             self.logger.error(f"Error finding Koryo matches for {product.name}: {str(e)}", exc_info=True)
             processing_result.error = f"Koryo search error: {str(e)}"
         
         # 네이버 매칭 검색
         try:
+            self.logger.info(f"Searching Naver for: {product.name}")
             naver_matches = self._safe_naver_search(product.name)
-            self.logger.debug(f"Found {len(naver_matches)} Naver matches for {product.name}")
             
-            # 매칭 결과 계산
-            for match in naver_matches:
-                try:
-                    match_result = self._calculate_match_similarities(product, match)
+            if not naver_matches:
+                self.logger.info(f"❌ 네이버에서 '{product.name}' 상품을 찾을 수 없음")
+            elif len(naver_matches) == 1 and naver_matches[0].id == "no_match":
+                self.logger.info(f"❌ 네이버에서 '{product.name}' 상품을 찾을 수 없음 (no_match 반환)")
+            else:
+                self.logger.debug(f"✅ 네이버에서 '{product.name}' 상품 {len(naver_matches)}개 발견")
+                
+                # 'no_match' 더미 상품 제외
+                real_matches = [m for m in naver_matches if m.id != "no_match"]
+                
+                # 1단계: 텍스트 유사도만 먼저 계산하여 후보군 추리기
+                text_filtered_matches = []
+                for match in real_matches:
+                    text_sim = self.text_matcher.calculate_similarity(product.name, match.name)
+                    if text_sim >= initial_text_threshold:
+                        text_filtered_matches.append((match, text_sim))
+                
+                self.logger.info(f"🔍 텍스트 유사도로 {len(text_filtered_matches)}/{len(real_matches)}개 후보 추려냄 (임계값: {initial_text_threshold:.2f})")
+                
+                # 2단계: 텍스트 유사도가 높은 후보들에 대해서만 이미지 유사도 계산
+                for match, text_sim in text_filtered_matches:
+                    # 기본 MatchResult 생성
+                    match_result = MatchResult(
+                        source_product=product,
+                        matched_product=match,
+                        text_similarity=text_sim,
+                        image_similarity=0.0,
+                        combined_similarity=0.0,
+                        price_difference=0.0,
+                        price_difference_percent=0.0
+                    )
+                    
+                    # 이미지 유사도 및 가격 차이 계산
+                    self._calculate_image_similarity_and_price(match_result)
+                    
+                    # 결과 추가
                     processing_result.naver_matches.append(match_result)
-                except Exception as match_err:
-                    self.logger.warning(f"Error calculating similarities for {match.name}: {str(match_err)}")
-                    continue
             
             # 최적 매칭 찾기
             processing_result.best_naver_match = self._find_best_match(processing_result.naver_matches)
             
             if processing_result.best_naver_match:
-                self.logger.info(
-                    f"Best Naver match for {product.name}: "
-                    f"{processing_result.best_naver_match.matched_product.name} "
-                    f"({processing_result.best_naver_match.combined_similarity:.2f})"
-                )
+                if processing_result.best_naver_match.image_similarity > 0:
+                    self.logger.info(f"✅ 네이버 매칭 (이미지 포함): {processing_result.best_naver_match.matched_product.name}")
+                else:
+                    self.logger.info(f"📝 네이버 매칭 (텍스트만): {processing_result.best_naver_match.matched_product.name}")
+            
         except Exception as e:
             self.logger.error(f"Error finding Naver matches for {product.name}: {str(e)}", exc_info=True)
             if not processing_result.error:  # 이전 오류가 없을 경우만 설정
@@ -363,6 +452,128 @@ class ProductProcessor:
         self._ensure_valid_result(processing_result)
         
         return processing_result
+    
+    def _calculate_image_similarity_and_price(self, match_result: MatchResult) -> None:
+        """
+        이미지 유사도와 가격 차이를 계산하고 MatchResult에 설정
+        
+        Args:
+            match_result: 업데이트할 MatchResult 객체
+        """
+        source_product = match_result.source_product
+        matched_product = match_result.matched_product
+        
+        # 소스 이미지 URL 확인
+        source_image_url = ''
+        
+        # 해오름 기프트(원본)의 이미지를 확인
+        if source_product.source == 'haeoreum':
+            # 1. 본사 이미지 필드에서 먼저 확인
+            if '본사 이미지' in source_product.original_input_data and source_product.original_input_data['본사 이미지']:
+                source_image_url = str(source_product.original_input_data['본사 이미지']).strip()
+            
+            # 2. 이미지 URL 속성 확인
+            if not source_image_url and source_product.image_url:
+                source_image_url = source_product.image_url
+                
+            # 3. 본사상품링크 확인 (이미지가 없는 경우 대체 가능한지)
+            if not source_image_url and '본사상품링크' in source_product.original_input_data and source_product.original_input_data['본사상품링크']:
+                product_link = str(source_product.original_input_data['본사상품링크']).strip()
+                if product_link:
+                    self.logger.debug(f"No image URL found, but product link exists: {product_link}")
+        else:
+            # 다른 소스의 경우 단순히 image_url 속성 사용
+            source_image_url = source_product.image_url
+            
+        # 매치된 이미지 URL 확인
+        match_image_url = matched_product.image_url or ''
+        
+        # 매칭 소스 확인 (네이버 또는 고려기프트)
+        match_source = "네이버" if matched_product.source == 'naver_api' else "고려기프트"
+        
+        # 이미지 유사도 계산
+        image_sim = 0.0  # 기본값
+        
+        # 양쪽 모두 이미지가 있는 경우: 이미지 유사도 계산
+        if source_image_url and match_image_url:
+            # 캐시 키 생성 (URL 해시 사용)
+            import hashlib
+            cache_key = f"img_sim_{hashlib.md5((source_image_url + match_image_url).encode()).hexdigest()}"
+            
+            # 캐시에서 유사도 값 확인
+            cached_sim = self.cache.get(cache_key)
+            if cached_sim is not None:
+                image_sim = cached_sim
+                self.logger.debug(f"🔄 캐시에서 이미지 유사도 로드: {image_sim:.2f}")
+            else:
+                self.logger.debug(f"🖼️ 이미지 유사도 계산: {source_image_url} <-> {match_image_url}")
+                try:
+                    # 이미지 해상도 축소 설정 (빠른 비교를 위함)
+                    max_size = self.config['MATCHING'].get('MAX_IMAGE_DIMENSION', 256)
+                    
+                    # 이미지 유사도 계산 시 해상도 제한
+                    image_sim = self.image_matcher.calculate_similarity(
+                        source_image_url, 
+                        match_image_url,
+                        max_dimension=max_size
+                    )
+                    
+                    # 결과 캐싱 (1일 유지)
+                    self.cache.set(cache_key, image_sim, ttl=86400)
+                    
+                    self.logger.debug(f"  이미지 유사도 결과: {image_sim:.2f}")
+                except Exception as e:
+                    self.logger.warning(f"이미지 유사도 계산 중 오류: {str(e)}")
+                    # 오류 발생 시 기본값 사용
+                    image_sim = 0.0
+        # 해오름 제품에 이미지가 없고 매칭된 제품에 이미지가 있는 경우
+        elif not source_image_url and match_image_url:
+            self.logger.warning(f"⚠️ 해오름 제품 '{source_product.name}'에 이미지가 없으나, {match_source}에 이미지 있음")
+            # 네이버는 이미지가 있을 확률이 높으므로 더 높은 기본값 부여
+            if matched_product.source == 'naver_api':
+                image_sim = 0.5
+            else:
+                image_sim = 0.4
+        # 매칭된 제품에 이미지가 없는 경우
+        elif source_image_url and not match_image_url:
+            self.logger.warning(f"⚠️ 해오름 제품 '{source_product.name}'에 이미지가 있으나, {match_source}에 이미지 없음")
+            # 텍스트 유사도가 높으면 이미지 유사도 기본값 부여 (0.3)
+            if match_result.text_similarity >= 0.75:
+                image_sim = 0.3
+        # 둘 다 이미지가 없는 경우
+        else:
+            self.logger.warning(f"⚠️ 두 제품 모두 이미지 없음: 해오름 '{source_product.name}' <-> {match_source} '{matched_product.name}'")
+            # 텍스트 유사도가 매우 높은 경우만 약간의 기본값 부여
+            if match_result.text_similarity >= 0.85:
+                image_sim = 0.2
+        
+        # 이미지 유사도 설정
+        match_result.image_similarity = image_sim
+        
+        # 통합 유사도 계산 및 설정
+        match_result.combined_similarity = self.multimodal_matcher.calculate_similarity(
+            match_result.text_similarity,
+            match_result.image_similarity
+        )
+        
+        # 가격 차이 계산
+        price_diff = 0.0
+        price_diff_percent = 0.0
+        source_price = source_product.price
+        
+        if source_price and source_price > 0 and isinstance(matched_product.price, (int, float)):
+            price_diff = matched_product.price - source_price
+            price_diff_percent = (price_diff / source_price) * 100 if source_price != 0 else 0
+        
+        # 가격 차이 설정
+        match_result.price_difference = price_diff
+        match_result.price_difference_percent = price_diff_percent
+        
+        self.logger.debug(
+            f"  Match candidate {matched_product.name} ({matched_product.source}): "
+            f"Txt={match_result.text_similarity:.2f}, Img={match_result.image_similarity:.2f}, "
+            f"Comb={match_result.combined_similarity:.2f}, Price diff: {price_diff}"
+        )
     
     def _ensure_valid_result(self, result: ProcessingResult) -> None:
         """결과 데이터가 유효한지 확인하고 필요한 기본값을 설정"""
@@ -477,77 +688,6 @@ class ProductProcessor:
             
         return list(unique_products.values())
     
-    def _calculate_match_similarities(self, source_product: Product, matched_product: Product) -> MatchResult:
-        """두 제품 간의 유사도 계산"""
-        # 텍스트 유사도
-        text_sim = self.text_matcher.calculate_similarity(
-            source_product.name,
-            matched_product.name
-        )
-        
-        # 이미지 유사도 계산 개선
-        # 소스 이미지 URL 확인
-        source_image_url = source_product.original_input_data.get('본사 이미지', '')
-        if not source_image_url and source_product.image_url:
-            source_image_url = source_product.image_url
-            
-        # 매치된 이미지 URL 확인
-        match_image_url = matched_product.image_url or ''
-        
-        # 이미지 유사도 계산
-        image_sim = 0.0  # 기본값
-        if source_image_url and match_image_url:
-            self.logger.debug(f"Calculating image similarity between: {source_image_url} and {match_image_url}")
-            image_sim = self.image_matcher.calculate_similarity(source_image_url, match_image_url)
-        else:
-            # 소스와 매치 제공자를 명확히 표시하여 로깅
-            if not source_image_url and match_image_url:
-                # 원본 제품의 이미지가 없지만 매칭된 제품(네이버/고려)은 이미지가 있는 경우
-                source_name = source_product.name
-                match_source = "네이버" if matched_product.source == 'naver_api' else "고려기프트"
-                
-                # 이모지를 사용하여 구분하기 쉽게 만듦
-                self.logger.warning(f"⚠️ 원본 제품 '{source_name}'에 이미지가 없지만, {match_source}에서 매칭된 제품에는 이미지가 있습니다: {match_image_url}")
-                
-                # 원본 제품에 이미지가 없는 경우에도 품질 분석에 크게 영향을 주지 않도록 이미지 유사도에 기본값 부여
-                # 0.0은 너무 낮아 전체 매칭 점수를 낮출 수 있으므로 중간 점수인 0.5 부여
-                if matched_product.source == 'naver_api':
-                    # 네이버 API 결과는 항상 이미지를 포함하므로 더 높은 기본값 사용
-                    image_sim = 0.5
-            else:
-                # 기타 이미지 누락 케이스 (둘 다 없거나 매칭된 제품 이미지가 없는 경우)
-                self.logger.warning(f"Missing image URL for similarity calculation: source={bool(source_image_url)}, match={bool(match_image_url)}")
-        
-        # 통합 유사도
-        combined_sim = self.multimodal_matcher.calculate_similarity(
-            text_sim,
-            image_sim
-        )
-        
-        self.logger.debug(
-            f"  Match candidate {matched_product.name} ({matched_product.source}): "
-            f"Txt={text_sim:.2f}, Img={image_sim:.2f}, Comb={combined_sim:.2f}"
-        )
-        
-        # 가격 차이 계산
-        price_diff = 0.0
-        price_diff_percent = 0.0
-        source_price = source_product.price
-        
-        if source_price and source_price > 0 and isinstance(matched_product.price, (int, float)):
-            price_diff = matched_product.price - source_price
-            price_diff_percent = (price_diff / source_price) * 100 if source_price != 0 else 0
-        
-        return MatchResult(
-            source_product=source_product,
-            matched_product=matched_product,
-            text_similarity=text_sim,
-            image_similarity=image_sim,
-            combined_similarity=combined_sim,
-            price_difference=price_diff,
-            price_difference_percent=price_diff_percent
-        )
-    
     def _find_best_match(self, matches: List[MatchResult]) -> Optional[MatchResult]:
         """
         매칭 결과 중 최적의 결과 선택
@@ -558,7 +698,18 @@ class ProductProcessor:
         3. 동일 상품으로 판단되면 가장 낮은 가격의 상품 선택
         """
         if not matches:
+            self.logger.warning("🚫 검색 결과 없음: 해당 상품이 고려기프트/네이버에 존재하지 않음")
             return None
+        
+        # 이미지가 있는 매칭과 없는 매칭 분리
+        matches_with_image = [m for m in matches if m.image_similarity > 0]
+        matches_without_image = [m for m in matches if m.image_similarity == 0]
+        
+        # 로깅
+        if not matches_with_image and matches_without_image:
+            source_name = matches[0].source_product.name
+            match_source = "네이버" if matches[0].matched_product.source == 'naver_api' else "고려기프트"
+            self.logger.info(f"📋 '{source_name}': {match_source}에서 {len(matches)} 매칭이 발견되었으나 이미지를 가진 매칭 없음")
         
         # 임계값 설정
         text_threshold = self.config['MATCHING'].get('TEXT_SIMILARITY_THRESHOLD', 0.65)
@@ -578,8 +729,17 @@ class ProductProcessor:
         
         # 임계값을 통과한 매칭이 있으면 그 중에서 최저가 선택
         if valid_matches:
-            best_match = min(valid_matches, key=lambda x: x.matched_product.price if x.matched_product.price > 0 else float('inf'))
-            self.logger.info(f"💯 엄격한 임계값을 통과한 최적의 매칭: {best_match.matched_product.name} (텍스트 유사도: {best_match.text_similarity:.2f}, 이미지 유사도: {best_match.image_similarity:.2f}, 가격: {best_match.matched_product.price})")
+            # 이미지 있는 매칭과 없는 매칭 중 선택 우선순위 결정
+            valid_with_image = [m for m in valid_matches if m.image_similarity >= image_threshold]
+            
+            if valid_with_image:
+                # 이미지가 있는 매칭 중에서 최저가 선택
+                best_match = min(valid_with_image, key=lambda x: x.matched_product.price if x.matched_product.price > 0 else float('inf'))
+                self.logger.info(f"💯 이미지 매칭 성공: {best_match.matched_product.name} (텍스트 유사도: {best_match.text_similarity:.2f}, 이미지 유사도: {best_match.image_similarity:.2f}, 가격: {best_match.matched_product.price})")
+            else:
+                # 이미지 없이 텍스트만 매칭된 경우
+                best_match = min(valid_matches, key=lambda x: x.matched_product.price if x.matched_product.price > 0 else float('inf'))
+                self.logger.info(f"📝 텍스트만 매칭 성공: {best_match.matched_product.name} (텍스트 유사도: {best_match.text_similarity:.2f}, 가격: {best_match.matched_product.price})")
             return best_match
         
         # 임계값을 통과한 매칭이 없으면 더 낮은 임계값 시도
@@ -595,7 +755,11 @@ class ProductProcessor:
             top_matches = sorted(relaxed_matches, key=lambda x: x.text_similarity, reverse=True)[:3]
             best_match = min(top_matches, key=lambda x: x.matched_product.price if x.matched_product.price > 0 else float('inf'))
             
-            self.logger.warning(f"⚠️ 낮은 임계값으로 매칭 발견: {best_match.matched_product.name} (텍스트 유사도: {best_match.text_similarity:.2f}, 이미지 유사도: {best_match.image_similarity:.2f}, 가격: {best_match.matched_product.price})")
+            # 이미지 유무에 따른 로깅
+            if best_match.image_similarity > 0:
+                self.logger.warning(f"⚠️ 낮은 임계값으로 이미지 매칭: {best_match.matched_product.name} (텍스트 유사도: {best_match.text_similarity:.2f}, 이미지 유사도: {best_match.image_similarity:.2f}, 가격: {best_match.matched_product.price})")
+            else:
+                self.logger.warning(f"⚠️ 낮은 임계값으로 텍스트만 매칭: {best_match.matched_product.name} (텍스트 유사도: {best_match.text_similarity:.2f}, 가격: {best_match.matched_product.price})")
             return best_match
         
         # 모든 임계값에서 매칭을 찾지 못한 경우, 모든 매칭 중 가장 유사한 하나 반환 (매우 유연한 대안)

@@ -293,13 +293,14 @@ class MultiModalMatcher:
         
         return price_difference, price_difference_percent
 
-    def calculate_similarity(self, product1, product2) -> float:
+    def calculate_similarity(self, product1, product2, max_dimension: int = None) -> float:
         """
         Calculate the combined similarity between two products or combine pre-calculated similarities.
         
         Args:
             product1: First product or text similarity score
             product2: Second product or image similarity score
+            max_dimension: 이미지 처리를 위한 최대 해상도 (속도 최적화)
             
         Returns:
             Combined similarity score between 0.0 and 1.0
@@ -332,7 +333,8 @@ class MultiModalMatcher:
                 has_images = True
                 image_sim = self.image_matcher.calculate_similarity(
                     product1.image_url, 
-                    product2.image_url
+                    product2.image_url,
+                    max_dimension=max_dimension
                 )
                 
             # 적응형 가중치 계산

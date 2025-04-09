@@ -185,6 +185,62 @@ class ExcelManager:
         df_copy = df.copy()
         required_columns = self.excel_settings['required_columns']
         
+        # 해오름기프트 엑셀 형식에 맞게 컬럼 형태 표준화
+        # 샘플: 구분 담당자 업체명 업체코드 상품Code 중분류카테고리 상품명 기본수량(1) 판매단가(V포함) 본사상품링크
+        haeoreum_columns = [
+            '구분', '담당자', '업체명', '업체코드', '상품Code', '중분류카테고리', '상품명', 
+            '기본수량(1)', '판매단가(V포함)', '본사상품링크'
+        ]
+        
+        # 컬럼명 공백 제거 및 표준화
+        renamed_columns = {}
+        for col in df_copy.columns:
+            cleaned_col = str(col).strip()
+            if cleaned_col != col:
+                renamed_columns[col] = cleaned_col
+        
+        if renamed_columns:
+            df_copy = df_copy.rename(columns=renamed_columns)
+            self.logger.info(f"Cleaned column names: {renamed_columns}")
+        
+        # 컬럼명 매핑 (해오름 형식에 맞게)
+        column_mapping = {
+            # 기본 필드 매핑
+            'Code': '상품Code',
+            '상품코드': '상품Code',
+            '상품 코드': '상품Code',
+            '상품번호': '상품Code',
+            
+            '상품이름': '상품명',
+            '상품 이름': '상품명',
+            '제품명': '상품명',
+            
+            '판매가(V포함)': '판매단가(V포함)',
+            '판매가(VAT포함)': '판매단가(V포함)',
+            '판매가': '판매단가(V포함)',
+            '가격': '판매단가(V포함)',
+            '가격(V포함)': '판매단가(V포함)',
+            
+            '본사링크': '본사상품링크',
+            '상품링크': '본사상품링크',
+            'URL': '본사상품링크',
+            
+            '수량': '기본수량(1)',
+            '기본수량': '기본수량(1)',
+            
+            '이미지': '본사 이미지',
+            '이미지URL': '본사 이미지',
+            '제품이미지': '본사 이미지',
+            '상품이미지': '본사 이미지'
+        }
+        
+        # 해오름 형식에 맞게 컬럼 리매핑
+        for src_col, target_col in column_mapping.items():
+            if src_col in df_copy.columns and target_col not in df_copy.columns:
+                df_copy[target_col] = df_copy[src_col]
+                self.logger.info(f"Mapped column '{src_col}' to '{target_col}'")
+        
+        # 필수 컬럼 확인 및 생성
         for col in required_columns:
             if col not in df_copy.columns:
                 # 유사한 컬럼 찾기
@@ -199,11 +255,18 @@ class ExcelManager:
                     if '단가' in col or '가격' in col:
                         df_copy[col] = 0
                     elif 'Code' in col or '코드' in col:
-                        df_copy[col] = [f"CODE-{i+1}" for i in range(len(df_copy))]
-                    elif '이미지' in col or '링크' in col:
+                        df_copy[col] = df_copy.index.map(lambda i: f"GEN-{i}")
+                    elif '이미지' in col:
+                        df_copy[col] = ""
+                    elif '링크' in col:
                         df_copy[col] = ""
                     else:
-                        df_copy[col] = [f"Item {i+1}" for i in range(len(df_copy))]
+                        df_copy[col] = ""
+        
+        # 소스 컬럼 추가 (해오름기프트 소스 명시)
+        if 'source' not in df_copy.columns:
+            df_copy['source'] = 'haeoreum'
+            self.logger.info("Added 'source' column with value 'haeoreum'")
         
         return df_copy
     
