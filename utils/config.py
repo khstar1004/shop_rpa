@@ -1,3 +1,4 @@
+"""Handles loading and processing of configuration from .ini and .env files."""
 import configparser
 import os
 from typing import Any, Dict
@@ -18,7 +19,9 @@ def load_config() -> Dict[str, Any]:
     try:
         config.read(config_path, encoding="utf-8")
     except Exception as e:
-        raise Exception(f"Failed to read config file: {e}")
+        # Add 'from e' to the exception
+        # Disable W0719 as raising a general Exception with context is acceptable here.
+        raise Exception(f"Failed to read config file: {e}") from e # pylint: disable=broad-exception-raised
 
     # Convert string values to appropriate types
     processed_config = {}
@@ -235,6 +238,8 @@ def load_config() -> Dict[str, Any]:
         }
 
     except Exception as e:
-        raise Exception(f"Error processing config values: {e}")
+        # Add 'from e' to the exception
+        # Disable W0719 as raising a general Exception with context is acceptable here.
+        raise Exception(f"Error processing config values: {e}") from e # pylint: disable=broad-exception-raised
 
     return processed_config

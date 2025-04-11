@@ -1,12 +1,12 @@
+"""Provides caching utilities, including a file-based cache and a function result caching decorator."""
 import hashlib
 import logging
 import os
 import pickle
 import random
-import shutil
 import time
 import zlib
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +41,11 @@ class FileCache:
         # Check current cache size on initialization
         cache_size = self._get_cache_size()
         logger.info(
-            f"Cache initialized at '{self.cache_dir}' with duration {duration_seconds} seconds. "
-            f"Current size: {cache_size / 1024 / 1024:.2f}MB, Max size: {max_size_mb}MB. "
-            f"Compression {'enabled' if enable_compression else 'disabled'}."
+            "Cache initialized at '%s' with duration %d seconds. "
+            "Current size: %.2fMB, Max size: %dMB. Compression %s.",
+            self.cache_dir, duration_seconds,
+            cache_size / 1024 / 1024, max_size_mb,
+            'enabled' if enable_compression else 'disabled'
         )
 
         # Clean up if cache is too large
@@ -60,7 +62,7 @@ class FileCache:
         """Retrieve an item from the cache if it exists and is not expired."""
         filepath = self._get_cache_filepath(key)
         if not os.path.exists(filepath):
-            logger.debug(f"Cache miss (file not found) for key: {key[:50]}...")
+            logger.debug("Cache miss (file not found) for key: %s...", key[:50])
             return None
 
         try:
@@ -73,25 +75,26 @@ class FileCache:
                     data = zlib.decompress(data)
                 except zlib.error as e:
                     logger.warning(
-                        f"Failed to decompress cache entry: {e}. Treating as uncompressed."
+                        "Failed to decompress cache entry: %s. Treating as uncompressed.", e
                     )
                     # Assume it's not compressed and continue
 
             data, expiration_time = pickle.loads(data)
 
             if time.time() > expiration_time:
-                logger.debug(f"Cache miss (expired) for key: {key[:50]}...")
+                logger.debug("Cache miss (expired) for key: %s...", key[:50])
                 os.remove(filepath)  # Remove expired file
                 return None
 
             # Update file access time to mark it as recently used
             os.utime(filepath, None)
 
-            logger.debug(f"Cache hit for key: {key[:50]}...")
+            logger.debug("Cache hit for key: %s...", key[:50])
             return data
         except (OSError, pickle.PickleError, EOFError) as e:
             logger.warning(
-                f"Error reading cache file {filepath} for key '{key[:50]}...': {e}"
+                "Error reading cache file %s for key '%s...': %s",
+                filepath, key[:50], e
             )
             # Attempt to remove corrupted cache file
             try:
@@ -129,10 +132,11 @@ class FileCache:
             with open(temp_filepath, "wb") as f:
                 f.write(data)
             os.replace(temp_filepath, filepath)  # Atomic rename/replace
-            logger.debug(f"Cache set for key: {key[:50]}...")
+            logger.debug("Cache set for key: %s...", key[:50])
         except (OSError, pickle.PickleError) as e:
             logger.error(
-                f"Error writing cache file {filepath} for key '{key[:50]}...': {e}"
+                "Error writing cache file %s for key '%s...': %s",
+                filepath, key[:50], e
             )
             # Clean up temp file if it exists
             if os.path.exists(temp_filepath):
@@ -143,7 +147,7 @@ class FileCache:
 
     def clear(self) -> None:
         """Clear the entire cache."""
-        logger.info(f"Clearing cache directory: {self.cache_dir}")
+        logger.info("Clearing cache directory: %s", self.cache_dir)
         for filename in os.listdir(self.cache_dir):
             filepath = os.path.join(self.cache_dir, filename)
             try:
@@ -152,8 +156,8 @@ class FileCache:
                 elif os.path.isdir(filepath):
                     # Optionally clear subdirectories if needed
                     pass
-            except Exception as e:
-                logger.error(f"Failed to delete {filepath}. Reason: {e}")
+            except OSError as e:
+                logger.error("Failed to delete %s. Reason: %s", filepath, e)
         logger.info("Cache cleared.")
 
     def _get_cache_size(self) -> int:
@@ -176,7 +180,7 @@ class FileCache:
 
     def _cleanup_cache(self) -> None:
         """Clean up cache when it exceeds the maximum size limit."""
-        logger.info(f"Starting cache cleanup. Current size exceeds limit.")
+        logger.info("Starting cache cleanup. Current size exceeds limit.")
 
         # List all cache files with their access time and size
         cache_files = []
@@ -209,8 +213,8 @@ class FileCache:
         target_size = self.max_size_bytes * 0.7  # Reduce to 70% of max size
 
         logger.info(
-            f"Current cache size: {current_size / 1024 / 1024:.2f}MB, "
-            f"Target size: {target_size / 1024 / 1024:.2f}MB"
+            "Current cache size: %.2fMB, Target size: %.2fMB",
+            current_size / 1024 / 1024, target_size / 1024 / 1024
         )
 
         # Delete oldest files until we're under the target size
@@ -227,12 +231,11 @@ class FileCache:
                 deleted_size += size
                 deleted_count += 1
             except OSError as e:
-                logger.warning(f"Failed to delete cache file {filepath}: {e}")
+                logger.warning("Failed to delete cache file %s: %s", filepath, e)
 
         logger.info(
-            f"Cache cleanup completed. Deleted {deleted_count} files "
-            f"({deleted_size / 1024 / 1024:.2f}MB). "
-            f"New size: {current_size / 1024 / 1024:.2f}MB"
+            "Cache cleanup completed. Deleted %d files (%sMB). New size: %.2fMB",
+            deleted_count, deleted_size / 1024 / 1024, current_size / 1024 / 1024
         )
 
 
@@ -248,24 +251,46 @@ def cache_result(
             if cache is None:
                 return func(*args, **kwargs)
 
-            # Generate cache key from function name, args, and kwargs
-            key_parts = [key_prefix, func.__name__]
-            key_parts.extend(map(str, args))
-            key_parts.extend(f"{k}={v}" for k, v in sorted(kwargs.items()))
-            cache_key = "|".join(key_parts)
+            # Generate a unique cache key based on function name, args, and kwargs
+            key_parts = [key_prefix, func.__name__] + [str(arg) for arg in args]
+            key_parts.extend(sorted([f"{k}={v}" for k, v in kwargs.items()]))
+            cache_key = "::".join(key_parts)
 
-            # Check cache
-            cached_value = cache.get(cache_key)
-            if cached_value is not None:
-                return cached_value
+            # Try to get the result from cache
+            cached_result = cache.get(cache_key)
+            if cached_result is not None:
+                logger.debug("Cache hit for key '%s::%s'", key_prefix, func.__name__)
+                return cached_result
 
-            # Execute function and cache result
-            result = func(*args, **kwargs)
+            logger.debug("Cache miss for key '%s::%s'. Executing function.", key_prefix, func.__name__)
+
+            # Execute the function, cache the result, and handle potential errors
             try:
+                result = func(*args, **kwargs)
                 cache.set(cache_key, result, ttl=ttl)
-            except Exception as e:
-                logger.error(f"Failed to cache results for key '{cache_key}': {str(e)}")
-            return result
+                logger.debug("Result for key '%s::%s' cached.", key_prefix, func.__name__)
+                return result
+            # Catch specific caching errors first
+            except (OSError, pickle.PickleError) as cache_exc:
+                logger.error(
+                    "Error during caching for key '%s::%s': %s",
+                    key_prefix, func.__name__, cache_exc
+                )
+                # Return None as per original logic on caching failure
+                return None
+            # Catch other exceptions from the function execution
+            # Disable W0718 as catching general Exception here is intentional
+            # to log errors from the decorated function.
+            except Exception as e: # pylint: disable=broad-exception-caught
+                logger.error(
+                    # Use % formatting for logging
+                    # Wrapped long log message
+                    "Error during function execution for key '%s::%s': %s",
+                    key_prefix, func.__name__, e,
+                    exc_info=True # Include traceback for function errors
+                )
+                # Return None as per original logic on function execution failure
+                return None
 
         return wrapper
 

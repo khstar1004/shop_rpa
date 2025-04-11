@@ -76,5 +76,7 @@
     "auto_save_failed": "자동 저장 실패: {error}",
     "warning": "경고",
     "info": "정보",
-    "complete": "완료"
+    "complete": "완료",
+    "max_products": "최대 상품 수",
+    "max_products_tooltip": "처리할 최대 상품 수를 설정합니다 (0은 제한 없음)"
 }

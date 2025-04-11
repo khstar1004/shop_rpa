@@ -76,5 +76,7 @@
     "auto_save_failed": "Auto save failed: {error}",
     "warning": "Warning",
     "info": "Information",
-    "complete": "Complete"
+    "complete": "Complete",
+    "max_products": "Max Products",
+    "max_products_tooltip": "Set the maximum number of products to process (0 means no limit)"
 }

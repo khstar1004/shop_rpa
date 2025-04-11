@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PyQt5 import sip
 
 from .i18n import translator as tr
 from .log_handler import GUILogHandler
@@ -43,10 +44,9 @@ from .widgets import WidgetFactory
 class MainWindow(QMainWindow):
     """Main window of the application"""
 
-    def __init__(self, config, product_limit=None):
+    def __init__(self, config):
         super().__init__()
         self.config = config
-        self.product_limit = product_limit
         self.logger = logging.getLogger(__name__)
 
         # Initialize settings
@@ -76,10 +76,6 @@ class MainWindow(QMainWindow):
             from core.processing.main_processor import ProductProcessor
 
             self.processor = ProductProcessor(self.config)
-
-            # limit 설정이 있으면 로그에 기록
-            if self.product_limit:
-                self.logger.info(f"상품 처리 수 제한: {self.product_limit}개")
 
         except Exception as e:
             self.logger.error(f"프로세서 초기화 중 오류 발생: {str(e)}", exc_info=True)
@@ -137,14 +133,6 @@ class MainWindow(QMainWindow):
         self.create_analysis_tab()
         self.create_settings_tab()
 
-        # 상품 수 제한 라벨 추가
-        limit_layout = QHBoxLayout()
-        if self.product_limit:
-            limit_label = QLabel(f"상품 수 제한: 최대 {self.product_limit}개")
-            limit_label.setStyleSheet("color: blue;")
-            limit_layout.addWidget(limit_label)
-        main_layout.addLayout(limit_layout)
-
         # 상태바 설정
         status_bar = self.statusBar()
         status_bar.addPermanentWidget(self.memory_label)
@@ -195,6 +183,34 @@ class MainWindow(QMainWindow):
             self.stop_button,
             self.threads_spinbox,
         ) = WidgetFactory.create_controls_group()
+        # Add product limit spinbox to controls group
+        controls_layout = self.controls_group.layout()
+        product_limit_layout = QHBoxLayout()
+        product_limit_label = QLabel(tr.get_text("max_products"))
+        product_limit_label.setFixedWidth(150)  # Align with other labels
+        self.product_limit_spinbox = QSpinBox()
+        self.product_limit_spinbox.setRange(0, 10000)  # 0 means no limit
+        self.product_limit_spinbox.setToolTip(tr.get_text("max_products_tooltip"))
+        self.product_limit_spinbox.setValue(0) # Default to no limit
+        product_limit_layout.addWidget(product_limit_label)
+        product_limit_layout.addWidget(self.product_limit_spinbox)
+        product_limit_layout.addStretch()
+        # Insert the new layout before the stretch in the original controls layout if it exists
+        if isinstance(controls_layout, QVBoxLayout):
+            # Find the stretch item and insert before it, or just add if no stretch
+            stretch_index = -1
+            for i in range(controls_layout.count()):
+                item = controls_layout.itemAt(i)
+                if isinstance(item, type(controls_layout.itemAt(0))) and item.spacerItem(): # Check if it's a spacer item
+                   stretch_index = i
+                   break
+            if stretch_index != -1:
+                controls_layout.insertLayout(stretch_index, product_limit_layout)
+            else:
+                controls_layout.addLayout(product_limit_layout) # Add if no stretch found
+        else: # Fallback if layout is not QVBoxLayout as expected
+             controls_layout.addLayout(product_limit_layout)
+
         top_layout.addWidget(self.controls_group)
 
         self.progress_group, self.progress_bar, self.status_label = (
@@ -619,8 +635,15 @@ class MainWindow(QMainWindow):
         # Record start time for statistics
         self.processing_start_time = time.time()
 
+        # Get product limit from spinbox
+        product_limit = self.product_limit_spinbox.value()
+        if product_limit <= 0: # Treat 0 or less as no limit
+            product_limit = None
+        else:
+             logging.info(f"상품 처리 수 제한 설정됨: {product_limit}개")
+
         self.processing_thread = ProcessingThread(
-            self.processor, self.input_file, self.product_limit
+            self.processor, self.input_file, product_limit
         )
         self.processing_thread.progress_updated.connect(self.update_progress)
         self.processing_thread.status_updated.connect(self.update_status)
@@ -936,17 +959,15 @@ class MainWindow(QMainWindow):
 class GUILogHandler(logging.Handler, QObject):
     log_signal = pyqtSignal(str)  # Define a signal that carries a string
 
-    def __init__(self, parent=None):  # parent=None is good practice for QObject
+    def __init__(self, parent=None):
         logging.Handler.__init__(self)
         QObject.__init__(self, parent)
-        # Don't store the widget directly, connect the signal instead
-        # self.widget = text_widget
-        # self.widget.setReadOnly(True)
 
     def emit(self, record):
         try:
             msg = self.format(record)
-            # Emit the signal instead of directly updating the widget
-            self.log_signal.emit(msg)
+            # 객체가 아직 존재하는지 확인
+            if not sip.isdeleted(self):
+                self.log_signal.emit(msg)
         except Exception:
             self.handleError(record)

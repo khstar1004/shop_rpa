@@ -85,8 +85,8 @@ def main():
         try:
             # Initialize and run GUI application
             app = QApplication(sys.argv)
-            # Pass the loaded config to MainWindow along with the limit argument
-            window = MainWindow(config, product_limit=args.limit)
+            # Pass the loaded config to MainWindow
+            window = MainWindow(config)
             window.show()
             logger.info("메인 윈도우 표시됨")
             sys.exit(app.exec_())

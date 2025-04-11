@@ -15,14 +15,26 @@ from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.styles import PatternFill
+# Unused imports removed
+# from openpyxl import load_workbook
+# from openpyxl.styles import PatternFill
 
 logger = logging.getLogger(__name__)
 
 
 def setup_logging(log_dir: Optional[str] = None) -> None:
-    """Setup logging configuration with improved error handling and features."""
+    """로깅 설정을 초기화하고 구성합니다.
+
+    콘솔 핸들러(INFO 레벨, ERROR 레벨 분리)와 파일 핸들러(DEBUG 레벨 전체 로그,
+    ERROR 레벨 오류 로그 분리)를 설정합니다. 로그 파일은 회전 및 시간 기반 회전을 지원합니다.
+    처리되지 않은 예외를 로깅하는 핸들러도 추가합니다.
+
+    Args:
+        log_dir: 로그 파일을 저장할 디렉토리 경로. None이면 파일 로깅 비활성화.
+
+    Raises:
+        Exception: 로깅 설정 중 오류 발생 시.
+    """
     try:
         # Create log directory if specified
         if log_dir:
@@ -96,8 +108,12 @@ def setup_logging(log_dir: Optional[str] = None) -> None:
 
         # Add unhandled exception handler
         def handle_exception(exc_type, exc_value, exc_traceback):
+            """처리되지 않은 예외를 로깅하는 핸들러.
+
+            KeyboardInterrupt는 로깅하지 않고 기본 처리를 따릅니다.
+            그 외 예외는 ERROR 레벨로 로깅합니다.
+            """
             if issubclass(exc_type, KeyboardInterrupt):
-                # Don't log keyboard interrupts
                 sys.__excepthook__(exc_type, exc_value, exc_traceback)
             else:
                 root_logger.error(
@@ -117,20 +133,36 @@ def setup_logging(log_dir: Optional[str] = None) -> None:
 
 
 class LogCapture:
-    """
-    특정 코드 블록 실행 동안 발생하는 로그 메시지를 캡처하는 컨텍스트 관리자.
+    """특정 코드 블록 실행 동안 로그 메시지를 캡처하는 컨텍스트 관리자.
 
-    테스트 또는 특정 작업의 로깅 출력을 분리하여 확인하고 싶을 때 유용합니다.
+    지정된 로거에 임시 핸들러를 추가하여 해당 로거를 통해 생성되는 로그 레코드를
+    내부 리스트에 저장합니다. 컨텍스트 블록을 벗어나면 핸들러는 자동으로 제거됩니다.
+    테스트 또는 특정 작업의 로깅 출력을 분리하여 확인하는 데 유용합니다.
 
-    사용 예시:
-        with LogCapture('my_logger') as lc:
-            # 로그를 발생시키는 코드 실행
-            logger.info("This message will be captured")
-        messages = lc.get_messages()
-        print(messages)
+    Attributes:
+        logger_name (str): 캡처할 대상 로거의 이름.
+        level (int): 캡처할 로그 레벨 (기본값: logging.DEBUG).
+        records (list): 캡처된 logging.LogRecord 객체 리스트.
+
+    Examples:
+        >>> logger = logging.getLogger('test_logger')
+        >>> logger.addHandler(logging.StreamHandler())
+        >>> logger.setLevel(logging.INFO)
+        >>> with LogCapture('test_logger') as lc:
+        ...     logger.info("Info message")
+        ...     logger.debug("Debug message - not captured by default") # Level < INFO
+        >>> messages = lc.get_messages()
+        >>> print(messages)
+        ['Info message']
     """
 
     def __init__(self, logger_name: str, level: int = logging.DEBUG):
+        """LogCapture 인스턴스를 초기화합니다.
+
+        Args:
+            logger_name: 캡처할 대상 로거의 이름.
+            level: 캡처할 최소 로그 레벨.
+        """
         self.logger_name = logger_name
         self.level = level
         self.logger = logging.getLogger(logger_name)
@@ -138,12 +170,15 @@ class LogCapture:
         self.records = []
 
     def __enter__(self):
+        """컨텍스트 관리자 진입 시 로거에 임시 핸들러를 추가합니다."""
         class RecordListHandler(logging.Handler):
+            """로그 레코드를 내부 리스트에 저장하는 간단한 핸들러."""
             def __init__(self, records):
                 super().__init__()
                 self.records = records
 
             def emit(self, record):
+                """수신된 로그 레코드를 리스트에 추가합니다."""
                 self.records.append(record)
 
         self.handler = RecordListHandler(self.records)
@@ -152,28 +187,36 @@ class LogCapture:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """컨텍스트 관리자 종료 시 로거에서 임시 핸들러를 제거합니다."""
         if self.handler:
             self.logger.removeHandler(self.handler)
 
-    def get_records(self) -> list:
-        """Get captured log records."""
+    def get_records(self) -> List[logging.LogRecord]:
+        """캡처된 원본 LogRecord 객체 리스트를 반환합니다.
+
+        Returns:
+            List[logging.LogRecord]: 캡처된 로그 레코드 객체 리스트.
+        """
         return self.records
 
-    def get_messages(self) -> list:
-        """Get formatted log messages."""
+    def get_messages(self) -> List[str]:
+        """캡처된 로그 레코드를 포맷팅된 문자열 메시지 리스트로 반환합니다.
+
+        Returns:
+            List[str]: 포맷팅된 로그 메시지 문자열 리스트.
+        """
         return [self.handler.format(record) for record in self.records]
 
 
 def validate_input_file(file_path: str, required_columns: List[str]) -> bool:
-    """
-    Validate input file format and required columns.
+    """입력 파일의 존재 여부, 확장자, 필수 컬럼 포함 여부를 검증합니다.
 
     Args:
-        file_path: Path to the input Excel file
-        required_columns: List of required column names
+        file_path: 검증할 입력 Excel 파일 경로.
+        required_columns: 파일에 반드시 포함되어야 하는 컬럼명 리스트.
 
     Returns:
-        bool: True if file is valid, False otherwise
+        bool: 파일이 유효하면 True, 그렇지 않으면 False.
     """
     try:
         # Verify file exists
@@ -198,10 +241,7 @@ def validate_input_file(file_path: str, required_columns: List[str]) -> bool:
         except pd.errors.EmptyDataError:
             logger.error("Input file is empty: %s", file_path)
             return False
-        except ValueError as ve:
-            logger.error("Error parsing Excel file structure: %s", ve)
-            return False
-        except Exception as e:  # Catch other potential read errors (e.g., corrupted file)
+        except (OSError, IOError) as e:
             logger.error("Failed to open or read header from Excel file: %s", e)
             return False
 
@@ -213,81 +253,87 @@ def validate_input_file(file_path: str, required_columns: List[str]) -> bool:
 
         return True
 
-    except OSError as e:
-        logger.error("OS error during file validation: %s", e)
+    except (OSError, AttributeError, TypeError, ValueError, KeyError) as e:
+        logger.error("Error validating required columns: %s", e)
         return False
-    except Exception as e:
-        logger.error("Unexpected error validating input file: %s", e)
+
+    # Catch-all for truly unexpected validation issues
+    except Exception as e: # pylint: disable=broad-exception-caught
+        logger.error("Unexpected error during input file validation: %s", e, exc_info=True)
         return False
 
 
 def clean_product_names(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Clean product names according to manual requirements:
-    - Remove '1-' prefix and numbers/hyphens before it
-    - Remove special characters like '/' and '()'
-    - Remove numbers in parentheses
+    """DataFrame의 '상품명' 컬럼을 지정된 규칙에 따라 정리합니다.
+
+    - '//' 이후의 모든 문자열 제거
+    - 숫자와 하이픈 조합 (예: 123-456) 등의 패턴 제거
+    - 특정 불필요 키워드 제거 ("정품", "NEW", "특가", "주문제작" 관련 등)
+    - 연속된 공백을 단일 공백으로 변경
+    - 앞뒤 공백 제거
 
     Args:
-        df: Input DataFrame with '상품명' column
+        df: 처리할 pandas DataFrame. '상품명' 컬럼이 있어야 함.
 
     Returns:
-        DataFrame with cleaned product names
-    """
-    if "상품명" not in df.columns:
-        logger.warning("Column '상품명' not found, skipping product name cleaning")
-        return df
+        pd.DataFrame: 상품명이 정리된 DataFrame. '상품명' 컬럼이 없거나 처리 중 오류 발생 시 원본 DataFrame 반환.
 
-    logger.info("Cleaning product names")
+    Raises:
+        KeyError: '상품명' 컬럼이 DataFrame에 없을 경우 (내부에서 처리).
+    """
+    logger.info("Cleaning product names...")
+    if "상품명" not in df.columns:
+        logger.warning("'상품명' column not found in DataFrame. Skipping cleaning.")
+        return df
 
     try:
-        # Create a copy to avoid modifying the original
-        cleaned_df = df.copy()
+        # Define patterns and keywords to remove
+        comment_pattern = r"\s*//.*" # Pattern for comments starting with //
+        noise_pattern = r"(\d{4}_[A-Z]\.)|(\d+\+\d+)|[^a-zA-Z0-9가-힣\s]"
+        keywords_to_remove = [
+            "정품", "NEW", "특가", "주문제작타올", "주문제작수건", "결혼답례품 수건",
+            "답례품수건", "주문제작 수건", "돌답례품수건", "명절선물세트", "각종행사수건",
+        ]
 
-        # Ensure '상품명' is string type before applying string methods
-        if pd.api.types.is_string_dtype(cleaned_df["상품명"]):
-            # Remove '1-' and numbers/hyphens before it
-            cleaned_df["상품명"] = cleaned_df["상품명"].str.replace(
-                r"^\d+-", "", regex=True
-            )
+        # Apply cleaning steps
+        # 1. Remove comments
+        df["상품명"] = df["상품명"].astype(str).str.replace(comment_pattern, "", regex=True)
+        # 2. Remove noise patterns
+        df["상품명"] = df["상품명"].str.replace(noise_pattern, " ", regex=True)
+        # 3. Remove specific keywords
+        for keyword in keywords_to_remove:
+            df["상품명"] = df["상품명"].str.replace(keyword, "", regex=False)
+        # 4. Normalize whitespace and strip
+        df["상품명"] = df["상품명"].str.replace(r"\s+", " ", regex=True).str.strip()
 
-            # Remove special characters and brackets
-            cleaned_df["상품명"] = cleaned_df["상품명"].str.replace(
-                r"[/()]", "", regex=True
-            )
-
-            # Remove numbers in parentheses
-            cleaned_df["상품명"] = cleaned_df["상품명"].str.replace(
-                r"\(\d+\)", "", regex=True
-            )
-
-            # Trim extra whitespace
-            cleaned_df["상품명"] = cleaned_df["상품명"].str.strip()
-        else:
-            logger.warning("Skipping product name cleaning as the column is not string type.")
-
-        return cleaned_df
+        logger.info("Product names cleaned successfully.")
+        return df
 
     except (AttributeError, TypeError, ValueError) as e:
-        logger.error("Error during product name cleaning: %s", e)
-        return df  # Return original if specific error occurs
-    except Exception as e:
-        logger.error("Unexpected error cleaning product names: %s", e)
-        return df
+        logger.error("Error cleaning product names: %s", e)
+        return df # Return original DataFrame on error
 
 
 def process_input_file(
     file_path: str, config: Dict[str, Any]
 ) -> Optional[pd.DataFrame]:
-    """
-    Process and validate input Excel file.
+    """입력 Excel 파일을 읽고 유효성을 검사하며 기본적인 전처리를 수행합니다.
+
+    수행 단계:
+    1. 설정 파일에서 필수 컬럼 목록 로드.
+    2. `validate_input_file`을 사용하여 파일 유효성 검사.
+    3. Pandas를 사용하여 Excel 파일 읽기.
+    4. 설정에 따라 `clean_product_names` 자동 실행.
+    5. `normalize_column_types` 및 `handle_missing_values` 실행.
+    6. 설정에 따라 중복 상품 코드(`상품Code`) 제거.
 
     Args:
-        file_path: Path to the input Excel file
-        config: Configuration dictionary
+        file_path: 처리할 입력 Excel 파일 경로.
+        config: 처리 설정을 담고 있는 딕셔너리.
 
     Returns:
-        DataFrame or None if validation fails
+        Optional[pd.DataFrame]: 전처리된 DataFrame. 유효성 검사 실패 또는
+                               처리 중 오류 발생 시 None을 반환합니다.
     """
     logger.info("Processing input file: %s", file_path)
 
@@ -327,32 +373,25 @@ def process_input_file(
 
         return df
 
-    except FileNotFoundError:
-        logger.error("Input file not found during processing: %s", file_path)
+    except (FileNotFoundError, pd.errors.EmptyDataError, ValueError, OSError, IOError) as e:
+        logger.error(f"Error reading input Excel file '{file_path}': {e}")
         return None
-    except (pd.errors.ParserError, ValueError) as e:
-        logger.error("Error parsing Excel file during processing: %s", e)
-        return None
-    except KeyError as e:
-        logger.error("Configuration key error during processing: Missing key %s", e)
-        return None
-    except (AttributeError, TypeError) as e:
-        logger.error("Data type or attribute error during preprocessing steps: %s", e)
-        return None
-    except Exception as e:
-        logger.error("Unexpected error processing input file: %s", e)
+    except Exception as e: # pylint: disable=broad-exception-caught
+        logger.error(f"Unexpected error processing input file '{file_path}': {e}", exc_info=True)
         return None
 
 
 def normalize_column_types(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize column data types for consistent processing.
+    """DataFrame의 주요 컬럼들의 데이터 타입을 표준화합니다.
+
+    - 특정 문자열 컬럼들을 `str` 타입으로 변환하고 `nan` 문자열을 빈 문자열로 바꿉니다.
+    - 특정 숫자 컬럼들을 `float` 타입으로 변환하고 변환 실패 시 0으로 채웁니다.
 
     Args:
-        df: Input DataFrame
+        df: 타입을 정규화할 입력 DataFrame.
 
     Returns:
-        DataFrame with normalized data types
+        pd.DataFrame: 컬럼 타입이 정규화된 DataFrame. 오류 발생 시 원본 DataFrame 반환.
     """
     try:
         # Create a copy to avoid modifying the original
@@ -384,28 +423,38 @@ def normalize_column_types(df: pd.DataFrame) -> pd.DataFrame:
                 # Fill NaN resulting from coercion with 0
                 normalized_df[col] = normalized_df[col].fillna(0)
 
+        # Normalize image columns to string (they might be formulas later)
+        normalized_df["본사 이미지"] = normalized_df["본사 이미지"].astype(str)
+        normalized_df["고려기프트 이미지"] = normalized_df["고려기프트 이미지"].astype(str)
+        normalized_df["네이버 이미지"] = normalized_df["네이버 이미지"].astype(str)
+
+        logger.info("Column types normalized successfully.")
         return normalized_df
 
-    except (TypeError, ValueError, KeyError) as e:
-        logger.error("Error normalizing column types: %s", e)
-        return df  # Return original if error occurs
-    except Exception as e:
-        logger.error("Unexpected error normalizing column types: %s", e)
+    except (AttributeError, TypeError, ValueError, KeyError) as e:
+        logger.error(f"Error normalizing column types: {e}")
+        return df # Return potentially partially processed DataFrame
+    except Exception as e: # pylint: disable=broad-exception-caught
+        logger.error(f"Unexpected error normalizing column types: {e}", exc_info=True)
         return df
 
 
 def handle_missing_values(
     df: pd.DataFrame, required_columns: List[str]
 ) -> pd.DataFrame:
-    """
-    Handle missing values in the DataFrame.
+    """DataFrame의 결측치를 처리하고 특정 컬럼의 기본값을 설정합니다.
+
+    - 문자열 컬럼의 NaN은 빈 문자열('')로 채웁니다.
+    - 숫자 컬럼의 NaN은 0으로 채웁니다.
+    - 필수 컬럼이 누락된 경우 경고를 로깅하고 빈 값으로 추가합니다.
+    - '구분' 컬럼의 값이 'A' 또는 'P'가 아니거나 NaN인 경우 'A'로 설정합니다.
 
     Args:
-        df: Input DataFrame
-        required_columns: List of columns that must have values
+        df: 결측치를 처리할 입력 DataFrame.
+        required_columns: 반드시 존재해야 하는 컬럼 목록.
 
     Returns:
-        DataFrame with missing values handled
+        pd.DataFrame: 결측치가 처리된 DataFrame. 오류 발생 시 원본 DataFrame 반환.
     """
     try:
         # Create a copy to avoid modifying the original
@@ -445,222 +494,161 @@ def handle_missing_values(
                 lambda x: "A" if not isinstance(x, str) or x not in ["A", "P"] else x
             ).astype(str) # Ensure it's string type
 
+        logger.info("Missing value handling complete.")
         return handled_df
 
-    except (KeyError, TypeError, ValueError) as e:
-        logger.error("Error handling missing values: %s", e)
-        return df  # Return original if error occurs
-    except Exception as e:
-        logger.error("Unexpected error handling missing values: %s", e)
+    except (KeyError, ValueError, TypeError, AttributeError) as e:
+        logger.error(f"Error handling missing values: {e}")
+        return df # Return DataFrame as is on error
+    except Exception as e: # pylint: disable=broad-exception-caught
+        logger.error(f"Unexpected error handling missing values: {e}", exc_info=True)
         return df
 
 
 def split_large_file(
     file_path: str, threshold: int = 300, clean_names: bool = True
 ) -> List[str]:
-    """
-    Split large Excel file into smaller chunks according to the manual requirements.
+    """주어진 Excel 파일이 지정된 임계값(행 수)보다 크면 여러 개의 작은 파일로 분할합니다.
+
+    분할된 파일들은 원본 파일명에 `_part_1`, `_part_2` 등의 접미사가 붙어 저장됩니다.
+    분할 전에 상품명 정제 옵션을 선택할 수 있습니다.
 
     Args:
-        file_path: Path to the input Excel file
-        threshold: Maximum rows per output file
-        clean_names: Whether to clean product names
+        file_path: 분할할 원본 Excel 파일 경로.
+        threshold: 분할 기준이 되는 최대 행 수 (기본값: 300).
+        clean_names: 분할 전 상품명 정제 실행 여부 (기본값: True).
 
     Returns:
-        List of paths to the split files (or original path if no split needed or error)
+        List[str]: 분할된 파일들의 경로 리스트. 분할이 필요 없거나 오류 발생 시
+                   원본 파일 경로만 포함하는 리스트 반환.
+
+    Raises:
+        FileNotFoundError: 입력 파일이 존재하지 않을 경우.
+        ValueError: 임계값이 0 이하일 경우.
     """
-    split_files = [file_path] # Default return value
+    logger.info("Checking if file needs splitting: %s (Threshold: %d)", file_path, threshold)
+
+    if threshold <= 0:
+        raise ValueError("Split threshold must be positive.")
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Input file not found: {file_path}")
+
+    output_files = []
     try:
-        logger.info("Attempting to split file: %s (threshold: %d)", file_path, threshold)
-
-        # Read the input file
+        # Read the entire Excel file to check the number of rows
         df = pd.read_excel(file_path)
+        num_rows = len(df)
 
-        total_rows = len(df)
-        if total_rows <= threshold:
-            logger.info("File size is below threshold, no splitting needed.")
-            return split_files
+        if num_rows <= threshold:
+            logger.info("File size (%d rows) is within the threshold. No splitting needed.", num_rows)
+            return [file_path] # Return original file path in a list
 
-        # Clean product names if requested
+        logger.info("File size (%d rows) exceeds threshold (%d). Splitting file...", num_rows, threshold)
+
+        # Clean product names before splitting if requested
         if clean_names:
-            df = clean_product_names(df)
+            try:
+                df = clean_product_names(df)
+            except (KeyError, AttributeError, TypeError, ValueError) as clean_err:
+                logger.warning("Failed to clean product names before splitting: %s. Proceeding without cleaning.", clean_err)
 
-        # Get processing type ('A' for approval, 'P' for price)
-        processing_type = "승인관리"
-        if "구분" in df.columns and not df.empty and df["구분"].iloc[0].upper() == "P":
-            processing_type = "가격관리"
+        # Split the DataFrame
+        num_parts = (num_rows + threshold - 1) // threshold # Ceiling division
+        directory, filename = os.path.split(file_path)
+        name, ext = os.path.splitext(filename)
 
-        # Get current date for filename
-        current_date = datetime.now().strftime("%Y%m%d")
+        for i in range(num_parts):
+            start_row = i * threshold
+            end_row = min((i + 1) * threshold, num_rows)
+            part_df = df.iloc[start_row:end_row]
 
-        # Get base directory and filename
-        base_dir = os.path.dirname(file_path)
-        base_name, ext = os.path.splitext(os.path.basename(file_path))
+            part_filename = f"{name}_part_{i+1}{ext}"
+            part_filepath = os.path.join(directory, part_filename)
 
-        # Calculate number of files needed
-        num_files = (total_rows + threshold - 1) // threshold  # Ceiling division
+            # Save the part
+            part_df.to_excel(part_filepath, index=False)
+            output_files.append(part_filepath)
+            logger.info("Created split file: %s (%d rows)", part_filepath, len(part_df))
 
-        split_files = []
-        for i in range(num_files):
-            start_idx = i * threshold
-            end_idx = min((i + 1) * threshold, total_rows)
-            chunk_df = df.iloc[start_idx:end_idx]
+        logger.info("Successfully split file into %d parts.", num_parts)
+        return output_files
 
-            # Create filename as per manual: 승인관리1(300)-날짜
-            file_count = i + 1
-            file_size = len(chunk_df)
-            split_filename = (
-                f"{processing_type}{file_count}({file_size})-{current_date}{ext}"
-            )
-            split_path = os.path.join(base_dir, split_filename)
-
-            # Save the chunk
-            chunk_df.to_excel(split_path, index=False)
-            split_files.append(split_path)
-
-            logger.info("Created split file: %s with %d rows", split_path, file_size)
-
-        logger.info("Successfully split file into %d parts.", len(split_files))
-        return split_files
-
-    except FileNotFoundError:
-        logger.error("Input file not found for splitting: %s", file_path)
-        return [file_path] # Return original path
-    except (pd.errors.ParserError, ValueError) as e:
-        logger.error("Error parsing Excel file during split: %s", e)
-        return [file_path] # Return original path
-    except (OSError, IOError) as e:
-        logger.error("File system error during splitting (read/write): %s", e)
-        return [file_path] # Return original path
-    except (KeyError, IndexError) as e:
-        logger.error("Data access error (e.g., column '구분' missing or empty df): %s", e)
-        return [file_path] # Return original path
-    except Exception as e:
-        logger.error("Unexpected error splitting file: %s", e)
-        return [file_path]  # Return original file path if any error occurs
+    except (FileNotFoundError, pd.errors.EmptyDataError, ValueError, OSError, IOError, AttributeError, KeyError) as e:
+        logger.error(f"Error splitting file '{file_path}': {e}")
+        return [file_path] # Return original path in list on error
+    except Exception as e: # pylint: disable=broad-exception-caught
+        logger.error(f"Unexpected error splitting file '{file_path}': {e}", exc_info=True)
+        return [file_path]
 
 
 def merge_result_files(file_paths: List[str], original_input: str) -> Optional[str]:
-    """
-    Merge multiple result files into a single file according to the manual requirements.
+    """분할 처리된 결과 파일들을 다시 하나의 파일로 병합합니다.
+
+    병합된 파일은 원본 입력 파일명에 `_merged_{timestamp}` 접미사가 붙어 저장됩니다.
+    병합 과정에서 각 파일의 헤더는 첫 번째 파일을 제외하고 무시됩니다.
 
     Args:
-        file_paths: List of paths to the result files
-        original_input: Path to the original input file
+        file_paths: 병합할 결과 파일들의 경로 리스트.
+        original_input: 분할 전 원본 입력 파일 경로 (출력 파일명 생성에 사용).
 
     Returns:
-        Path to the merged file or None if error
+        Optional[str]: 병합된 최종 파일 경로. 오류 발생 시 None 반환.
+
+    Raises:
+        ValueError: 입력 파일 리스트가 비어있을 경우.
     """
     if not file_paths:
-        logger.warning("No result files provided for merging.")
-        return None
+        raise ValueError("File paths list cannot be empty for merging.")
 
-    logger.info("Attempting to merge %d result files", len(file_paths))
+    logger.info("Merging %d result files...", len(file_paths))
 
-    merged_filename = None
+    merged_df = pd.DataFrame()
+    all_dfs = []
+
     try:
-        # Verify files exist
-        for file_path in file_paths:
-            if not os.path.exists(file_path):
-                logger.error("Result file not found for merging: %s", file_path)
-                return None
+        # Read all result files
+        for _, fpath in enumerate(file_paths):
+            if not os.path.exists(fpath):
+                logger.warning("Result file not found, skipping: %s", fpath)
+                continue
+            try:
+                df_part = pd.read_excel(fpath)
+                # Assume first file's header is the correct one
+                # For subsequent files, skip header row if reading directly
+                # However, reading all and concatenating is often simpler
+                all_dfs.append(df_part)
+                logger.debug("Read result file: %s (%d rows)", fpath, len(df_part))
+            except (FileNotFoundError, pd.errors.EmptyDataError, ValueError, OSError, IOError) as read_err:
+                logger.error("Error reading result file '%s': %s. Skipping.", fpath, read_err)
+                continue
 
-        # Read all files into DataFrames
-        dfs = []
-        for file_path in file_paths:
-            df = pd.read_excel(file_path)
-            dfs.append(df)
-
-        # Concatenate DataFrames
-        if not dfs:
-            logger.error("No dataframes could be read from result files.")
+        if not all_dfs:
+            logger.error("No valid result files could be read. Merging aborted.")
             return None
 
-        merged_df = pd.concat(dfs, ignore_index=True)
+        # Concatenate DataFrames
+        merged_df = pd.concat(all_dfs, ignore_index=True)
+        logger.info("Concatenated %d DataFrames. Total rows: %d", len(all_dfs), len(merged_df))
 
-        # Generate output filename
-        base_dir = os.path.dirname(original_input)
-        base_name, ext = os.path.splitext(os.path.basename(original_input))
-        # Add timestamp to avoid overwriting potentially existing merged file
+        # Create output filename based on the original input file
+        directory = os.path.dirname(original_input)
+        base_name = os.path.splitext(os.path.basename(original_input))[0]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        merged_filename = os.path.join(base_dir, f"{base_name}-merged-result_{timestamp}{ext}")
+        merged_filename = f"{base_name}_merged_{timestamp}.xlsx"
+        merged_filepath = os.path.join(directory, merged_filename)
 
-        # Save merged file
-        merged_df.to_excel(merged_filename, index=False)
+        # Save the merged DataFrame
+        merged_df.to_excel(merged_filepath, index=False)
+        logger.info("Merged result file saved to: %s", merged_filepath)
 
-        logger.info(
-            "Created merged file (pre-formatting): %s with %d rows", merged_filename, len(merged_df)
-        )
+        return merged_filepath
 
-        # Apply formatting (in a separate try-except block)
-        try:
-            wb = load_workbook(merged_filename)
-            ws = wb.active
-
-            # Format header
-            header_font = ws.cell(row=1, column=1).font # Get default font
-            header_font = header_font.copy(bold=True) # Create bold copy
-            for col in range(1, ws.max_column + 1):
-                ws.cell(row=1, column=col).font = header_font
-
-            # Apply yellow highlighting for price differences
-            yellow_fill = PatternFill(
-                start_color="FFFF00", end_color="FFFF00", fill_type="solid"
-            )
-            price_diff_cols = ["가격차이(2)", "가격차이(3)"]
-            col_indices = {ws.cell(row=1, column=j+1).value: j for j in range(ws.max_column)}
-
-            for row_idx in range(2, ws.max_row + 1):
-                highlight_row = False
-                for col_name in price_diff_cols:
-                    col_idx = col_indices.get(col_name)
-                    if col_idx is not None:
-                        cell = ws.cell(row=row_idx, column=col_idx + 1)
-                        if isinstance(cell.value, (int, float)) and cell.value < 0:
-                            highlight_row = True
-                            break
-                if highlight_row:
-                    for col_idx in range(ws.max_column):
-                        ws.cell(row=row_idx, column=col_idx + 1).fill = yellow_fill
-
-            wb.save(merged_filename)
-            logger.info("Applied formatting to merged file: %s", merged_filename)
-
-        except ImportError:
-            logger.error("openpyxl or PatternFill not found. Cannot apply formatting.")
-            # Return unformatted file path
-        except Exception as e:
-            logger.error("Error applying formatting to merged file: %s. Returning unformatted file.", e)
-            # Continue with unformatted file path
-
-        return merged_filename
-
-    except FileNotFoundError as e:
-        logger.error("Result file not found during merging read: %s", e)
+    except (MemoryError, ValueError, TypeError, KeyError, pd.errors.InvalidIndexError) as merge_err:
+        logger.error(f"Error merging DataFrames: {merge_err}")
         return None
-    except pd.errors.EmptyDataError:
-        logger.error("One of the result files is empty.")
+    except (OSError, IOError) as save_err:
+        logger.error(f"Error saving merged file: {save_err}")
         return None
-    except (pd.errors.ParserError, ValueError) as e:
-        logger.error("Error parsing an Excel file during merge: %s", e)
-        return None
-    except (OSError, IOError) as e:
-        logger.error("File system error during merging (read/write): %s", e)
-        # Clean up partially created merged file if it exists
-        if merged_filename and os.path.exists(merged_filename):
-            try:
-                os.remove(merged_filename)
-                logger.info("Removed partially created file: %s", merged_filename)
-            except OSError as rm_err:
-                logger.error("Failed to remove partially created file %s: %s", merged_filename, rm_err)
-        return None
-    except Exception as e:
-        logger.error("Unexpected error merging result files: %s", e)
-        # Clean up partially created merged file if it exists
-        if merged_filename and os.path.exists(merged_filename):
-            try:
-                os.remove(merged_filename)
-                logger.info("Removed partially created file: %s", merged_filename)
-            except OSError as rm_err:
-                logger.error("Failed to remove partially created file %s: %s", merged_filename, rm_err)
+    except Exception as e: # pylint: disable=broad-exception-caught
+        logger.error(f"Unexpected error merging files: {e}", exc_info=True)
         return None

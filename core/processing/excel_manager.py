@@ -481,7 +481,7 @@ class ExcelManager:
                     cell = ws.cell(row=row, column=col)
                     cell.border = self.thin_border
 
-                    # 오류 메시지에 빨간색 폰트 적용
+                    # 오류 메시지에 노란색 폰트 적용
                     if col in status_col_indices:
                         cell_value = cell.value
                         if (
@@ -1601,7 +1601,7 @@ class ExcelManager:
 
                 # 셀 주소에서 행과 열 추출
                 col_letter = re.match("[A-Z]+", target_cell).group()
-                row_number = int(re.search("\d+", target_cell).group())
+                row_number = int(re.search("\\d+", target_cell).group())
 
                 # 셀의 크기를 조정된 이미지의 크기에 맞춤
                 worksheet.Cells(row_number, col_letter).ColumnWidth = (
