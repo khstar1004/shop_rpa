@@ -12,6 +12,15 @@ import random
 import urllib.parse
 import configparser
 import os
+import pandas as pd
+from bs4 import BeautifulSoup
+
+# Try importing playwright (optional dependency)
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
 
 from ..data_models import Product
 from utils.caching import FileCache, cache_result
@@ -348,6 +357,222 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
         self.logger.error("This method is not fully implemented")
         return None, None
 
+class NaverPriceTableCrawler:
+    """
+    네이버 쇼핑 및 연결된 쇼핑몰에서 가격표 추출
+    
+    특징:
+    - Playwright 사용
+    - 다양한 사이트의 가격표 추출 지원
+    - 부가세 자동 계산
+    - 수량별 가격 추출
+    - 품절 여부 감지
+    """
+    
+    def __init__(self, output_dir: str = "output", headless: bool = True):
+        """
+        가격표 크롤러 초기화
+        
+        Args:
+            output_dir: 추출한 가격표를 저장할 디렉토리
+            headless: 헤드리스 모드 여부 (브라우저 표시하지 않음)
+        """
+        self.output_dir = output_dir
+        self.headless = headless
+        self.logger = logging.getLogger(__name__)
+        self.dialog_message = ""  # 대화 상자 메시지 저장
+        
+        # 스크래핑 실패 시 기본 반환값
+        self.default_result = None, False, "Not available"
+        
+        if not PLAYWRIGHT_AVAILABLE:
+            self.logger.warning("Playwright is not installed. Price table extraction will not work.")
+            
+        # 디렉토리 생성
+        os.makedirs(output_dir, exist_ok=True)
+    
+    def _handle_dialog(self, dialog):
+        """대화 상자 처리 (품절 등 상태 메시지 확인용)"""
+        self.dialog_message = dialog.message
+        self.logger.debug(f"Dialog message: {dialog.message}")
+        dialog.accept()
+    
+    def _remove_special_chars(self, value):
+        """문자와 특수 문자를 제거 (숫자만 추출)"""
+        try:
+            return ''.join(filter(str.isdigit, str(value)))
+        except (TypeError, ValueError):
+            return value
+    
+    def _clean_quantity(self, qty):
+        """수량 미만 처리 함수"""
+        if isinstance(qty, str) and '미만' in qty:
+            return '0'
+        else:
+            try:
+                return ''.join(filter(str.isdigit, str(qty)))
+            except (TypeError, ValueError):
+                return qty
+    
+    def get_price_table(self, url: str) -> Tuple[Optional[pd.DataFrame], bool, str]:
+        """URL에서 가격표 가져오기"""
+        if not PLAYWRIGHT_AVAILABLE:
+            self.logger.error("Playwright is not installed. Cannot crawl price table.")
+            return None, False, "Playwright 설치 필요"
+            
+        self.dialog_message = ""  # 대화 상자 메시지 초기화
+        
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=self.headless)
+                context = browser.new_context()
+                page = context.new_page()
+                page.on("dialog", self._handle_dialog)
+
+                # 페이지 로드
+                page.goto(url, wait_until='networkidle')
+                
+                # 네이버 쇼핑 링크인 경우, 최저가 사러가기 링크 추출
+                if "naver.com" in url and "shopping" in url:
+                    try:
+                        lowest_price_link = page.locator('//div[contains(@class, "lowestPrice_btn_box")]/div[contains(@class, "buyButton_compare_wrap")]/a[text()="최저가 사러가기"]').get_attribute('href')
+                        if lowest_price_link:
+                            self.logger.info("최저가 사러가기 링크 발견. 해당 페이지로 이동합니다.")
+                            page.goto(lowest_price_link, wait_until='networkidle')
+                    except Exception as e:
+                        self.logger.warning(f"Failed to find or navigate to lowest price link: {e}")
+                
+                # 품절 확인
+                is_sold_out = False
+                if self.dialog_message and ('상품' in self.dialog_message or '재고' in self.dialog_message or '품절' in self.dialog_message):
+                    is_sold_out = True
+                    self.logger.info(f"상품 품절 확인: {self.dialog_message}")
+                    browser.close()
+                    return None, is_sold_out, self.dialog_message
+                
+                # 각 XPath와 연결된 함수 실행
+                xpath_to_function = {
+                    '//div[@class = "price-box"]': self._handle_login_one, # 부가세 별도
+                    '//div[@class = "tbl02"]': self._handle_login_one, # 부가세 별도
+                    '//table[@class = "hompy1004_table_class hompy1004_table_list"]/ancestor::td[1]': self._handle_login_two, # 부가세 별도
+                    '//table[@class = "goods_option"]//td[@colspan = "4"]': self._handle_login_three, # 부가세 별도
+                    '//div[@class = "vi_info"]//div[@class = "tbl_frm01"]': self._handle_login_one, # 부가세 별도
+                    '//div[@class = "specArea"]//div[@class = "w100"]': self._handle_login_one
+                }
+                
+                result_df = None
+                
+                # 각 XPath와 연결된 함수 실행
+                for xpath, function in xpath_to_function.items():
+                    element = page.query_selector(xpath)
+                    if element:
+                        html_content = element.inner_html()
+                        soup = BeautifulSoup(html_content, 'html.parser')
+                        result_df = function(soup)  # soup을 함수로 전달
+                        
+                        if result_df is not None:
+                            self.logger.info(f"가격표 추출 성공: {len(result_df)} 행")
+                            # CSV 파일로 저장
+                            output_file = f"{self.output_dir}/unit_price_list.csv"
+                            result_df.to_csv(output_file, index=False)
+                            self.logger.info(f"가격표 저장 완료: {output_file}")
+                            break
+                
+                browser.close()
+                
+                return result_df, is_sold_out, self.dialog_message
+                
+        except Exception as e:
+            self.logger.error(f"Error in price table crawling: {e}", exc_info=True)
+            return None, False, str(e)
+    
+    def _handle_login_one(self, soup):
+        """첫 번째 유형의 가격표 처리"""
+        try:
+            # 테이블 찾기 시도
+            tables = soup.find_all('table')
+            if tables:
+                df = pd.read_html(str(tables[0]))[0]  # 첫 번째 테이블을 DataFrame으로 변환
+                df = df.T
+                df.reset_index(drop=False, inplace=True)
+                df.columns = df.iloc[0]
+                df.drop(index=0, inplace=True)
+                df.columns = ['수량', '일반']
+                df = df.map(self._remove_special_chars)
+                df['일반'] = df['일반'].apply(lambda x: float(x) * 1.1)  # 부가세 추가
+                df['수량'] = df['수량'].astype('int64')
+                df.sort_values(by='수량', inplace=True, ignore_index=True)
+                return df
+            else:
+                return None
+        except Exception as e:
+            self.logger.error(f"Error in _handle_login_one: {e}")
+            return None
+    
+    def _handle_login_two(self, soup):
+        """두 번째 유형의 가격표 처리"""
+        try:
+            tables = soup.find_all('table')
+            if tables:
+                df = pd.read_html(str(tables[0]))[0]  # 첫 번째 테이블을 DataFrame으로 변환
+                df = df.T
+                df.reset_index(drop=False, inplace=True)
+                df.columns = df.iloc[0]
+                df.drop(index=0, inplace=True)
+                df['수량'] = df['수량'].apply(self._clean_quantity)
+                df = df.map(self._remove_special_chars)
+                try:
+                    df.drop('회원', axis=1, inplace=True)
+                except Exception:
+                    pass
+                df.sort_values(by='수량', inplace=True, ignore_index=True)
+                return df
+            else:
+                return None
+        except Exception as e:
+            self.logger.error(f"Error in _handle_login_two: {e}")
+            return None
+    
+    def _handle_login_three(self, soup):
+        """세 번째 유형의 가격표 처리"""
+        try:
+            tables = soup.find_all('table')
+            if tables:
+                # 입력 태그에서 수량과 가격 추출
+                quantities = []
+                prices = []
+                
+                for input_tag in soup.find_all('input', class_='qu'):
+                    try:
+                        quantities.append(int(input_tag['value']))
+                    except (ValueError, KeyError):
+                        pass
+                        
+                for input_tag in soup.find_all('input', class_='pr'):
+                    try:
+                        prices.append(int(input_tag['value'].replace(',', '')))
+                    except (ValueError, KeyError):
+                        pass
+                
+                if quantities and prices and len(quantities) == len(prices):
+                    # 데이터프레임 생성
+                    df = pd.DataFrame({
+                        '수량': quantities,
+                        '일반': prices
+                    })
+                    df['일반'] = df['일반'].apply(lambda x: float(x) * 1.1)  # 부가세 추가
+                    df.sort_values(by='수량', inplace=True, ignore_index=True)
+                    return df
+            return None
+        except Exception as e:
+            self.logger.error(f"Error in _handle_login_three: {e}")
+            return None
+    
+    def check_stock_status(self, url: str) -> Tuple[bool, str]:
+        """상품 URL에서 재고 상태 확인"""
+        _, is_sold_out, message = self.get_price_table(url)
+        return not is_sold_out, message
+
 class NaverShoppingCrawler(BaseMultiLayerScraper):
     """
     네이버 쇼핑 크롤러 - 공식 API와 연결하는 브릿지 클래스
@@ -372,6 +597,12 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
             max_retries=max_retries,
             cache=cache,
             timeout=timeout
+        )
+        
+        # 단가표 크롤러 생성
+        self.price_table_crawler = NaverPriceTableCrawler(
+            output_dir="C:\\RPA\\Image\\Target",
+            headless=False  # 개발/디버깅 시 False, 배포 시 True로 변경
         )
         
         # Set up logging
@@ -476,3 +707,11 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         # 이 함수는 추후 구현이 필요함
         self.logger.error("process_file 메서드는 아직 구현되지 않았습니다.")
         return None, None
+
+    def get_price_table(self, url: str) -> Tuple[Optional[pd.DataFrame], bool, str]:
+        """상품 URL에서 단가표 가져오기"""
+        return self.price_table_crawler.get_price_table(url)
+    
+    def check_stock_status(self, url: str) -> Tuple[bool, str]:
+        """상품 URL에서 재고 상태 확인"""
+        return self.price_table_crawler.check_stock_status(url)

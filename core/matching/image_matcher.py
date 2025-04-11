@@ -38,6 +38,20 @@ class ImageMatcher:
         self.backup_model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
         self.backup_model.eval()
         
+        # SIFT 및 AKAZE 특징 추출기 초기화
+        self.sift = cv2.SIFT_create()
+        self.akaze = cv2.AKAZE_create()
+        
+        # FLANN 매처 설정
+        FLANN_INDEX_KDTREE = 1
+        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        search_params = dict(checks=50)
+        self.flann = cv2.FlannBasedMatcher(index_params, search_params)
+        
+        # BFMatcher 초기화
+        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        self.bf_knn = cv2.BFMatcher()
+        
         # GPU 사용 (가능한 경우)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = self.model.to(self.device)
@@ -118,36 +132,169 @@ class ImageMatcher:
             if self._check_exact_match(img1, img2):
                 return 1.0
             
-            # 1. 퍼셉추얼 해시 유사도 (20%)
+            # 1. 퍼셉추얼 해시 유사도 (15%)
             hash_sim = self._get_hash_similarity(img1, img2)
             
             # 높은 해시 유사도면 빠른 리턴 - 성능 최적화
             if hash_sim > 0.95:
                 return 0.95 + (hash_sim - 0.95) * 0.05  # 0.95 ~ 1.0 사이 값 매핑
             
-            # 2. 딥 특징 유사도 (40%)
+            # 2. 딥 특징 유사도 (25%)
             feature_sim = self._get_feature_similarity(img1, img2)
             
-            # 3. 색상 히스토그램 유사도 (20%)
+            # 3. 색상 히스토그램 유사도 (10%)
             color_sim = self._get_color_similarity(img1, img2)
             
-            # 4. 백업 모델 유사도 (ResNet) (20%)
+            # 4. SIFT + RANSAC 유사도 (30%)
+            # RANSAC을 사용한 SIFT 매칭
+            sift_ransac_sim = self._get_sift_ransac_similarity(img1, img2)
+            
+            # 5. AKAZE 유사도 (10%)
+            akaze_sim = self._get_akaze_similarity(img1, img2)
+            
+            # 6. 백업 모델 유사도 (ResNet) (10%)
             # 성능 최적화: 앞의 유사도가 낮으면 생략
-            if (hash_sim + feature_sim + color_sim) / 3 < 0.3:
+            if (hash_sim + feature_sim + color_sim + sift_ransac_sim + akaze_sim) / 5 < 0.3:
                 resnet_sim = 0.0  # 앞의 유사도가 너무 낮으면 무거운 ResNet 계산 생략
             else:
                 resnet_sim = self._get_resnet_similarity(img1, img2)
             
             # 결합 유사도 계산 (가중치 조정)
-            combined_sim = (0.2 * hash_sim + 
-                           0.4 * feature_sim + 
-                           0.2 * color_sim + 
-                           0.2 * resnet_sim)
+            combined_sim = (0.15 * hash_sim + 
+                           0.25 * feature_sim + 
+                           0.10 * color_sim + 
+                           0.30 * sift_ransac_sim +
+                           0.10 * akaze_sim +
+                           0.10 * resnet_sim)
             
             return float(combined_sim)
             
         except Exception as e:
             self.logger.error(f"Error calculating image similarity between {url1} and {url2}: {str(e)}", exc_info=True)
+            return 0.0
+
+    def _get_sift_ransac_similarity(self, img1: Image.Image, img2: Image.Image) -> float:
+        """SIFT 특징과 RANSAC을 사용한 유사도 계산"""
+        try:
+            # PIL 이미지를 OpenCV 형식으로 변환
+            img1_cv = np.array(img1.convert('RGB'))
+            img1_cv = cv2.cvtColor(img1_cv, cv2.COLOR_RGB2GRAY)
+            
+            img2_cv = np.array(img2.convert('RGB'))
+            img2_cv = cv2.cvtColor(img2_cv, cv2.COLOR_RGB2GRAY)
+            
+            # DoG(Difference of Gaussian) 계산
+            ksize1, ksize2 = 3, 11
+            img1_dog = self._calculate_dog(img1_cv, ksize1, ksize2)
+            img2_dog = self._calculate_dog(img2_cv, ksize1, ksize2)
+            
+            # SIFT 키포인트 및 디스크립터 추출
+            kp1, des1 = self.sift.detectAndCompute(img1_dog, None)
+            kp2, des2 = self.sift.detectAndCompute(img2_dog, None)
+            
+            # 키포인트나 디스크립터가 없으면 0 반환
+            if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
+                return 0.0
+                
+            # KNN 매칭
+            matches = self.bf_knn.knnMatch(des1, des2, k=2)
+            
+            # Lowe's ratio 테스트를 통한 좋은 매치 선별
+            good_matches = []
+            for m, n in matches:
+                if m.distance < 0.75 * n.distance:
+                    good_matches.append(m)
+                    
+            # 충분한 매치가 있는지 확인
+            if len(good_matches) < 5:
+                return 0.0
+                
+            # RANSAC을 사용한 호모그래피 계산을 위한 포인트 추출
+            src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+            dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+            
+            # RANSAC으로 호모그래피 계산
+            M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+            matches_mask = mask.ravel().tolist()
+            
+            # 인라이어 매치 (RANSAC 테스트를 통과한 매치)
+            inlier_matches = [m for i, m in enumerate(good_matches) if matches_mask[i] == 1]
+            
+            # 매칭 점수 계산
+            # 인라이어 매치가 없으면 0, 아니면 인라이어 매치 비율
+            if len(inlier_matches) == 0 or len(good_matches) == 0:
+                return 0.0
+                
+            matching_score = len(inlier_matches) / len(good_matches)
+            
+            # 점수 정규화 (0.3 이상이면 의미있는 매치로 간주)
+            if matching_score >= 0.3:
+                # 0.3~1.0 범위를 0.5~1.0 범위로 확장
+                normalized_score = 0.5 + (matching_score - 0.3) * 0.5 / 0.7
+                return min(1.0, max(0.0, normalized_score))
+            else:
+                # 낮은 점수는 그대로 유지하되 가중치 낮춤
+                return matching_score * 0.5
+                
+        except Exception as e:
+            self.logger.error(f"Error calculating SIFT+RANSAC similarity: {e}", exc_info=True)
+            return 0.0
+            
+    def _calculate_dog(self, image, ksize1, ksize2):
+        """DoG (Difference of Gaussian) 계산"""
+        blurred1 = cv2.GaussianBlur(image, (ksize1, ksize1), 0)
+        blurred2 = cv2.GaussianBlur(image, (ksize2, ksize2), 0)
+        dog = blurred1 - blurred2
+        return dog
+        
+    def _get_akaze_similarity(self, img1: Image.Image, img2: Image.Image) -> float:
+        """AKAZE 특징을 사용한 유사도 계산"""
+        try:
+            # PIL 이미지를 OpenCV 형식으로 변환
+            img1_cv = np.array(img1.convert('RGB'))
+            img1_cv = cv2.cvtColor(img1_cv, cv2.COLOR_RGB2GRAY)
+            
+            img2_cv = np.array(img2.convert('RGB'))
+            img2_cv = cv2.cvtColor(img2_cv, cv2.COLOR_RGB2GRAY)
+            
+            # AKAZE 키포인트 및 디스크립터 추출
+            kp1, des1 = self.akaze.detectAndCompute(img1_cv, None)
+            kp2, des2 = self.akaze.detectAndCompute(img2_cv, None)
+            
+            # 키포인트나 디스크립터가 없으면 0 반환
+            if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
+                return 0.0
+                
+            # 브루트포스 매칭
+            matches = self.bf.match(des1, des2)
+            
+            # 거리순으로 정렬
+            matches = sorted(matches, key=lambda x: x.distance)
+            
+            # 매치가 없으면 0 반환
+            if len(matches) == 0:
+                return 0.0
+                
+            # 매칭 점수 계산
+            # 최소 5개 이상의 매치가 있거나 첫 번째 매치의 거리가 충분히 작으면 의미있는 매치로 간주
+            match_param = 50
+            
+            if len(matches) > 4 or (len(matches) > 0 and matches[0].distance < match_param):
+                # 거리가 작을수록 유사도가 높음
+                min_distance = min(match_param, matches[0].distance if len(matches) > 0 else match_param)
+                similarity = 1.0 - (min_distance / match_param)
+                
+                # 유사도 점수 스케일링
+                if len(matches) > 4:
+                    # 더 많은 매치가 있으면 보너스 점수
+                    similarity = min(1.0, similarity * 1.2)
+                    
+                return similarity
+            else:
+                return 0.0
+                
+        except Exception as e:
+            self.logger.error(f"Error calculating AKAZE similarity: {e}", exc_info=True)
             return 0.0
 
     def _check_exact_match(self, img1: Image.Image, img2: Image.Image) -> bool:

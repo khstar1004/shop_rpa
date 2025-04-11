@@ -17,6 +17,15 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime
+import os
+import pandas as pd
+
+# 추가: Playwright 임포트 시도 (선택적 의존성)
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
 
 from ..data_models import Product
 # Add imports for caching
@@ -25,14 +34,16 @@ from . import BaseMultiLayerScraper, DOMExtractionStrategy, TextExtractionStrate
 
 class KoryoScraper(BaseMultiLayerScraper):
     """
-    고려기프트 스크래퍼 - Selenium 활용 다중 레이어 추출 엔진
+    고려기프트 스크래퍼 - Selenium 및 Playwright 활용 다중 레이어 추출 엔진
     
     특징:
     - Selenium 기반 웹 브라우저 자동화
+    - Playwright 지원 (설치된 경우)
     - DOM, 텍스트, 좌표 기반 추출 전략
     - 비동기 작업 처리
     - 메모리 효율적 데이터 구조
     - 선택적 요소 관찰
+    - 가격표 및 수량별 가격 추출
     """
     
     def __init__(self, 
@@ -40,7 +51,8 @@ class KoryoScraper(BaseMultiLayerScraper):
                  timeout: int = 10, 
                  max_retries: int = 3,
                  cache: Optional[Any] = None,
-                 debug: bool = False):
+                 debug: bool = False,
+                 output_dir: str = "output"):
         """
         Koryo Scraper 초기화
         
@@ -50,13 +62,18 @@ class KoryoScraper(BaseMultiLayerScraper):
             max_retries (int): 최대 재시도 횟수
             cache (FileCache): 캐시 객체
             debug (bool): 디버그 모드 활성화 여부
+            output_dir (str): 출력 파일 저장 디렉토리
         """
         super().__init__(max_retries=max_retries, cache=cache, timeout=timeout)
         self.debug = debug  # 디버그 모드 설정
         self.headless = headless
+        self.output_dir = output_dir
         
-        # 사이트 관련 상수 정의
-        self.base_url = "https://adpanchok.co.kr"
+        # 출력 디렉토리 생성
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 사이트 관련 상수 정의 (2023년 URL 업데이트)
+        self.base_url = "https://koreagift.com"
         self.mall_url = f"{self.base_url}/ez/mall.php"
         self.search_url = f"{self.base_url}/ez/goods/goods_search.php"
         
@@ -82,6 +99,11 @@ class KoryoScraper(BaseMultiLayerScraper):
         # Selenium 설정
         self.driver = None
         self.setup_selenium()
+        
+        # Playwright 사용 가능 여부 체크
+        self.playwright_available = PLAYWRIGHT_AVAILABLE
+        if not self.playwright_available:
+            self.logger.warning("Playwright is not installed. Some features will be limited.")
         
         # 추출 셀렉터 정의 - 구조화된 다중 레이어 접근 방식
         self.selectors = {
@@ -142,15 +164,34 @@ class KoryoScraper(BaseMultiLayerScraper):
             'category_items': {
                 'selector': '#lnb_menu > li > a',
                 'options': {'multiple': True}
+            },
+            # 가격표 관련 셀렉터 추가
+            'price_table': {
+                'selector': 'table.price_table, table.quantity_table, table.option_table',
+                'options': {'multiple': False}
+            },
+            'quantity_input': {
+                'selector': 'input.qu, input[name*="quantity"], input[name*="qty"]',
+                'options': {'multiple': True, 'attribute': 'value'}
+            },
+            'price_input': {
+                'selector': 'input.pr, input[name*="price"]',
+                'options': {'multiple': True, 'attribute': 'value'}
             }
         }
         
-        # 텍스트 추출용 정규식 패턴
+        # 텍스트 추출용 정규식 패턴 (추가 패턴 포함)
         self.patterns = {
             'price_number': re.compile(r'[\d,]+'),
             'product_code': re.compile(r'상품코드\s*:\s*([A-Za-z0-9-]+)'),
-            'quantity': re.compile(r'(\d+)(개|세트|묶음)')
+            'quantity': re.compile(r'(\d+)(개|세트|묶음)'),
+            'quantity_price': re.compile(r'(\d+)개[:\s]+([0-9,]+)원'),  # 수량:가격 패턴
+            'vat_included': re.compile(r'VAT\s*(포함|별도|제외)', re.IGNORECASE),
+            'quantity_price': re.compile(r'(\d+)개[:\s]+([0-9,]+)원')
         }
+        
+        # 대화 상자 메시지 저장용
+        self.dialog_message = ""
     
     def _simplify_product_name(self, name: str) -> str:
         """상품명에서 일반적인 규격, 주석, 괄호 등을 제거하여 간소화"""
@@ -210,52 +251,432 @@ class KoryoScraper(BaseMultiLayerScraper):
             except Exception as e:
                 self.logger.error(f"Error closing WebDriver: {str(e)}")
     
-    # 캐싱 적용 검색 메서드
-    def search_product(self, query: str, max_items: int = 50) -> List[Product]:
-        """
-        캐싱 및 다단계 검색 전략을 적용한 제품 검색
-        1. 정확한 상품명 검색
-        2. 간소화된 상품명 검색
-        """
-        if not query:
+    def search_product_with_playwright(self, query: str, keyword2: str = "", max_items: int = 50) -> List[Product]:
+        """Playwright를 사용한 제품 검색 구현 (crowling_kogift.py 기반 개선)"""
+        if not self.playwright_available:
+            self.logger.error("Playwright is not installed. Cannot use this feature.")
             return []
-
-        cache_key = f"koryo_search|{query}|{max_items}"
         
-        if self.cache:
-            cached_result = self.cache.get(cache_key)
-            if cached_result is not None:
-                self.logger.info(f"Cache hit for query: '{query}'")
-                # 캐시된 결과가 Product 객체 리스트인지 확인 (필요 시 역직렬화)
-                if isinstance(cached_result, list) and all(isinstance(p, Product) for p in cached_result):
-                     return cached_result
-                else:
-                     self.logger.warning("Cached data is not a list of Product objects. Ignoring cache.")
-
-
-        self.logger.info(f"Attempting search with exact query: '{query}'")
-        products = self._search_product_logic(query, max_items)
+        products = []
         
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=self.headless)
+                page = browser.new_page()
+                
+                # 초기 페이지 로드
+                page.goto(f"{self.base_url}/ez/index.php")
+                
+                # 첫 번째 키워드로 검색
+                page.locator('//input[@name="keyword" and @id="main_keyword"]').fill(query)
+                page.locator('//img[@id="search_submit"]').click()
+                page.wait_for_load_state('networkidle')
+                
+                # 첫 검색 상품 개수 확인
+                product_count_text = page.locator('//div[text()=" 개의 상품이 있습니다."]/span').text_content()
+                product_count = int(product_count_text.replace(',', ''))
+                self.logger.info(f"첫 검색 결과: {product_count}개 상품 발견 (쿼리: {query})")
+                
+                # 두 번째 키워드가 있고 검색 결과가 많으면 결과 내 재검색
+                if keyword2 and product_count >= 100:
+                    page.locator('//input[@id="re_keyword"]').fill(keyword2)
+                    page.locator('//button[@onclick="re_search()"]').click()
+                    page.wait_for_load_state('networkidle')
+                    
+                    # 재검색 결과 개수 확인
+                    product_count_text = page.locator('//div[text()=" 개의 상품이 있습니다."]/span').text_content()
+                    product_count = int(product_count_text.replace(',', ''))
+                    self.logger.info(f"결과 내 재검색: {product_count}개 상품 발견 (쿼리: {query} + {keyword2})")
+                
+                # 검색 결과가 있으면 제품 정보 수집
+                if product_count > 0:
+                    page_number = 1
+                    
+                    while len(products) < max_items:
+                        self.logger.info(f"페이지 {page_number} 크롤링 중...")
+                        
+                        # 상품 요소 찾기
+                        product_elements = page.locator('//div[@class="product"]')
+                        count = product_elements.count()
+                        
+                        if count == 0:
+                            break
+                            
+                        # 각 상품 정보 추출
+                        for i in range(count):
+                            if len(products) >= max_items:
+                                break
+                                
+                            element = product_elements.nth(i)
+                            
+                            try:
+                                # 상품명
+                                name = element.locator('div.name > a').text_content()
+                                
+                                # 상품 링크
+                                href = element.locator('div.pic > a').get_attribute('href')
+                                url = f"{self.base_url}{href}"
+                                
+                                # 이미지 URL
+                                img_src = element.locator('div.pic > a > img').get_attribute('src')
+                                image_url = f"{self.base_url}/ez/{img_src.replace('./', '')}"
+                                
+                                # 가격
+                                price_text = element.locator('div.price').text_content()
+                                price_match = self.patterns['price_number'].search(price_text)
+                                price = int(price_match.group().replace(',', '')) if price_match else 0
+                                
+                                # 상품 ID 생성
+                                product_id = hashlib.md5(url.encode()).hexdigest()
+                                
+                                # Product 객체 생성
+                                product = Product(
+                                    id=product_id,
+                                    name=name,
+                                    source="koryo",
+                                    url=url,
+                                    image_url=image_url,
+                                    price=price,
+                                    query=query
+                                )
+                                
+                                # 상세 페이지에서 추가 정보 가져오기 (선택적)
+                                if len(products) < 10:  # 처음 10개 상품만 상세 정보 가져오기
+                                    product = self._get_product_details_playwright(page, product)
+                                
+                                products.append(product)
+                                
+                            except Exception as e:
+                                self.logger.warning(f"Error extracting product data: {str(e)}")
+                                continue
+                        
+                        # 다음 페이지로 이동
+                        next_page_selector = f'//div[@class="custom_paging"]/div[@onclick="getPageGo1({page_number + 1})"]'
+                        next_page = page.locator(next_page_selector)
+                        
+                        if next_page.count() == 0:
+                            break
+                            
+                        next_page.click()
+                        page.wait_for_load_state('networkidle')
+                        page_number += 1
+                
+                browser.close()
+        
+        except Exception as e:
+            self.logger.error(f"Error searching with Playwright: {str(e)}", exc_info=True)
+        
+        self.logger.info(f"Found {len(products)} products for '{query}'")
+        
+        # 매뉴얼 요구사항: 찾지 못하면 "동일상품 없음"으로 처리
         if not products:
-            self.logger.info(f"No results found for exact query. Trying simplified query.")
-            simplified_query = self._simplify_product_name(query)
-            
-            if simplified_query != query:
-                self.logger.info(f"Attempting search with simplified query: '{simplified_query}'")
-                products = self._search_product_logic(simplified_query, max_items)
-            else:
-                 self.logger.info("Simplified query is same as original or too short. Skipping.")
-
-        self.logger.info(f"Final search result for '{query}': Found {len(products)} products.")
+            # Create a dummy product to indicate "no match found"
+            no_match_product = Product(
+                id="no_match_koryo",
+                name=f"동일상품 없음 - {query}",
+                source="koryo",
+                price=0,
+                url="",
+                image_url=""
+            )
+            products.append(no_match_product)
         
-        # 결과를 캐시에 저장
-        if self.cache:
-            try:
-                self.cache.set(cache_key, products)  # 기본 캐시 기간 사용
-                self.logger.debug(f"Result for query '{query}' cached.")
-            except Exception as e:
-                self.logger.error(f"Failed to cache results for query '{query}': {str(e)}")
+        return products
+    
+    def _get_product_details_playwright(self, page, product: Product) -> Product:
+        """Playwright를 사용하여 상세 페이지에서 추가 정보 가져오기"""
+        try:
+            current_url = page.url()
+            
+            # 상세 페이지로 이동
+            page.goto(product.url)
+            page.wait_for_load_state('networkidle')
+            
+            # 수량별 가격표 추출
+            price_table_element = page.locator('table.price_table, table.quantity_table').first
+            if price_table_element and price_table_element.count() > 0:
+                # 테이블 HTML 가져오기
+                html_content = price_table_element.inner_html()
+                soup = BeautifulSoup(html_content, 'html.parser')
+                
+                try:
+                    # 테이블에서 DataFrame 생성
+                    df = pd.read_html(str(soup))[0]
+                    
+                    # 수량/가격 컬럼 찾기
+                    qty_col = None
+                    price_col = None
+                    
+                    for col in df.columns:
+                        col_str = str(col).lower()
+                        if any(kw in col_str for kw in ['수량', 'qty', '개수']):
+                            qty_col = col
+                        elif any(kw in col_str for kw in ['가격', 'price', '단가']):
+                            price_col = col
+                    
+                    # 컬럼을 찾았으면 가격표 처리
+                    if qty_col is not None and price_col is not None:
+                        quantity_prices = {}
+                        
+                        for _, row in df.iterrows():
+                            try:
+                                qty_text = str(row[qty_col])
+                                price_text = str(row[price_col])
+                                
+                                # 숫자만 추출
+                                qty = int(''.join(filter(str.isdigit, qty_text)))
+                                price = int(''.join(filter(str.isdigit, price_text)))
+                                
+                                # VAT 포함 여부 확인 및 조정
+                                vat_included = False
+                                for cell in row:
+                                    cell_str = str(cell).lower()
+                                    if 'vat' in cell_str and ('포함' in cell_str or 'included' in cell_str):
+                                        vat_included = True
+                                        break
+                                
+                                # VAT가 포함되어 있지 않으면 10% 추가
+                                if not vat_included:
+                                    price = int(price * 1.1)
+                                
+                                quantity_prices[qty] = price
+                                
+                            except (ValueError, TypeError):
+                                continue
+                        
+                        # 수량별 가격 정보 저장
+                        if quantity_prices:
+                            product.quantity_prices = quantity_prices
+                            
+                            # 가격표 CSV 저장
+                            try:
+                                df_export = pd.DataFrame({
+                                    '수량': list(quantity_prices.keys()),
+                                    '일반': list(quantity_prices.values())
+                                })
+                                df_export.sort_values(by='수량', inplace=True)
+                                
+                                # 상품 ID를 파일명에 사용
+                                output_file = f"{self.output_dir}/koryo_{product.id[:8]}_price_table.csv"
+                                df_export.to_csv(output_file, index=False)
+                                self.logger.info(f"Price table saved to {output_file}")
+                            except Exception as e:
+                                self.logger.error(f"Error saving price table: {e}")
+                
+                except Exception as e:
+                    self.logger.warning(f"Error parsing price table: {e}")
+            
+            # 제품 코드 추출
+            code_element = page.locator('div.prd_info span.code, div.goods_info div.code').first
+            if code_element and code_element.count() > 0:
+                code_text = code_element.text_content()
+                match = self.patterns['product_code'].search(code_text)
+                if match:
+                    product.product_code = match.group(1)
+            
+            # 제품 설명 추출
+            desc_element = page.locator('div.product_detail, div.detail_info').first
+            if desc_element and desc_element.count() > 0:
+                product.description = desc_element.text_content().strip()
+            
+            # 원래 페이지로 돌아가기
+            page.goto(current_url)
+            page.wait_for_load_state('networkidle')
+            
+        except Exception as e:
+            self.logger.error(f"Error getting product details: {e}")
+        
+        return product
+    
+    def _handle_dialog(self, dialog):
+        """대화 상자 처리 (품절 등 상태 메시지 확인용)"""
+        self.dialog_message = dialog.message
+        self.logger.debug(f"Dialog message: {dialog.message}")
+        dialog.accept()
+    
+    def get_price_table(self, url: str) -> Tuple[Optional[pd.DataFrame], bool, str]:
+        """URL에서 가격표 가져오기"""
+        if not self.playwright_available:
+            self.logger.error("Playwright is not installed. Cannot crawl price table.")
+            return None, False, "Playwright 설치 필요"
+            
+        self.dialog_message = ""  # 대화 상자 메시지 초기화
+        
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=self.headless)
+                context = browser.new_context()
+                page = context.new_page()
+                page.on("dialog", self._handle_dialog)
 
+                # 페이지 로드
+                page.goto(url, wait_until='networkidle')
+                
+                # 품절 확인
+                is_sold_out = False
+                sold_out_text = page.locator('div:has-text("품절"), div:has-text("재고")').first
+                if sold_out_text and sold_out_text.count() > 0:
+                    is_sold_out = True
+                    self.logger.info(f"상품 품절 확인: {sold_out_text.text_content()}")
+                    browser.close()
+                    return None, is_sold_out, sold_out_text.text_content()
+                
+                if self.dialog_message and ('상품' in self.dialog_message or '재고' in self.dialog_message or '품절' in self.dialog_message):
+                    is_sold_out = True
+                    self.logger.info(f"상품 품절 확인 (대화 상자): {self.dialog_message}")
+                    browser.close()
+                    return None, is_sold_out, self.dialog_message
+                
+                # 가격표 추출
+                price_table_element = page.locator('table.price_table, table.quantity_table').first
+                if price_table_element and price_table_element.count() > 0:
+                    # 테이블 HTML 가져오기
+                    html_content = price_table_element.inner_html()
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    try:
+                        # 테이블에서 DataFrame 생성
+                        table_df = pd.read_html(str(soup))[0]
+                        
+                        # 수량/가격 컬럼 찾기
+                        col_mapping = {}
+                        for col in table_df.columns:
+                            col_str = str(col).lower()
+                            if any(keyword in col_str for keyword in ['수량', 'qty', '개수']):
+                                col_mapping['수량'] = col
+                            elif any(keyword in col_str for keyword in ['가격', 'price', '단가']):
+                                col_mapping['일반'] = col
+                        
+                        # 컬럼 매핑이 제대로 됐는지 확인
+                        if len(col_mapping) == 2:
+                            df = pd.DataFrame({
+                                '수량': table_df[col_mapping['수량']],
+                                '일반': table_df[col_mapping['일반']]
+                            })
+                        else:
+                            # 첫 번째 컬럼이 수량, 두 번째가 가격이라고 가정
+                            df = pd.DataFrame({
+                                '수량': table_df.iloc[:, 0],
+                                '일반': table_df.iloc[:, 1]
+                            })
+                        
+                        # 데이터 정제
+                        df['수량'] = df['수량'].apply(lambda x: ''.join(filter(str.isdigit, str(x))))
+                        df['일반'] = df['일반'].apply(lambda x: ''.join(filter(str.isdigit, str(x))))
+                        
+                        # 숫자형으로 변환
+                        df['수량'] = pd.to_numeric(df['수량'], errors='coerce')
+                        df['일반'] = pd.to_numeric(df['일반'], errors='coerce')
+                        
+                        # 결측치 제거
+                        df = df.dropna()
+                        
+                        # VAT 여부 확인 후 조정
+                        html_text = page.content().lower()
+                        vat_included = 'vat 포함' in html_text or 'vat included' in html_text
+                        if not vat_included:
+                            df['일반'] = df['일반'] * 1.1
+                        
+                        # 정렬
+                        df = df.sort_values(by='수량')
+                        
+                        # CSV 파일로 저장
+                        output_file = f"{self.output_dir}/koryo_price_table.csv"
+                        df.to_csv(output_file, index=False)
+                        self.logger.info(f"가격표 저장 완료: {output_file}")
+                        
+                        browser.close()
+                        return df, False, ""
+                    
+                    except Exception as e:
+                        self.logger.error(f"가격표 추출 오류: {e}")
+                
+                # 수량/가격 정보가 텍스트로 있는지 확인
+                html_content = page.content()
+                soup = BeautifulSoup(html_content, 'html.parser')
+                text_content = soup.get_text()
+                
+                # 정규식으로 수량:가격 패턴 찾기 (예: "100개: 1,000원")
+                matches = self.patterns['quantity_price'].findall(text_content)
+                
+                if matches:
+                    quantities = [int(match[0]) for match in matches]
+                    prices = [int(match[1].replace(',', '')) for match in matches]
+                    
+                    # VAT 여부 확인 후 조정
+                    vat_included = 'vat 포함' in text_content.lower() or 'vat included' in text_content.lower()
+                    if not vat_included:
+                        prices = [int(price * 1.1) for price in prices]
+                    
+                    # 데이터프레임 생성
+                    df = pd.DataFrame({
+                        '수량': quantities,
+                        '일반': prices
+                    })
+                    df = df.sort_values(by='수량')
+                    
+                    # CSV 파일로 저장
+                    output_file = f"{self.output_dir}/koryo_price_table_text.csv"
+                    df.to_csv(output_file, index=False)
+                    self.logger.info(f"텍스트에서 추출한 가격표 저장 완료: {output_file}")
+                    
+                    browser.close()
+                    return df, False, ""
+                
+                browser.close()
+                return None, False, "가격표를 찾을 수 없습니다."
+                
+        except Exception as e:
+            self.logger.error(f"가격표 추출 중 오류 발생: {e}", exc_info=True)
+            return None, False, str(e)
+    
+    def check_stock_status(self, url: str) -> Tuple[bool, str]:
+        """상품 URL에서 재고 상태 확인"""
+        _, is_sold_out, message = self.get_price_table(url)
+        return not is_sold_out, message
+    
+    def search_product(self, query: str, max_items: int = 50, keyword2: str = "") -> List[Product]:
+        """
+        고려기프트에서 제품 검색 (Playwright 우선 사용, 실패 시 Selenium 사용)
+        
+        Args:
+            query: 검색어
+            max_items: 최대 검색 결과 수
+            keyword2: 결과 내 재검색 키워드 (선택적)
+        
+        Returns:
+            List[Product]: 검색된 제품 목록
+        """
+        cache_key = f"koryo_search|{query}|{keyword2}|{max_items}"
+        
+        if self.cache:
+            cached_result = self.get_sparse_data(cache_key)
+            if cached_result:
+                self.logger.info(f"Cache hit for query: '{query}'")
+                return cached_result
+        
+        # Playwright가 사용 가능하면 Playwright로 검색
+        if self.playwright_available:
+            try:
+                products = self.search_product_with_playwright(query, keyword2, max_items)
+                
+                # 캐싱
+                if products and self.cache:
+                    self.add_sparse_data(cache_key, products)
+                    
+                return products
+            except Exception as e:
+                self.logger.warning(f"Playwright search failed, falling back to Selenium: {e}")
+                # Playwright 실패시 Selenium으로 폴백
+        
+        # Selenium 검색 사용
+        simplified_query = self._simplify_product_name(query)
+        products = self._search_product_logic(simplified_query, max_items)
+        
+        # 캐싱
+        if products and self.cache:
+            self.add_sparse_data(cache_key, products)
+            
         return products
 
     # 핵심 검색 로직

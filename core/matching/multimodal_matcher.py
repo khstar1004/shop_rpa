@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
+import re
 
 from .text_matcher import TextMatcher
 from .image_matcher import ImageMatcher
@@ -19,6 +20,10 @@ class MultiModalMatcher:
     - 적응형 가중치 조정 시스템 추가
     - 카테고리 기반 필터링 추가
     - 유사도 점수 향상을 위한 보너스 시스템 구현
+    - SIFT+RANSAC 및 AKAZE 기반 고도화된 이미지 매칭
+    - KoSBERT 한국어 특화 텍스트 매칭
+    - 고급 제품명 토큰화 기능 추가
+    - 가격 필터링 로직 개선
     """
     
     def __init__(
@@ -68,15 +73,18 @@ class MultiModalMatcher:
             # 추가 별칭 필요시 정의
         }
         
+        # 필터링 대상 키워드 - filter_excel_file.py에서 추출
+        self.filter_keywords = ['판촉', '기프트', '답례품', '기념품', '인쇄', '각인', '제작', '호갱', '몽키', '홍보']
+        
         self.logger = logging.getLogger(__name__)
 
     def find_matches(
         self, 
         source_product: Product, 
         candidate_products: List[Product],
-        min_text_similarity: float = 0.35,  # 더 낮은 텍스트 임계값으로 매칭 기회 증가
+        min_text_similarity: float = 0.5,  # 최적화된 텍스트 매칭으로 임계값 조정
         min_image_similarity: float = 0.0,  # 이미지 없어도 매칭 가능하도록 설정
-        min_combined_similarity: float = 0.5,  # 결합 유사도 임계값도 낮춤
+        min_combined_similarity: float = 0.5,  # 결합 유사도 임계값
         max_matches: int = 10  # 더 많은 매칭 후보 반환
     ) -> List[MatchResult]:
         """Find best matches among candidates according to multimodal similarity."""
@@ -87,10 +95,23 @@ class MultiModalMatcher:
             
         self.logger.debug(f"Finding matches for {source_product.name} among {len(candidate_products)} candidates")
         
+        # 필터링 키워드 체크
+        filter_out_candidates = []
+        for candidate in candidate_products:
+            # 회사명이나 제품명에 필터링 키워드가 있는 경우
+            if hasattr(candidate, 'supplier_name') and self._contains_filter_keywords(candidate.supplier_name):
+                filter_out_candidates.append(candidate.id)
+                continue
+                
+            # '품절' 상태 체크
+            if hasattr(candidate, 'stock_status') and str(candidate.stock_status).strip() == "품절":
+                filter_out_candidates.append(candidate.id)
+                continue
+        
         matches = []
         for candidate in candidate_products:
-            # Skip if candidate is the same as source
-            if source_product.id == candidate.id:
+            # Skip if candidate is the same as source or in filter list
+            if source_product.id == candidate.id or candidate.id in filter_out_candidates:
                 continue
                 
             # 카테고리 호환성 체크
@@ -188,7 +209,7 @@ class MultiModalMatcher:
             if text_similarity >= 0.9:
                 self.logger.info(f"High text similarity match found: {candidate.name} (Text: {text_similarity:.2f})")
             
-            # Check price (if reference_price is provided)
+            # Enhanced price filtering (filter_excel_file.py 로직 기반)
             price_filter_passed = True
             price_difference = 0.0
             price_difference_percent = 0.0
@@ -198,13 +219,27 @@ class MultiModalMatcher:
                 price_difference = candidate.price - source_product.price
                 price_difference_percent = price_difference / source_product.price * 100
                 
-                # Apply 10% rule if enabled
-                if self.price_diff_threshold > 0:
-                    # Allow lower prices or prices with significant difference
-                    price_filter_passed = (
-                        price_difference_percent <= 0 or 
-                        abs(price_difference_percent) >= self.min_price_diff_percent
-                    )
+                # 향상된 가격 필터링 로직
+                # 1. 일반적인 10% 규칙 적용
+                std_price_check = (
+                    price_difference_percent <= 0 or 
+                    abs(price_difference_percent) >= self.min_price_diff_percent
+                )
+                
+                # 2. 네이버 상품 특별 처리 (filter_excel_file.py 로직)
+                is_naver_product = False
+                if hasattr(candidate, 'supplier_name'):
+                    # 네이버 상품 타입 체크 로직
+                    is_naver_product = 'naver' in candidate.supplier_name.lower() or hasattr(candidate, 'is_naver') and candidate.is_naver
+                
+                if is_naver_product:
+                    # 네이버 상품은 -10% 이상 차이나는 경우만 필터링 통과 
+                    # (filter_excel_file.py의 naver_difference_percentage_cell 로직)
+                    naver_price_check = price_difference_percent < -10.0
+                    price_filter_passed = naver_price_check and std_price_check
+                else:
+                    # 일반 상품은 표준 규칙 적용
+                    price_filter_passed = std_price_check
             
             if not price_filter_passed:
                 # 가격 차이가 작아서 필터링됨
@@ -239,7 +274,7 @@ class MultiModalMatcher:
         self, 
         source_product: Product, 
         candidate_products: List[Product],
-        min_text_similarity: float = 0.4,
+        min_text_similarity: float = 0.6, # 최적화된 텍스트 매칭으로 임계값 조정
         min_image_similarity: float = 0.3,
         min_combined_similarity: float = 0.6
     ) -> Optional[MatchResult]:
@@ -461,6 +496,25 @@ class MultiModalMatcher:
         # 별칭이 없으면 원래 카테고리 반환
         return category
         
+    def _contains_filter_keywords(self, text: str) -> bool:
+        """특정 키워드가 포함되어 있는지 확인"""
+        if not text:
+            return False
+            
+        text = text.lower()
+        for keyword in self.filter_keywords:
+            if keyword in text:
+                return True
+                
+        return False
+    
+    def _to_float(self, value: Any) -> Optional[float]:
+        """문자열이나 기타 값을 float로 변환 (filter_excel_file.py에서 차용)"""
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+            
     def batch_find_matches(
         self,
         query_products: List[Product],

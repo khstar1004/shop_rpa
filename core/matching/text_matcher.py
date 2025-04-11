@@ -1,17 +1,57 @@
 import re
+import logging
 from typing import List, Tuple, Optional, Dict
 import numpy as np
 from Levenshtein import ratio
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, util
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 from konlpy.tag import Okt
 from utils.caching import FileCache, cache_result
+import torch
+
+# Add transformers for tokenization support
+try:
+    from transformers import AutoTokenizer
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
 
 class TextMatcher:
-    def __init__(self, cache: Optional[FileCache] = None):
-        # 한국어에 더 특화된 모델 사용
-        self.model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+    def __init__(self, cache: Optional[FileCache] = None, use_ko_sbert: bool = True):
+        # 로거 초기화
+        self.logger = logging.getLogger(__name__)
+        
+        # 한국어 특화 모델 사용 여부 선택
+        self.use_ko_sbert = use_ko_sbert
+        
+        # 한국어에 특화된 Ko-SBERT 모델 (Ko-SRoBERTa-multitask)
+        if self.use_ko_sbert:
+            try:
+                self.model = SentenceTransformer('jhgan/ko-sroberta-multitask')
+                self.logger.info("Using Ko-SBERT model: jhgan/ko-sroberta-multitask")
+                
+                # Initialize tokenizer if transformers available
+                if TRANSFORMERS_AVAILABLE:
+                    try:
+                        self.tokenizer = AutoTokenizer.from_pretrained('jhgan/ko-sroberta-multitask')
+                        self.logger.info("Using ko-sroberta tokenizer for enhanced text processing")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to load tokenizer: {e}")
+                        self.tokenizer = None
+                else:
+                    self.tokenizer = None
+            except Exception as e:
+                # 모델 로드 실패시 다국어 모델로 폴백
+                self.model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+                self.use_ko_sbert = False
+                self.logger.warning(f"Failed to load Ko-SBERT, falling back to multilingual model: {e}")
+                self.tokenizer = None
+        else:
+            # 기존 다국어 모델 (영어, 한국어 둘 다 사용 가능)
+            self.model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+            self.tokenizer = None
+            
         self.cache = cache
         
         # TF-IDF 벡터라이저 추가
@@ -99,27 +139,65 @@ class TextMatcher:
         # 레벤슈타인 유사도 계산 (20%)
         leven_sim = ratio(norm1, norm2)
         
-        # TF-IDF 유사도 계산 (30%)
+        # TF-IDF 유사도 계산 (20%)
         tfidf_sim = self._calculate_tfidf_similarity(norm1, norm2)
         
-        # SBERT 임베딩 유사도 계산 (50%)
+        # 토큰화 기반 유사도 계산 (고급 토큰화 사용 시)
+        token_sim = 0.0
+        if self.tokenizer:
+            token_sim = self._calculate_token_similarity(text1, text2)
+            # 토큰 유사도가 있으면 TF-IDF 가중치 조정
+            tfidf_sim = 0.7 * tfidf_sim + 0.3 * token_sim
+        
+        # SBERT 임베딩 유사도 계산 (60%) - 한국어 특화 모델 적용으로 가중치 증가
         # Cache embeddings separately for potential reuse
         emb1 = self._get_embedding(norm1)
         emb2 = self._get_embedding(norm2)
         
-        bert_sim = float(cosine_similarity([emb1], [emb2])[0, 0])
+        # 코사인 유사도 계산 (PyTorch 텐서 활용)
+        if self.use_ko_sbert:
+            # Ko-SBERT 모델에 최적화된 유사도 계산 (PyTorch util 활용)
+            emb1_tensor = util.normalize_embeddings(torch.tensor([emb1]))
+            emb2_tensor = util.normalize_embeddings(torch.tensor([emb2]))
+            bert_sim = float(util.pytorch_cos_sim(emb1_tensor, emb2_tensor).item())
+        else:
+            # 일반 코사인 유사도 계산 (numpy 사용)
+            bert_sim = float(cosine_similarity([emb1], [emb2])[0, 0])
         
         # 규격 유사도 계산 (추가 가중치)
         spec_sim = self._calculate_spec_similarity(text1, text2)
         
         # 결합 유사도 계산 (가중치 조정)
-        combined_sim = 0.2 * leven_sim + 0.3 * tfidf_sim + 0.5 * bert_sim
+        combined_sim = 0.2 * leven_sim + 0.2 * tfidf_sim + 0.6 * bert_sim
         
         # 규격이 일치하면 유사도 보너스 부여
         if spec_sim > 0.8:
             combined_sim = min(1.0, combined_sim * 1.1)
         
         return combined_sim
+        
+    def _calculate_token_similarity(self, text1: str, text2: str) -> float:
+        """토큰화 기반 유사도 계산 (transformers tokenizer 활용)"""
+        try:
+            # 텍스트 토큰화
+            tokens1 = self.tokenizer.tokenize(text1)
+            tokens2 = self.tokenizer.tokenize(text2)
+            
+            # ## 제거
+            tokens1 = [token.replace("##", "") for token in tokens1]
+            tokens2 = [token.replace("##", "") for token in tokens2]
+            
+            # 공통 토큰 수 계산
+            common_tokens = set(tokens1).intersection(set(tokens2))
+            
+            # Jaccard 유사도 계산
+            if len(set(tokens1).union(set(tokens2))) > 0:
+                return len(common_tokens) / len(set(tokens1).union(set(tokens2)))
+            else:
+                return 0.0
+        except Exception as e:
+            self.logger.warning(f"Token similarity calculation failed: {e}")
+            return 0.0
     
     def _calculate_tfidf_similarity(self, text1: str, text2: str) -> float:
         """TF-IDF 벡터를 사용한 유사도 계산"""
@@ -161,18 +239,18 @@ class TextMatcher:
         return spec
     
     def _get_embedding(self, text: str) -> np.ndarray:
-        """Get text embedding, using cache if available."""
+        """텍스트 임베딩 계산 (캐시 활용)"""
         if self.cache:
-            cache_key = f"text_embedding|{text}"
+            cache_key = f"text_embedding|{text}|{'ko_sbert' if self.use_ko_sbert else 'multi'}"
             cached_embedding = self.cache.get(cache_key)
             if cached_embedding is not None:
                 return cached_embedding
             
-            embedding = self.model.encode([text])[0]
+            embedding = self.model.encode(text, convert_to_numpy=True)
             self.cache.set(cache_key, embedding)
             return embedding
         else:
-            return self.model.encode([text])[0]
+            return self.model.encode(text, convert_to_numpy=True)
     
     def _normalize_text(self, text: str) -> str:
         """한국어 특화 텍스트 정규화"""
@@ -214,7 +292,18 @@ class TextMatcher:
         # 텍스트 정규화
         text = self._normalize_text(text)
         
-        # 용어 분리
+        # 고급 토큰화 사용 시 토큰화 결과 활용
+        if self.tokenizer:
+            try:
+                tokens = self.tokenizer.tokenize(text)
+                tokens = [token.replace("##", "") for token in tokens]
+                # 제품 타입 필터링
+                tokens = [t for t in tokens if t not in self.product_types]
+                return tokens
+            except:
+                pass
+                
+        # 일반 텍스트 분리 방식 (토큰화 실패 시 폴백)
         terms = text.split()
         
         # 제품 타입 표시자 필터링
@@ -245,4 +334,54 @@ class TextMatcher:
             if matches:
                 specs[spec_type] = matches
                 
-        return specs 
+        return specs
+    
+    def calculate_batch_similarity(self, main_text: str, comparison_texts: List[str]) -> List[float]:
+        """여러 텍스트와의 유사도를 일괄 계산 (koSBERT 방식)"""
+        if not comparison_texts:
+            return []
+            
+        # 텍스트 정규화
+        norm_main = self._normalize_text(main_text)
+        norm_texts = [self._normalize_text(text) for text in comparison_texts]
+        
+        # 메인 텍스트 임베딩 계산
+        main_embedding = self._get_embedding(norm_main)
+        
+        similarities = []
+        
+        # 각 비교 텍스트와의 유사도 계산
+        for norm_text in norm_texts:
+            text_embedding = self._get_embedding(norm_text)
+            
+            if self.use_ko_sbert:
+                # Ko-SBERT 모델에 최적화된 유사도 계산
+                main_tensor = util.normalize_embeddings(torch.tensor([main_embedding]))
+                text_tensor = util.normalize_embeddings(torch.tensor([text_embedding]))
+                similarity = float(util.pytorch_cos_sim(main_tensor, text_tensor).item())
+            else:
+                # 일반 코사인 유사도 계산
+                similarity = float(cosine_similarity([main_embedding], [text_embedding])[0, 0])
+                
+            similarities.append(similarity)
+            
+        return similarities
+        
+    def tokenize_product_names(self, product_names: List[str]) -> List[List[str]]:
+        """제품명 토큰화 (tokenize_product_names.py 기능 통합)"""
+        if not self.tokenizer:
+            self.logger.warning("Tokenizer not available for product name tokenization")
+            return [text.split() for text in product_names]
+            
+        try:
+            # 제품명 토큰화
+            tokenized_names = [self.tokenizer.tokenize(name) for name in product_names]
+            
+            # "##" 제거
+            tokenized_names = [[token.replace("##", "") for token in name] for name in tokenized_names]
+            
+            return tokenized_names
+        except Exception as e:
+            self.logger.error(f"Product name tokenization failed: {e}")
+            # 실패 시 간단한 공백 기반 분리로 폴백
+            return [text.split() for text in product_names] 
