@@ -1135,19 +1135,43 @@ class ProductProcessor:
 
             # 결과 저장을 위한 리스트
             results = []
+            total_items = len(df) # Get total items *after* limiting
 
             # 각 상품 처리
             for idx, row in df.iterrows():
+                # Check if thread is still running before processing
+                if hasattr(self, '_is_running') and not self._is_running:
+                     self.logger.warning("Processing stopped by user request.")
+                     break # Exit loop if stopped
+
                 try:
                     # 상품 처리
                     result = self._process_single_product(row)
                     if result:
                         results.append(result)
 
+                    # --- Call progress callback ---
+                    if self.progress_callback:
+                        # Use try-except block to avoid crashing if callback signature mismatches
+                        try:
+                             self.progress_callback(idx + 1, total_items) # Pass current index (1-based) and total
+                        except TypeError:
+                            # Fallback or log error if signature is still int
+                            self.logger.warning("Progress callback signature might be outdated. Expected (int, int).")
+                            # Attempt old percentage callback as fallback?
+                            # percentage = int(((idx + 1) / total_items) * 100)
+                            # self.progress_callback(percentage)
+
                 except Exception as e:
                     self.logger.error(
                         f"상품 처리 중 오류 발생 (행 {idx+1}): {str(e)}", exc_info=True
                     )
+                    # Emit progress even on error to keep UI updated
+                    if self.progress_callback:
+                         try:
+                             self.progress_callback(idx + 1, total_items)
+                         except TypeError:
+                             pass # Ignore signature mismatch error here too
                     continue
 
             # 결과가 있는 경우에만 출력 파일 생성

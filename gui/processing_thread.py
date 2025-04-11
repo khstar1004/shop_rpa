@@ -8,7 +8,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 
 class ProcessingThread(QThread):
-    progress_updated = pyqtSignal(int)  # 진행 상황 (%)
+    progress_updated = pyqtSignal(int, int)  # 진행 상황 (current_item, total_items)
     status_updated = pyqtSignal(str)  # 상태 메시지
     log_message = pyqtSignal(str)  # 로그 메시지
     processing_complete = pyqtSignal(str, str)  # 주 보고서와 보조 보고서 경로
@@ -36,6 +36,10 @@ class ProcessingThread(QThread):
         self._is_running = False
         if hasattr(self.processor, "progress_callback"):
             self.processor.progress_callback = None  # 중단 시 콜백 제거
+
+        # Also signal stop to processor if it has a specific stop method
+        if hasattr(self.processor, "stop_processing"):
+            self.processor.stop_processing()
 
     def run(self):
         """스레드 실행"""
@@ -67,6 +71,7 @@ class ProcessingThread(QThread):
 
             self.status_updated.emit(f"{total_items}개 상품 처리 시작...")
             self.progress_updated.emit(0)
+            self.progress_updated.emit(0, total_items) # Emit initial state (0 out of total)
 
             if hasattr(self.processor, "process_file"):
                 # 기존 API 호환성
@@ -75,6 +80,7 @@ class ProcessingThread(QThread):
                 )
                 if self._is_running:
                     self.progress_updated.emit(100)
+                    self.progress_updated.emit(total_items, total_items) # Final state
                     self.status_updated.emit("처리 완료!")
                     self.processing_complete.emit(
                         primary_report_path, secondary_report_path
@@ -90,12 +96,29 @@ class ProcessingThread(QThread):
                         input_file, self.output_dir, self.product_limit
                     )
                 else:
+                    # When no limit, need total items for progress
+                    df = pd.read_excel(input_file)
+                    total_items = len(df)
+                    self.progress_updated.emit(0, total_items)
                     result_file = self.processor._process_single_file(
                         input_file, self.output_dir
                     )
 
                 if self._is_running:
                     self.progress_updated.emit(100)
+                    # Get total items again for final progress state if not limited
+                    if not self.product_limit:
+                        df = pd.read_excel(input_file)
+                        total_items = len(df)
+                    else:
+                        total_items = self.product_limit
+
+                    # Ensure total_items is not zero before emitting
+                    if total_items > 0:
+                        self.progress_updated.emit(total_items, total_items)
+                    else:
+                        self.progress_updated.emit(0, 0) # Handle zero case
+
                     if result_file:
                         self.status_updated.emit("처리 완료!")
                         self.processing_finished.emit([result_file])
@@ -119,8 +142,12 @@ class ProcessingThread(QThread):
                 self.input_files, self.output_dir, self.product_limit
             )
 
+            # Emit final progress if running
+            total_files = len(self.input_files)
             if self._is_running:
                 self.progress_updated.emit(100)
+                # For multiple files, progress is trickier. Maybe update status instead?
+                # self.progress_updated.emit(total_files, total_files) # Or just emit 100%
                 if output_files:
                     self.status_updated.emit(f"{len(output_files)}개 파일 처리 완료!")
                     self.processing_finished.emit(output_files)

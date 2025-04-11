@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QFrame,
     QGroupBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -177,41 +178,46 @@ class MainWindow(QMainWindow):
         self.drop_area.clicked.connect(self.on_drop_area_clicked)  # Add click handler
         top_layout.addWidget(self.file_group)
 
-        (
-            self.controls_group,
-            self.start_button,
-            self.stop_button,
-            self.threads_spinbox,
-        ) = WidgetFactory.create_controls_group()
-        # Add product limit spinbox to controls group
-        controls_layout = self.controls_group.layout()
-        product_limit_layout = QHBoxLayout()
+        # --- Refactor Controls Group Layout ---
+        self.controls_group = QGroupBox(tr.get_text("processing_controls")) # Use a more descriptive title
+        controls_layout = QGridLayout(self.controls_group) # Use QGridLayout
+        controls_layout.setSpacing(10) # Adjust spacing
+
+        # Row 0: Threads
+        threads_label = QLabel(tr.get_text("thread_count"))
+        self.threads_spinbox = QSpinBox()
+        self.threads_spinbox.setRange(1, os.cpu_count() or 4)
+        self.threads_spinbox.setValue(self.settings.get("thread_count", 4))
+        controls_layout.addWidget(threads_label, 0, 0)
+        controls_layout.addWidget(self.threads_spinbox, 0, 1)
+
+        # Row 1: Product Limit
         product_limit_label = QLabel(tr.get_text("max_products"))
-        product_limit_label.setFixedWidth(150)  # Align with other labels
         self.product_limit_spinbox = QSpinBox()
         self.product_limit_spinbox.setRange(0, 10000)  # 0 means no limit
         self.product_limit_spinbox.setToolTip(tr.get_text("max_products_tooltip"))
         self.product_limit_spinbox.setValue(0) # Default to no limit
-        product_limit_layout.addWidget(product_limit_label)
-        product_limit_layout.addWidget(self.product_limit_spinbox)
-        product_limit_layout.addStretch()
-        # Insert the new layout before the stretch in the original controls layout if it exists
-        if isinstance(controls_layout, QVBoxLayout):
-            # Find the stretch item and insert before it, or just add if no stretch
-            stretch_index = -1
-            for i in range(controls_layout.count()):
-                item = controls_layout.itemAt(i)
-                if isinstance(item, type(controls_layout.itemAt(0))) and item.spacerItem(): # Check if it's a spacer item
-                   stretch_index = i
-                   break
-            if stretch_index != -1:
-                controls_layout.insertLayout(stretch_index, product_limit_layout)
-            else:
-                controls_layout.addLayout(product_limit_layout) # Add if no stretch found
-        else: # Fallback if layout is not QVBoxLayout as expected
-             controls_layout.addLayout(product_limit_layout)
+        controls_layout.addWidget(product_limit_label, 1, 0)
+        controls_layout.addWidget(self.product_limit_spinbox, 1, 1)
+
+        # Row 2: Start/Stop Buttons
+        button_layout = QHBoxLayout()
+        self.start_button = QPushButton(tr.get_text("start"))
+        self.stop_button = QPushButton(tr.get_text("stop"))
+        self.stop_button.setEnabled(False) # Initially disabled
+        Styles.apply_button_style(self.start_button, Colors.PRIMARY)
+        Styles.apply_button_style(self.stop_button, Colors.DANGER)
+        button_layout.addStretch() # Push buttons to the right
+        button_layout.addWidget(self.start_button)
+        button_layout.addWidget(self.stop_button)
+        controls_layout.addLayout(button_layout, 2, 0, 1, 3) # Span across columns
+
+        # Set column stretch factors for alignment (make spinbox column expand)
+        controls_layout.setColumnStretch(1, 1)
+        controls_layout.setColumnStretch(2, 0) # Add a dummy column stretch if needed for alignment
 
         top_layout.addWidget(self.controls_group)
+        # --- End Refactor ---
 
         self.progress_group, self.progress_bar, self.status_label = (
             WidgetFactory.create_progress_group()
@@ -671,16 +677,26 @@ class MainWindow(QMainWindow):
                 self.status_label.setText(tr.get_text("stopping"))
                 logging.info(tr.get_text("user_requested_stop"))
 
-    @pyqtSlot(int)
-    def update_progress(self, value):
+    @pyqtSlot(int, int)
+    def update_progress(self, current_item, total_items):
         """Update progress bar value and ensure it's visible"""
         if not self.progress_bar.isVisible():
             self.progress_bar.show()
-        if value < 0:
-            value = 0
-        elif value > 100:
-            value = 100
-        self.progress_bar.setValue(value)
+
+        if total_items > 0:
+            percentage = int((current_item / total_items) * 100)
+            # Ensure percentage is within 0-100 bounds
+            percentage = max(0, min(percentage, 100))
+            self.progress_bar.setValue(percentage)
+
+            # Update status label with count
+            status_text = tr.get_text("processing_progress", current=current_item, total=total_items)
+            self.status_label.setText(status_text)
+        else:
+            # Handle case where total_items is 0 or less (e.g., empty file)
+            self.progress_bar.setValue(0)
+            self.status_label.setText(tr.get_text("processing_starting")) # Or a more specific message
+
         self.progress_bar.repaint()  # Force immediate update
 
     @pyqtSlot(str)
