@@ -70,8 +70,7 @@ class ProcessingThread(QThread):
                 raise e
 
             self.status_updated.emit(f"{total_items}개 상품 처리 시작...")
-            self.progress_updated.emit(0)
-            self.progress_updated.emit(0, total_items) # Emit initial state (0 out of total)
+            self.progress_updated.emit(0, total_items)  # Fix: Emit both current and total items
 
             if hasattr(self.processor, "process_file"):
                 # 기존 API 호환성

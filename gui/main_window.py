@@ -89,8 +89,8 @@ class MainWindow(QMainWindow):
         self.setGeometry(
             100,
             100,
-            int(config["GUI"]["WINDOW_WIDTH"]),
-            int(config["GUI"]["WINDOW_HEIGHT"]),
+            int(config["GUI"].get("WINDOW_WIDTH", 1600)),  # Default to 1600 if not set
+            int(config["GUI"].get("WINDOW_HEIGHT", 2000)),   # Default to 1000 if not set
         )
 
         # Set application icon
@@ -118,7 +118,8 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle(tr.get_text("Shop_RPA"))
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(1600, 1000)  # Increased from 1200x800 to 1600x1000
+        self.resize(1600, 1000)  # Set initial window size
 
         # Create central widget and main layout
         central_widget = QWidget()
@@ -205,8 +206,8 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton(tr.get_text("start"))
         self.stop_button = QPushButton(tr.get_text("stop"))
         self.stop_button.setEnabled(False) # Initially disabled
-        Styles.apply_button_style(self.start_button, Colors.PRIMARY)
-        Styles.apply_button_style(self.stop_button, Colors.DANGER)
+        Styles.apply_start_button_style(self.start_button)
+        Styles.apply_stop_button_style(self.stop_button)
         button_layout.addStretch() # Push buttons to the right
         button_layout.addWidget(self.start_button)
         button_layout.addWidget(self.stop_button)
@@ -688,6 +689,9 @@ class MainWindow(QMainWindow):
             # Ensure percentage is within 0-100 bounds
             percentage = max(0, min(percentage, 100))
             self.progress_bar.setValue(percentage)
+            
+            # Update progress bar text to show both percentage and count
+            self.progress_bar.setFormat(f"{percentage}% ({current_item}/{total_items})")
 
             # Update status label with count
             status_text = tr.get_text("processing_progress", current=current_item, total=total_items)
@@ -695,6 +699,7 @@ class MainWindow(QMainWindow):
         else:
             # Handle case where total_items is 0 or less (e.g., empty file)
             self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("0% (0/0)")
             self.status_label.setText(tr.get_text("processing_starting")) # Or a more specific message
 
         self.progress_bar.repaint()  # Force immediate update

@@ -129,10 +129,23 @@ class FileCache:
 
             # Write atomically to prevent partial writes
             temp_filepath = filepath + ".tmp"
-            with open(temp_filepath, "wb") as f:
-                f.write(data)
-            os.replace(temp_filepath, filepath)  # Atomic rename/replace
-            logger.debug("Cache set for key: %s...", key[:50])
+            try:
+                # 파일 잠금을 위한 임시 파일 생성
+                lock_file = filepath + ".lock"
+                with open(lock_file, "w") as lock:
+                    lock.write("locked")
+                
+                with open(temp_filepath, "wb") as f:
+                    f.write(data)
+                os.replace(temp_filepath, filepath)  # Atomic rename/replace
+                logger.debug("Cache set for key: %s...", key[:50])
+            finally:
+                # 잠금 파일 제거
+                try:
+                    if os.path.exists(lock_file):
+                        os.remove(lock_file)
+                except OSError:
+                    pass
         except (OSError, pickle.PickleError) as e:
             logger.error(
                 "Error writing cache file %s for key '%s...': %s",

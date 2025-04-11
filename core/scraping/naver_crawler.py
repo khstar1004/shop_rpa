@@ -16,6 +16,14 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
+# Initialize absl logging
+try:
+    from absl import logging as absl_logging
+    absl_logging.use_absl_handler()
+    absl_logging.set_verbosity(absl_logging.INFO)
+except ImportError:
+    pass
+
 # Try importing playwright (optional dependency)
 try:
     from playwright.sync_api import TimeoutError, sync_playwright
@@ -333,7 +341,7 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
                 # 제품 데이터 변환
                 products = []
                 for item in data.get("items", []):
-                    product = await self._convert_api_item_to_product(item, query)
+                    product = await self._convert_api_item_to_product(item)
                     if product:
                         products.append(product)
 
@@ -360,7 +368,7 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
         return []
 
     async def _convert_api_item_to_product(
-        self, item: Dict, query: str
+        self, item: Dict
     ) -> Optional[Product]:
         """API 응답 아이템을 Product 객체로 변환"""
         try:

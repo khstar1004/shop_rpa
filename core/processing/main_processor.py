@@ -385,7 +385,7 @@ class ProductProcessor:
                     processed_count += 1
                     progress_percent = int((processed_count / total_items) * 100)
                     if self.progress_callback:
-                        self.progress_callback(progress_percent)
+                        self.progress_callback(progress_percent, total_items)
                     if processed_count % 10 == 0 or processed_count == total_items:
                         self.logger.info(
                             f"Progress: {processed_count}/{total_items} ({progress_percent}%)"
