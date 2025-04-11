@@ -1,28 +1,29 @@
 """Internationalization (i18n) support module for the application"""
 
 import json
-import os
 import logging
+import os
 from pathlib import Path
 from typing import Dict
 
+
 class Translator:
     """다국어 지원을 위한 번역 관리 클래스"""
-    
+
     def __init__(self):
         """Initialize the translator"""
         self.current_language = "ko_KR"
         self.translations = {}
         self.translations_dir = Path(__file__).parent / "translations"
         self.load_translations()
-    
+
     def load_translations(self):
         """번역 파일들을 로드합니다."""
         try:
             if not self.translations_dir.exists():
                 self.translations_dir.mkdir(parents=True)
                 self._create_default_translations()
-            
+
             for lang_file in self.translations_dir.glob("*.json"):
                 lang_code = lang_file.stem
                 try:
@@ -34,11 +35,11 @@ class Translator:
                 except Exception as e:
                     logger.error(f"번역 파일 '{lang_file}' 로드 중 오류 발생: {str(e)}")
                     continue
-                    
+
         except Exception as e:
             logger.error(f"번역 파일 로드 중 오류 발생: {str(e)}")
             self._create_default_translations()
-    
+
     def _create_default_translations(self):
         """기본 번역 파일을 생성합니다."""
         default_translations = {
@@ -69,7 +70,7 @@ class Translator:
                 "info": "정보",
                 "warning": "경고",
                 "error": "오류",
-                "critical": "치명적"
+                "critical": "치명적",
             },
             "en_US": {
                 "app_title": "Shop RPA",
@@ -98,38 +99,42 @@ class Translator:
                 "info": "Info",
                 "warning": "Warning",
                 "error": "Error",
-                "critical": "Critical"
-            }
+                "critical": "Critical",
+            },
         }
-        
+
         for lang_code, translations in default_translations.items():
             lang_file = self.translations_dir / f"{lang_code}.json"
             try:
                 with open(lang_file, "w", encoding="utf-8") as f:
                     json.dump(translations, f, ensure_ascii=False, indent=4)
             except Exception as e:
-                logger.error(f"기본 번역 파일 '{lang_file}' 생성 중 오류 발생: {str(e)}")
-    
+                logger.error(
+                    f"기본 번역 파일 '{lang_file}' 생성 중 오류 발생: {str(e)}"
+                )
+
     def set_language(self, lang_code: str) -> bool:
         """현재 언어를 설정합니다."""
         if lang_code in self.translations:
             self.current_language = lang_code
             return True
         return False
-    
+
     def get_text(self, key: str, default: str = None, **kwargs) -> str:
         """번역된 텍스트를 반환합니다.
-        
+
         Args:
             key: 번역 키
             default: 기본값 (키가 없을 경우 반환할 값)
             **kwargs: 텍스트 포맷팅에 사용할 매개변수
-            
+
         Returns:
             번역된 텍스트 또는 기본값
         """
         try:
-            text = self.translations.get(self.current_language, {}).get(key, default if default is not None else key)
+            text = self.translations.get(self.current_language, {}).get(
+                key, default if default is not None else key
+            )
             if kwargs:
                 try:
                     return text.format(**kwargs)
@@ -140,13 +145,11 @@ class Translator:
         except Exception as e:
             logger.error(f"텍스트 '{key}' 가져오기 중 오류 발생: {str(e)}")
             return default if default is not None else key
-    
+
     def get_available_languages(self) -> Dict[str, str]:
         """사용 가능한 언어 목록을 반환합니다."""
-        return {
-            "ko_KR": "한국어",
-            "en_US": "English"
-        }
+        return {"ko_KR": "한국어", "en_US": "English"}
+
 
 # Global translator instance
-translator = Translator() 
+translator = Translator()

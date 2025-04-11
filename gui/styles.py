@@ -1,80 +1,97 @@
 """Styles for the GUI components"""
 
-from PyQt5.QtWidgets import QWidget, QMainWindow
 from typing import Union
+
+from PyQt5.QtWidgets import QMainWindow, QWidget
+
 
 class Colors:
     """Color constants for the application"""
-    PRIMARY = "#6366F1"          # Indigo
-    PRIMARY_LIGHT = "#818CF8"    # Lighter indigo
-    PRIMARY_DARK = "#4F46E5"     # Darker indigo
-    
-    SECONDARY = "#EC4899"        # Pink
-    SECONDARY_LIGHT = "#F472B6"  
+
+    PRIMARY = "#6366F1"  # Indigo
+    PRIMARY_LIGHT = "#818CF8"  # Lighter indigo
+    PRIMARY_DARK = "#4F46E5"  # Darker indigo
+
+    SECONDARY = "#EC4899"  # Pink
+    SECONDARY_LIGHT = "#F472B6"
     SECONDARY_DARK = "#DB2777"
-    
-    DANGER = "#EF4444"           # Red
+
+    DANGER = "#EF4444"  # Red
     DANGER_LIGHT = "#F87171"
     DANGER_DARK = "#DC2626"
-    
-    SUCCESS = "#10B981"          # Emerald
+
+    SUCCESS = "#10B981"  # Emerald
     SUCCESS_LIGHT = "#34D399"
     SUCCESS_DARK = "#059669"
-    
-    WARNING = "#F59E0B"          # Amber
+
+    WARNING = "#F59E0B"  # Amber
     WARNING_LIGHT = "#FBBF24"
     WARNING_DARK = "#D97706"
-    
-    INFO = "#3B82F6"             # Blue
+
+    INFO = "#3B82F6"  # Blue
     INFO_LIGHT = "#60A5FA"
     INFO_DARK = "#2563EB"
-    
+
     BACKGROUND_LIGHT = "#FFFFFF"
     BACKGROUND_DARK = "#111827"  # Dark slate
-    
+
     SIDEBAR_LIGHT = "#F9FAFB"
-    SIDEBAR_DARK = "#1F2937"     # Darker slate
-    
+    SIDEBAR_DARK = "#1F2937"  # Darker slate
+
     CARD_LIGHT = "#FFFFFF"
     CARD_DARK = "#1F2937"
-    
+
     TEXT_LIGHT = "#1F2937"
     TEXT_LIGHT_SECONDARY = "#6B7280"
     TEXT_DARK = "#F9FAFB"
     TEXT_DARK_SECONDARY = "#9CA3AF"
-    
+
     BORDER_LIGHT = "#E5E7EB"
     BORDER_DARK = "#374151"
-    
+
     # Add BORDER attribute that will be set based on theme
     BORDER = BORDER_LIGHT  # Default to light mode border
-    
+
     # Gradients
-    GRADIENT_PRIMARY = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6366F1, stop:1 #8B5CF6)"
-    GRADIENT_SECONDARY = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #EC4899, stop:1 #F472B6)"
-    GRADIENT_SUCCESS = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #10B981, stop:1 #34D399)"
-    GRADIENT_INFO = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #3B82F6, stop:1 #60A5FA)"
-    GRADIENT_WARNING = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #F59E0B, stop:1 #FBBF24)"
-    GRADIENT_DANGER = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #EF4444, stop:1 #F87171)"
-    
+    GRADIENT_PRIMARY = (
+        "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6366F1, stop:1 #8B5CF6)"
+    )
+    GRADIENT_SECONDARY = (
+        "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #EC4899, stop:1 #F472B6)"
+    )
+    GRADIENT_SUCCESS = (
+        "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #10B981, stop:1 #34D399)"
+    )
+    GRADIENT_INFO = (
+        "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #3B82F6, stop:1 #60A5FA)"
+    )
+    GRADIENT_WARNING = (
+        "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #F59E0B, stop:1 #FBBF24)"
+    )
+    GRADIENT_DANGER = (
+        "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #EF4444, stop:1 #F87171)"
+    )
+
     # Glass effect
     GLASS_LIGHT = "rgba(255, 255, 255, 0.8)"
     GLASS_DARK = "rgba(31, 41, 55, 0.8)"
-    
+
     # Shadows
     SHADOW_LIGHT = "0px 2px 4px rgba(0, 0, 0, 0.1)"
     SHADOW_DARK = "0px 2px 4px rgba(0, 0, 0, 0.3)"
-    
+
     # Animations
     ANIMATION_DURATION = "300ms"
 
+
 class Styles:
     """Style manager for the application"""
-    
+
     @staticmethod
     def apply_dark_mode(widget: Union[QMainWindow, QWidget]) -> None:
         """Apply dark mode theme to the widget"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QMainWindow, QWidget {{
                 background-color: {Colors.BACKGROUND_DARK};
                 color: {Colors.TEXT_DARK};
@@ -247,12 +264,14 @@ class Styles:
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                 width: 0px;
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_light_mode(widget: Union[QMainWindow, QWidget]) -> None:
         """Apply light mode theme to the widget"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QMainWindow, QWidget {{
                 background-color: {Colors.BACKGROUND_LIGHT};
                 color: {Colors.TEXT_LIGHT};
@@ -425,12 +444,14 @@ class Styles:
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                 width: 0px;
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_group_box_style(widget: QWidget) -> None:
         """Apply style to group box"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QGroupBox {{
                 font-weight: bold;
                 border: 1px solid {Colors.BORDER_LIGHT};
@@ -443,12 +464,14 @@ class Styles:
                 left: 10px;
                 padding: 0 5px;
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_drop_area_style(widget: QWidget) -> None:
         """Apply style to drop area"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QLabel {{
                 border: 2px dashed {Colors.BORDER_LIGHT};
                 border-radius: 12px;
@@ -465,12 +488,14 @@ class Styles:
                 background: #EEF2FF;
                 color: {Colors.PRIMARY};
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_drop_area_active_style(widget: QWidget) -> None:
         """Apply style to drop area when active"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QLabel {{
                 border: 2px solid {Colors.PRIMARY};
                 border-radius: 12px;
@@ -482,12 +507,14 @@ class Styles:
                 min-height: 120px;
                 text-align: center;
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_drop_area_dark_style(widget: QWidget) -> None:
         """Apply dark style to drop area"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QLabel {{
                 border: 2px dashed {Colors.BORDER_DARK};
                 border-radius: 12px;
@@ -504,12 +531,14 @@ class Styles:
                 background: #1E1B4B;
                 color: {Colors.PRIMARY_LIGHT};
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_drop_area_active_dark_style(widget: QWidget) -> None:
         """Apply dark style to drop area when active"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QLabel {{
                 border: 2px solid {Colors.PRIMARY};
                 border-radius: 12px;
@@ -521,23 +550,27 @@ class Styles:
                 min-height: 120px;
                 text-align: center;
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_file_path_style(widget: QWidget) -> None:
         """Apply style to file path label"""
-        widget.setStyleSheet("""
+        widget.setStyleSheet(
+            """
             QLabel {
                 font-weight: bold;
                 color: #555555;
                 padding: 5px;
             }
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_start_button_style(widget: QWidget) -> None:
         """Apply style to start button"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: {Colors.SUCCESS};
                 color: white;
@@ -556,12 +589,14 @@ class Styles:
                 background-color: {Colors.BORDER_LIGHT};
                 color: #888888;
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_stop_button_style(widget: QWidget) -> None:
         """Apply style to stop button"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QPushButton {{
                 background-color: {Colors.DANGER};
                 color: white;
@@ -580,12 +615,14 @@ class Styles:
                 background-color: {Colors.BORDER_LIGHT};
                 color: #888888;
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_spinbox_style(widget: QWidget) -> None:
         """Apply style to spinbox"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QSpinBox {{
                 border: 1px solid {Colors.BORDER_LIGHT};
                 border-radius: 4px;
@@ -593,12 +630,14 @@ class Styles:
                 background: white;
                 min-width: 80px;
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_progress_bar_style(widget: QWidget) -> None:
         """Apply style to progress bar"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QProgressBar {{
                 border: 1px solid #E0E0E0;
                 border-radius: 4px;
@@ -611,24 +650,28 @@ class Styles:
                 background-color: {Colors.PRIMARY};
                 border-radius: 3px;
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_status_label_style(widget: QWidget) -> None:
         """Apply style to status label"""
-        widget.setStyleSheet("""
+        widget.setStyleSheet(
+            """
             QLabel {
                 font-weight: bold;
                 color: #555555;
                 font-size: 13px;
                 padding: 5px;
             }
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_log_area_style(widget: QWidget) -> None:
         """Apply style to log area"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QPlainTextEdit {{
                 font-family: 'Consolas', 'Courier New', monospace;
                 font-size: 12px;
@@ -639,12 +682,14 @@ class Styles:
                 selection-background-color: {Colors.PRIMARY};
                 selection-color: white;
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_checkbox_style(widget: QWidget) -> None:
         """Apply style to checkbox"""
-        widget.setStyleSheet(f"""
+        widget.setStyleSheet(
+            f"""
             QCheckBox {{
                 spacing: 5px;
                 color: #555555;
@@ -663,26 +708,31 @@ class Styles:
             QCheckBox::indicator:hover {{
                 border-color: {Colors.PRIMARY};
             }}
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_status_bar_style(widget: QWidget) -> None:
         """Apply style to status bar"""
-        widget.setStyleSheet("""
+        widget.setStyleSheet(
+            """
             QStatusBar {
                 background-color: #F5F5F5;
                 color: #555555;
                 border-top: 1px solid #E0E0E0;
             }
-        """)
-    
+        """
+        )
+
     @staticmethod
     def apply_memory_label_style(widget: QWidget) -> None:
         """Apply style to memory label"""
-        widget.setStyleSheet("""
+        widget.setStyleSheet(
+            """
             QLabel {
                 color: #555555;
                 padding: 2px 5px;
                 font-size: 12px;
             }
-        """) 
+        """
+        )

@@ -21,10 +21,14 @@ PROCESSING:
 
 ## Main Components
 
-- **Text Matching**: Advanced Korean text similarity with Levenshtein and BERT embeddings
-- **Image Matching**: Background removal and feature comparison using ImageHash and EfficientNet
-- **Multimodal Matching**: Combined text/image matching scores with configurable weights 
-- **Price Analysis**: Automatic calculation of price differences and percentage discounts
+- **`scraping/`**: Contains modules for scraping product information from different online stores (Haeoreum Gift, Koryo Gift, Naver Shopping). Uses tools like Playwright and Selenium to extract details like price tables, stock status, and product search results.
+- **`processing/`**: Handles the processing of scraped data. This includes cleaning data, managing Excel files (splitting large files, merging results, applying formatting), and transforming data structures. It likely orchestrates the overall data flow.
+- **`matching/`**: Implements the logic for matching products based on similarity. It uses techniques for:
+    - **Text Matching**: Advanced Korean text similarity using algorithms like Levenshtein distance and potentially language models like BERT embeddings.
+    - **Image Matching**: Compares product images by removing backgrounds (using libraries like `rembg`) and comparing visual features (using libraries like `ImageHash` and models like `EfficientNet`).
+    - **Multimodal Matching**: Combines text and image matching scores, possibly with configurable weights, to determine the best matches.
+- **`data_models.py`**: Defines the core data structures (like `Product`, `MatchResult`, etc.) used throughout the `core` module and potentially other parts of the application to ensure consistent data handling.
+- **Price Analysis**: Includes logic for automatic calculation of price differences and percentage discounts between matched products.
 
 ## Workflow Integration
 
@@ -35,17 +39,19 @@ This system integrates with the manual workflow described in 작업메뉴얼.txt
 
 ## Dependencies
 
-- Pandas and OpenpyXL for Excel processing
+- Pandas and Openpyxl for Excel processing
 - Sentence-Transformers for text similarity
 - EfficientNet and ImageHash for image matching
 - Rembg for product image background removal
+- Playwright/Selenium for web scraping
 
 ## Usage
 
-The main entry point is the `Processor` class which handles all file operations, matching logic, and report generation.
+The main entry point is likely a class within the `processing` module (e.g., `Processor` class mentioned) which handles file operations, matching logic, and report generation.
 
 ```python
-from core.processing import Processor
-processor = Processor(config)
-result_file, error = processor.process_file("input.xlsx")
+# Example (assuming Processor class exists in core.processing)
+# from core.processing import Processor
+# processor = Processor(config)
+# result_file, error = processor.process_file("input.xlsx")
 ``` 
