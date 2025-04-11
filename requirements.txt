@@ -26,6 +26,12 @@ webdriver-manager==4.0.1
 lxml==5.2.0
 requests==2.31.0
 
+# Excel Processing
+openpyxl==3.1.2
+xlrd==2.0.1
+pywin32==306
+html5lib==1.1
+
 # Development Tools
 colorama==0.4.6
 python-dotenv==1.0.1

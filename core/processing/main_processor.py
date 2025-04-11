@@ -192,6 +192,9 @@ class ProductProcessor:
                 self.logger.error(error_msg)
                 return None, error_msg
             
+            # 엑셀 전처리 작업 (XLS -> XLSX 변환 및 필요한 컬럼 추가)
+            input_file = self.process_excel_functionality(input_file)
+            
             # 입력 파일 읽기
             try:
                 df = self.excel_manager.read_excel_file(input_file)
@@ -244,6 +247,65 @@ class ProductProcessor:
             self.logger.error(f"Error in process_file: {str(e)}", exc_info=True)
             return None, str(e)
     
+    def process_excel_functionality(self, input_file: str) -> str:
+        """
+        엑셀 파일에 대한 전처리 작업을 수행합니다.
+        
+        Args:
+            input_file: 입력 엑셀 파일 경로
+            
+        Returns:
+            str: 처리된 파일 경로 (변경이 있는 경우 새 파일 경로, 없으면 원본 경로)
+        """
+        try:
+            input_dir = os.path.dirname(input_file)
+            input_ext = os.path.splitext(input_file)[1].lower()
+            
+            # 1. XLS -> XLSX 변환 (확장자가 .xls인 경우)
+            if input_ext == '.xls':
+                self.logger.info(f"XLS 파일 감지: {input_file}")
+                xlsx_file = self.excel_manager.convert_xls_to_xlsx(input_dir)
+                if xlsx_file:
+                    self.logger.info(f"XLS 파일이 XLSX로 변환되었습니다: {xlsx_file}")
+                    input_file = xlsx_file
+                else:
+                    self.logger.warning("XLS 파일 변환에 실패했습니다. 원본 파일을 사용합니다.")
+            
+            # 2. 필요한 컬럼 확인 및 추가
+            self.excel_manager.check_excel_file(input_file)
+            
+            return input_file
+            
+        except Exception as e:
+            self.logger.error(f"엑셀 전처리 중 오류 발생: {str(e)}", exc_info=True)
+            return input_file  # 오류 발생 시 원본 파일 사용
+
+    def post_process_output_file(self, output_file: str) -> str:
+        """
+        출력 엑셀 파일에 대한 후처리 작업을 수행합니다.
+        
+        Args:
+            output_file: 처리된 엑셀 파일 경로
+            
+        Returns:
+            str: 최종 출력 파일 경로
+        """
+        try:
+            # 1. 하이퍼링크 추가
+            linked_file = self.excel_manager.add_hyperlinks_to_excel(output_file)
+            
+            # 2. 가격 차이가 있는 항목만 필터링
+            filtered_file = self.excel_manager.filter_excel_by_price_diff(linked_file)
+            
+            # 3. 포맷팅 적용
+            self.excel_manager.apply_formatting_to_excel(filtered_file)
+            
+            return filtered_file
+            
+        except Exception as e:
+            self.logger.error(f"엑셀 후처리 중 오류 발생: {str(e)}", exc_info=True)
+            return output_file
+
     def _process_single_file(self, input_file: str) -> Tuple[Optional[str], Optional[str]]:
         """단일 입력 파일 처리"""
         try:
@@ -297,6 +359,9 @@ class ProductProcessor:
             
             # 결과 보고서 생성
             output_file = self.excel_manager.generate_enhanced_output(results, input_file)
+            
+            # 후처리 작업 수행 (하이퍼링크, 필터링 등)
+            output_file = self.post_process_output_file(output_file)
             
             # 처리 완료 로깅
             end_time = datetime.now()
