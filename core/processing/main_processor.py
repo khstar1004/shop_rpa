@@ -660,6 +660,7 @@ class ProductProcessor:
 
                                 # 결과물을 소스 제품에 저장 (향후 사용)
                                 source_product.image_url = source_image_url
+                                source_product.original_input_data["본사 이미지"] = source_image_url
 
                                 # 이미지 갤러리도 있으면 저장
                                 if scraped_product.image_gallery:

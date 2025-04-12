@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -72,6 +73,37 @@ class KoryoScraper(BaseMultiLayerScraper):
         self.debug = debug
         self.base_url = "https://koreagift.com"
         self.use_proxies = use_proxies
+
+        # Define selector lists for product details
+        self.title_selectors = [
+            "h3.detail_tit",
+            "h3.prd_title",
+            ".view_title",
+            ".product_name",
+            "h1.product-title"
+        ]
+        
+        self.price_selectors = [
+            "dl.detail_price dd",
+            ".price_num",
+            "#main_price",
+            ".product-price",
+            ".price"
+        ]
+        
+        self.code_selectors = [
+            "div.product_code",
+            ".product-code",
+            ".item-code",
+            "span.code"
+        ]
+        
+        self.image_selectors = [
+            "div.swiper-slide img",
+            ".product-image img",
+            ".detail_img img",
+            ".product-gallery img"
+        ]
 
         # New ordering: first create output directory and define headers
         os.makedirs("output", exist_ok=True)
@@ -649,14 +681,14 @@ class KoryoScraper(BaseMultiLayerScraper):
 
             # 상세 정보 추출 (Null 체크 강화)
             title = item.get("title", "")
-            for selector in title_selectors:
+            for selector in self.title_selectors:
                 detail_title_element = soup.select_one(selector)
                 if detail_title_element:
                     title = detail_title_element.text.strip()
                     break
 
             price = item.get("price", 0)
-            for selector in price_selectors:
+            for selector in self.price_selectors:
                 detail_price_element = soup.select_one(selector)
                 if detail_price_element:
                     price_text = detail_price_element.text.strip()
@@ -666,7 +698,7 @@ class KoryoScraper(BaseMultiLayerScraper):
                     break
 
             product_code = ""
-            for selector in code_selectors:
+            for selector in self.code_selectors:
                 code_element = soup.select_one(selector)
                 if code_element:
                     code_text = code_element.text.strip()
@@ -676,7 +708,7 @@ class KoryoScraper(BaseMultiLayerScraper):
             # ... (extract image_gallery, quantity_prices, specifications, description with null checks as needed) ...
             # Example for image gallery:
             image_gallery = []
-            for selector in image_selectors:
+            for selector in self.image_selectors:
                 elements = soup.select(selector)
                 if elements:
                     image_elements = elements

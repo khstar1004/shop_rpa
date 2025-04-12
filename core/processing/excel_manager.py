@@ -4,13 +4,15 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import pandas as pd
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 from utils.excel_utils import insert_image_to_cell, download_image
+from ..data_models import Product
 
 
 class ExcelManager:
@@ -872,8 +874,13 @@ class ExcelManager:
                     row[field] = ""
 
         # 기본 이미지 URL 설정
-        if "본사 이미지" not in row and hasattr(result.source_product, "image_url"):
-            row["본사 이미지"] = result.source_product.image_url
+        if "본사 이미지" not in row and hasattr(result.source_product, "image_url") and result.source_product.image_url:
+            image_url = result.source_product.image_url
+            if image_url.startswith('http'):
+                # IMAGE 함수로 변환 (fit to cell)
+                row["본사 이미지"] = f'=IMAGE("{image_url}",2)'
+            else:
+                row["본사 이미지"] = image_url
 
         # 기본 URL 설정
         if "본사상품링크" not in row and hasattr(result.source_product, "url"):
@@ -924,7 +931,12 @@ class ExcelManager:
 
             # 이미지 및 링크
             if hasattr(match_product, "image_url") and match_product.image_url:
-                row["고려기프트 이미지"] = match_product.image_url
+                image_url = match_product.image_url
+                if image_url.startswith('http'):
+                    # IMAGE 함수로 변환 (fit to cell)
+                    row["고려기프트 이미지"] = f'=IMAGE("{image_url}",2)'
+                else:
+                    row["고려기프트 이미지"] = image_url
             else:
                 # 이미지 URL이 없는 경우 메시지 설정
                 row["고려기프트 이미지"] = "이미지를 찾을 수 없음"
@@ -990,7 +1002,12 @@ class ExcelManager:
 
             # 이미지 및 링크
             if hasattr(match_product, "image_url") and match_product.image_url:
-                row["네이버 이미지"] = match_product.image_url
+                image_url = match_product.image_url
+                if image_url.startswith('http'):
+                    # IMAGE 함수로 변환 (fit to cell)
+                    row["네이버 이미지"] = f'=IMAGE("{image_url}",2)'
+                else:
+                    row["네이버 이미지"] = image_url
             else:
                 # 이미지 URL이 없는 경우 메시지 설정
                 row["네이버 이미지"] = "이미지를 찾을 수 없음"

@@ -28,6 +28,10 @@ class Product:
     fetched_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "pending"  # pending, success, failed
     error_message: str = ""
+    koryo_name: str = ""
+    koryo_price: float = 0
+    koryo_image_url: str = ""
+    koryo_url: str = ""
 
     def __post_init__(self):
         """초기화 후 데이터 검증 및 기본값 설정"""
@@ -67,7 +71,11 @@ class Product:
             'quantity_prices': self.quantity_prices,
             'fetched_at': self.fetched_at,
             'status': self.status,
-            'error_message': self.error_message
+            'error_message': self.error_message,
+            'koryo_name': self.koryo_name,
+            'koryo_price': self.koryo_price,
+            'koryo_image_url': self.koryo_image_url,
+            'koryo_url': self.koryo_url
         }
 
     @classmethod
@@ -91,7 +99,11 @@ class Product:
             quantity_prices=data.get('quantity_prices', {}),
             fetched_at=data.get('fetched_at', datetime.now().isoformat()),
             status=data.get('status', 'pending'),
-            error_message=data.get('error_message', '')
+            error_message=data.get('error_message', ''),
+            koryo_name=data.get('koryo_name', ''),
+            koryo_price=float(data.get('koryo_price', 0)),
+            koryo_image_url=data.get('koryo_image_url', ''),
+            koryo_url=data.get('koryo_url', '')
         )
 
     def validate(self) -> bool:
@@ -192,6 +204,8 @@ class ProductFactory:
             product_name = None
             if "상품명" in row and not pd.isna(row["상품명"]):
                 product_name = self.data_cleaner.clean_product_names(str(row["상품명"]))
+            else:
+                product_name = "유사상품 없음"  # 상품명이 없을 때 "유사상품 없음"으로 설정
 
             if not product_name:
                 self.logger.error("No product name found, cannot create product")
@@ -220,6 +234,7 @@ class ProductFactory:
                 name=product_name,
                 price=price,
                 source="haeoreum",  # 기본 출처
+                url="",  # 기본값으로 빈 문자열 설정
                 original_input_data=row.to_dict(),  # 원본 데이터 보존
             )
 
@@ -229,9 +244,9 @@ class ProductFactory:
                 and not pd.isna(row["본사 이미지"])
                 and str(row["본사 이미지"]).strip()
             ):
-                product.image_url = self.data_cleaner.clean_url(
-                    str(row["본사 이미지"]).strip(), True
-                )
+                image_url = self.data_cleaner.clean_url(str(row["본사 이미지"]).strip(), True)
+                product.image_url = image_url
+                product.original_input_data["본사 이미지"] = image_url
 
             if (
                 "본사상품링크" in row
@@ -248,6 +263,32 @@ class ProductFactory:
 
             if "중분류카테고리" in row and not pd.isna(row["중분류카테고리"]):
                 product.category = str(row["중분류카테고리"]).strip()
+
+            # 고려기프트 관련 필드 설정
+            if "고려기프트 상품명" in row and not pd.isna(row["고려기프트 상품명"]):
+                product.koryo_name = str(row["고려기프트 상품명"]).strip()
+            else:
+                product.koryo_name = "유사상품 없음"
+
+            if "고려기프트 가격" in row and not pd.isna(row["고려기프트 가격"]):
+                try:
+                    price_str = str(row["고려기프트 가격"]).strip().replace(",", "").replace("원", "")
+                    product.koryo_price = float(price_str)
+                except ValueError:
+                    self.logger.warning(f"Invalid Koryo price format: {row['고려기프트 가격']}")
+                    product.koryo_price = 0
+            else:
+                product.koryo_price = 0
+
+            if "고려기프트 이미지" in row and not pd.isna(row["고려기프트 이미지"]):
+                product.koryo_image_url = self.data_cleaner.clean_url(str(row["고려기프트 이미지"]).strip(), True)
+            else:
+                product.koryo_image_url = "유사상품 없음"
+
+            if "고려기프트 상품링크" in row and not pd.isna(row["고려기프트 상품링크"]):
+                product.koryo_url = self.data_cleaner.clean_url(str(row["고려기프트 상품링크"]).strip(), True)
+            else:
+                product.koryo_url = "유사상품 없음"
 
             return product
 
