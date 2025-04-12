@@ -790,27 +790,62 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         return not is_sold_out, message
 
     def search_product(self, query: str, max_items: int = 50) -> List[Product]:
-        """
-        해오름 기프트에서 제품 검색
+        """해오름 기프트에서 상품을 검색합니다."""
+        self.logger.info(f"해오름 기프트에서 '{query}' 검색 시작")
+        
+        # 캐시 확인
+        cache_key = f"haeoeum_search|{query}"
+        cached_result = self.get_sparse_data(cache_key)
+        if cached_result:
+            self.logger.info(f"캐시된 검색 결과 사용: '{query}'")
+            return cached_result
 
-        Args:
-            query: 검색어
-            max_items: 최대 검색 결과 수
-
-        Returns:
-            List[Product]: 검색된 제품 목록
-        """
-        self.logger.error(
-            "해오름 기프트는 검색 API를 제공하지 않습니다. ID로 직접 조회해주세요."
-        )
-
-        # 매뉴얼 요구사항: 찾지 못하면 "동일상품 없음"으로 처리
-        no_match_product = Product(
-            id="no_match_haeoeum",
-            name=f"동일상품 없음 - {query}",
-            source="haeoreum",
-            price=0,
-            url="",
-            image_url="",
-        )
-        return [no_match_product]
+        try:
+            # 검색 URL 구성
+            search_url = f"{self.BASE_URL}/product/product_list.asp"
+            params = {
+                "search_keyword": query,
+                "search_type": "all"
+            }
+            
+            response = self.session.get(search_url, params=params, verify=False)
+            response.raise_for_status()
+            
+            soup = self._get_soup(response.text)
+            product_elements = soup.select(self.selectors["product_list"]["selector"])
+            
+            if not product_elements:
+                self.logger.warning(f"❌ 상품이 존재하지 않음: '{query}' 검색 결과 없음")
+                return []
+            
+            products = []
+            for element in product_elements[:max_items]:
+                try:
+                    product_link = element.select_one(self.selectors["product_link"]["selector"])
+                    if not product_link:
+                        continue
+                    
+                    product_url = urljoin(self.BASE_URL, product_link["href"])
+                    product_idx = self._extract_product_idx(product_url)
+                    
+                    if not product_idx:
+                        continue
+                    
+                    product = self.get_product(product_idx)
+                    if product:
+                        products.append(product)
+                    
+                except Exception as e:
+                    self.logger.error(f"상품 추출 중 오류 발생: {str(e)}")
+                    continue
+            
+            if not products:
+                self.logger.warning(f"❌ 상품이 존재하지 않음: '{query}' 검색 결과 없음")
+                return []
+            
+            self.logger.info(f"해오름 기프트에서 '{query}' 검색 완료 - {len(products)}개 상품 발견")
+            return products
+            
+        except Exception as e:
+            self.logger.error(f"해오름 기프트 검색 중 오류 발생: {str(e)}")
+            return []

@@ -1774,3 +1774,34 @@ class ExcelManager:
         except Exception as e:
             self.logger.error(f"Error saving products to Excel: {str(e)}", exc_info=True)
             raise
+
+    def remove_at_symbol(self, file_path: str) -> str:
+        """
+        엑셀 파일에서 @ 기호를 제거합니다.
+
+        Args:
+            file_path: 입력 엑셀 파일 경로
+
+        Returns:
+            str: 처리된 파일 경로
+        """
+        try:
+            self.logger.info(f"Removing @ symbols from Excel file: {file_path}")
+
+            # DataFrame 로드
+            df = pd.read_excel(file_path)
+
+            # 모든 문자열 컬럼에서 @ 기호 제거
+            for column in df.columns:
+                if df[column].dtype == 'object':  # 문자열 타입 컬럼만 처리
+                    df[column] = df[column].astype(str).str.replace('@', '', regex=False)
+
+            # 결과 저장
+            df.to_excel(file_path, index=False)
+            self.logger.info(f"Successfully removed @ symbols from: {file_path}")
+
+            return file_path
+
+        except Exception as e:
+            self.logger.error(f"Error removing @ symbols from Excel: {str(e)}", exc_info=True)
+            return file_path

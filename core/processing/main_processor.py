@@ -299,7 +299,10 @@ class ProductProcessor:
                         "XLS 파일 변환에 실패했습니다. 원본 파일을 사용합니다."
                     )
 
-            # 2. 필요한 컬럼 확인 및 추가
+            # 2. @ 기호 제거
+            input_file = self.excel_manager.remove_at_symbol(input_file)
+
+            # 3. 필요한 컬럼 확인 및 추가
             self.excel_manager.check_excel_file(input_file)
 
             return input_file

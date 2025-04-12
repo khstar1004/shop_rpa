@@ -348,19 +348,60 @@ class KoryoScraper(BaseMultiLayerScraper):
     def search_product(
         self, query: str, max_items: int = 50, keyword2: str = ""
     ) -> List[Product]:
-        """고려기프트 상품 검색 (Selenium 전용)"""
-        self.logger.info(f"Searching Koryo Gift (Selenium) for: {query}")
+        """고려기프트에서 상품을 검색합니다."""
+        self.logger.info(f"고려기프트에서 '{query}' 검색 시작")
+        
+        # 캐시 확인
+        cache_key = f"koryo_search|{query}|{keyword2}"
+        cached_result = self.get_sparse_data(cache_key)
+        if cached_result:
+            self.logger.info(f"캐시된 검색 결과 사용: '{query}'")
+            return cached_result
 
-        # Directly use Selenium search logic
         try:
-            results = self._search_product_logic(query, max_items=max_items)
-            self.logger.info(f"Found {len(results)} products using Selenium.")
-            return results
+            # 검색 URL 구성
+            search_url = f"{self.base_url}/ez/goods/goods_search.php"
+            params = {
+                "search_keyword": query,
+                "keyword2": keyword2,
+                "search_type": "all"
+            }
+            
+            response = self.session.get(search_url, params=params)
+            response.raise_for_status()
+            
+            soup = self._get_soup(response.text)
+            product_elements = soup.select(self.selectors["product_list"]["selector"])
+            
+            if not product_elements:
+                self.logger.warning(f"❌ 상품이 존재하지 않음: '{query}' 검색 결과 없음")
+                return []
+                
+            products = []
+            for element in product_elements[:max_items]:
+                try:
+                    product_data = self._extract_list_item(element)
+                    if not product_data:
+                        continue
+                        
+                    product = self._get_product_details(product_data)
+                    if product:
+                        products.append(product)
+                        
+                except Exception as e:
+                    self.logger.error(f"상품 추출 중 오류 발생: {str(e)}")
+                    continue
+                
+            if not products:
+                self.logger.warning(f"❌ 상품이 존재하지 않음: '{query}' 검색 결과 없음")
+                return []
+                
+            self.logger.info(f"고려기프트에서 '{query}' 검색 완료 - {len(products)}개 상품 발견")
+            return products
+            
         except Exception as e:
-            self.logger.error(
-                f"Error during Selenium search for '{query}': {e}", exc_info=True
-            )
-            return [] # Return empty list on error
+            self.logger.error(f"고려기프트 검색 중 오류 발생: {str(e)}")
+            return []
 
     def _search_product_logic(self, query: str, max_items: int = 50) -> List[Product]:
         products = []
