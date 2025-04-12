@@ -16,15 +16,17 @@ from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
 # Playwright 지원 (선택적 의존성)
 try:
-    from playwright.sync_api import TimeoutError, sync_playwright
-
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
+    PlaywrightTimeoutError = None
 
 from ..data_models import Product
 from . import BaseMultiLayerScraper
@@ -46,19 +48,28 @@ class HaeoeumScraper(BaseMultiLayerScraper):
 
     def __init__(
         self,
-        timeout: int = 10,
-        max_retries: int = 3,
+        max_retries: int = 5,
         cache: Optional[Any] = None,
+        timeout: int = 30,
+        connect_timeout: int = 10,
+        read_timeout: int = 20,
+        backoff_factor: float = 0.5,
+        use_proxies: bool = False,
         debug: bool = False,
         output_dir: str = "output",
         headless: bool = True,
+        user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     ):
         """스크래퍼 초기화"""
-        super().__init__(max_retries=max_retries, timeout=timeout, cache=cache)
+        super().__init__(max_retries, cache, (connect_timeout, read_timeout), use_proxies, debug)
         self.logger = logging.getLogger(__name__)
         self.debug = debug
         self.output_dir = output_dir
         self.headless = headless
+        self.user_agent = user_agent
+        self.timeout_config = (connect_timeout, read_timeout)
+        self.max_retries = max_retries
+        self.backoff_factor = backoff_factor
 
         # 출력 디렉토리 생성
         os.makedirs(output_dir, exist_ok=True)
@@ -138,6 +149,30 @@ class HaeoeumScraper(BaseMultiLayerScraper):
             "vat_included": re.compile(r"VAT\s*(포함|별도|제외)", re.IGNORECASE),
         }
 
+        # --- requests 세션 설정 강화 ---
+        self.session = self._create_robust_session()
+
+    def _create_robust_session(self) -> requests.Session:
+        """재시도 로직이 포함된 requests 세션을 생성합니다."""
+        session = requests.Session()
+        session.headers.update({'User-Agent': self.user_agent})
+        session.verify = False
+
+        # Retry 전략 설정
+        retry_strategy = Retry(
+            total=self.max_retries,
+            backoff_factor=self.backoff_factor,
+            status_forcelist=[429, 500, 502, 503, 504],
+            method_whitelist=["HEAD", "GET", "OPTIONS"]
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=100, pool_maxsize=100)
+
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+
+        self.logger.info("Robust requests session created with retry strategy.")
+        return session
+
     def get_product(self, product_idx: str) -> Optional[Product]:
         """
         해오름 기프트 상품 페이지에서 상품 정보를 추출합니다.
@@ -148,7 +183,6 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         Returns:
             Product 객체 또는 None (실패 시)
         """
-        # 캐시 확인
         cache_key = f"haeoeum_product|{product_idx}"
         cached_result = self.get_sparse_data(cache_key)
         if cached_result:
@@ -156,36 +190,52 @@ class HaeoeumScraper(BaseMultiLayerScraper):
             return cached_result
 
         url = f"{self.PRODUCT_VIEW_URL}?p_idx={product_idx}"
-        self.logger.info(f"Fetching product data from: {url}")
+        self.logger.info(f"Attempting to fetch product data from: {url}")
 
         try:
-            # 웹 페이지 요청
-            for attempt in range(self.max_retries):
-                try:
-                    response = requests.get(url, timeout=self.timeout)
-                    response.raise_for_status()
-                    break
-                except (requests.RequestException, Exception) as e:
-                    self.logger.warning(
-                        f"Attempt {attempt + 1}/{self.max_retries} failed: {str(e)}"
-                    )
-                    if attempt + 1 == self.max_retries:
-                        raise
-                    time.sleep(1)
+            # --- 웹 페이지 요청 (강화된 세션 사용) ---
+            response = self.session.get(
+                url,
+                timeout=self.timeout_config,
+                headers={
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1'
+                }
+            )
+            response.raise_for_status()
+            self.logger.info(f"Successfully fetched HTML content for {url} (Status: {response.status_code})")
 
             # HTML 파싱
-            soup = BeautifulSoup(response.content, "html.parser")
+            try:
+                soup = BeautifulSoup(response.content, "html.parser")
+                self.logger.debug(f"HTML parsed successfully for {url}")
+            except Exception as parse_err:
+                self.logger.error(f"Failed to parse HTML for {url}: {parse_err}")
+                if self.debug:
+                    self.logger.error(f"Raw HTML content: {response.text[:500]}...")
+                return None
 
-            # 상품 정보 추출
-            product_data = self._extract_product_data(soup, product_idx, url)
+            # --- 상품 정보 추출 ---
+            try:
+                product_data = self._extract_product_data(soup, product_idx, url)
+                if not product_data:
+                    self.logger.warning(f"Could not extract significant product data from {url}")
+                    return None
+                self.logger.info(f"Product data extracted successfully for p_idx={product_idx}")
 
-            if product_data:
-                # Product 객체 생성
+            except Exception as extract_err:
+                self.logger.error(f"Error during data extraction for {url}: {extract_err}", exc_info=self.debug)
+                return None
+            
+            # --- Product 객체 생성 ---
+            try:
                 product = Product(
-                    id=product_data.get("product_id", ""),
+                    id=product_data.get("product_id", f"haeoreum_{product_idx}"),
                     name=product_data.get("title", ""),
                     source="haeoreum",
-                    price=float(product_data.get("price", 0)),
+                    price=float(product_data.get("price", 0.0)),
                     url=url,
                     image_url=product_data.get("main_image", ""),
                     product_code=product_data.get("product_code", ""),
@@ -206,18 +256,25 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                 if "description" in product_data:
                     product.description = product_data["description"]
 
+                self.logger.debug(f"Product object created for p_idx={product_idx}")
+
                 # 캐시에 저장
-                self.add_sparse_data(cache_key, product, ttl=86400)  # 24시간 캐싱
+                self.add_sparse_data(cache_key, product, ttl=86400)
+                self.logger.info(f"Product data for p_idx={product_idx} cached.")
                 return product
 
+            except (ValueError, TypeError) as create_err:
+                self.logger.error(f"Error creating Product object for {url}: {create_err}", exc_info=self.debug)
+                return None
+
+        except requests.exceptions.Timeout as timeout_err:
+            self.logger.error(f"Request timed out for {url} after {self.timeout_config}: {timeout_err}")
             return None
-
+        except requests.exceptions.RequestException as req_err:
+            self.logger.error(f"Request failed for {url} after {self.max_retries} retries: {req_err}")
+            return None
         except Exception as e:
-            self.logger.error(f"Error fetching product data: {str(e)}")
-            if self.debug:
-                import traceback
-
-                self.logger.error(traceback.format_exc())
+            self.logger.error(f"An unexpected error occurred processing {url}: {e}", exc_info=self.debug)
             return None
 
     def _extract_product_data(

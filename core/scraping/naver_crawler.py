@@ -53,11 +53,12 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
         self,
         client_id: str,
         client_secret: str,
-        max_retries: int = 3,
+        max_retries: int = 5,
         cache: Optional[FileCache] = None,
         timeout: int = 30,
+        debug: bool = False,
     ):
-        super().__init__(max_retries=max_retries, cache=cache, timeout=timeout)
+        super().__init__(max_retries=max_retries, cache=cache, timeout=timeout, debug=debug)
 
         # 네이버 API 인증 정보
         self.client_id = client_id
@@ -138,6 +139,20 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
 
         # 결과 개수 설정 (최대 100)
         self.display = 100
+
+        # DNS 캐시 설정
+        self.session = requests.Session()
+        self.session.verify = False  # SSL 인증서 검증 비활성화
+        self.session.mount('http://', requests.adapters.HTTPAdapter(
+            max_retries=3,
+            pool_connections=100,
+            pool_maxsize=100
+        ))
+        self.session.mount('https://', requests.adapters.HTTPAdapter(
+            max_retries=3,
+            pool_connections=100,
+            pool_maxsize=100
+        ))
 
     def search_product(
         self, query: str, max_items: int = 50, reference_price: float = 0
@@ -706,12 +721,17 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
 
     def __init__(
         self,
-        max_retries: int = 3,
+        max_retries: int = 5,
         cache: Optional[FileCache] = None,
         timeout: int = 30,
         use_proxies: bool = False,
+        debug: bool = False,
     ):
-        super().__init__(max_retries=max_retries, cache=cache, timeout=timeout)
+        super().__init__(max_retries, cache, timeout, use_proxies, debug)
+        self.logger = logging.getLogger(__name__)
+        self.max_retries = max_retries
+        self.timeout = timeout
+        self.debug = debug
 
         # API 키 로드
         self.api_keys = self._load_api_keys()
@@ -723,6 +743,7 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
             max_retries=max_retries,
             cache=cache,
             timeout=timeout,
+            debug=debug,
         )
 
         # 단가표 크롤러 생성
@@ -730,9 +751,6 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
             output_dir="C:\\RPA\\Image\\Target",
             headless=False,  # 개발/디버깅 시 False, 배포 시 True로 변경
         )
-
-        # Set up logging
-        self.logger = logging.getLogger(__name__)
 
         # 프록시 설정 (필요 시)
         self.use_proxies = use_proxies

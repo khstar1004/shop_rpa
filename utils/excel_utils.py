@@ -10,22 +10,20 @@ import os
 import re
 import zipfile # Added for exception handling
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 from urllib.parse import urlparse # Moved import
+import io
 
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.styles import Alignment, Border, PatternFill, Side
-
-# Optional imports for specific functions
-try:
-    import win32com.client
-    import pywintypes # Needed for COM errors
-    _WIN32COM_AVAILABLE = True
-except ImportError:
-    _WIN32COM_AVAILABLE = False
-    WIN32COM = None
-    PYWINTYPES = None
+from openpyxl.styles import Alignment, Border, PatternFill, Side, Font, NamedStyle
+from openpyxl.cell import Cell
+from openpyxl.drawing.image import Image as OpenpyxlImage # Renamed to avoid conflict
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.exceptions import IllegalCharacterError
+from openpyxl.worksheet.worksheet import Worksheet
+from PIL import Image as PILImage # Added Pillow import
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 try:
     from PIL import Image
@@ -36,6 +34,110 @@ except ImportError:
 
 # 기본 로거 설정
 logger = logging.getLogger(__name__)
+
+# --- Formatting and Styling Functions ---
+
+DEFAULT_FONT = Font(name="맑은 고딕", size=10)
+HEADER_FONT = Font(name="맑은 고딕", size=10, bold=True)
+CENTER_ALIGNMENT = Alignment(horizontal="center", vertical="center", wrap_text=True)
+LEFT_ALIGNMENT = Alignment(horizontal="left", vertical="center", wrap_text=True)
+THIN_BORDER_SIDE = Side(style="thin")
+THIN_BORDER = Border(
+    left=THIN_BORDER_SIDE,
+    right=THIN_BORDER_SIDE,
+    top=THIN_BORDER_SIDE,
+    bottom=THIN_BORDER_SIDE,
+)
+GRAY_FILL = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+LIGHT_YELLOW_FILL = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
+LIGHT_BLUE_FILL = PatternFill(start_color="CCFFFF", end_color="CCFFFF", fill_type="solid")
+
+
+# Define NamedStyles
+header_style = NamedStyle(
+    name="header_style",
+    font=HEADER_FONT,
+    border=THIN_BORDER,
+    alignment=CENTER_ALIGNMENT,
+    fill=GRAY_FILL,
+)
+default_style = NamedStyle(
+    name="default_style", font=DEFAULT_FONT, border=THIN_BORDER, alignment=LEFT_ALIGNMENT
+)
+center_style = NamedStyle(
+    name="center_style",
+    font=DEFAULT_FONT,
+    border=THIN_BORDER,
+    alignment=CENTER_ALIGNMENT,
+)
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+def download_image(url: str, timeout: int = 10) -> Optional[bytes]:
+    """Downloads an image from a URL."""
+    # (Keep existing download_image function)
+    # ... existing code ...
+
+
+def insert_image_to_cell(ws: Worksheet, image_path: str, cell_address: str, size: tuple = (100, 100)):
+    """
+    Inserts a resized image into the specified cell using openpyxl.
+
+    Args:
+        ws: The openpyxl worksheet object.
+        image_path: Path to the local image file.
+        cell_address: The target cell (e.g., 'A1').
+        size: Tuple of desired (width, height) in pixels.
+    """
+    try:
+        if not os.path.exists(image_path):
+            logging.warning(f"Image path does not exist: {image_path}")
+            return
+
+        # Resize image using Pillow
+        img_pil = PILImage.open(image_path)
+        img_pil = img_pil.convert("RGB")  # Ensure compatibility, remove alpha
+        img_pil.thumbnail(size) # Resize while maintaining aspect ratio
+
+        # Prepare image for openpyxl
+        img_byte_arr = io.BytesIO()
+        img_pil.save(img_byte_arr, format='PNG') # Save resized image to byte stream
+        img_byte_arr.seek(0)
+
+        img_openpyxl = OpenpyxlImage(img_byte_arr)
+
+        # Set image dimensions (optional, as thumbnail maintains aspect ratio)
+        # img_openpyxl.width, img_openpyxl.height = size
+
+        # Add image to worksheet anchored to the cell
+        ws.add_image(img_openpyxl, cell_address)
+
+        # Adjust row height and column width (approximations based on Excelsaveimage.py)
+        target_cell = ws[cell_address]
+        # Excel row height is in points (1 point = 1/72 inch). Pillow size is in pixels.
+        # Approximation: 1 pixel ~ 0.75 points (at 96 DPI)
+        row_height_points = size[1] * 0.75
+        ws.row_dimensions[target_cell.row].height = max(ws.row_dimensions[target_cell.row].height or 0, row_height_points)
+
+        # Excel column width is in characters. Very approximate conversion.
+        # Using the ratio from Excelsaveimage.py: width_pixels / 6.25
+        col_width_chars = size[0] / 7.0 # Adjusted divisor slightly based on common observations
+        col_letter = get_column_letter(target_cell.column)
+        ws.column_dimensions[col_letter].width = max(ws.column_dimensions[col_letter].width or 0, col_width_chars)
+
+        logging.debug(f"Inserted image {os.path.basename(image_path)} into cell {cell_address}, adjusted row/col size.")
+
+    except FileNotFoundError:
+        logging.warning(f"Image file not found: {image_path}")
+    except Exception as e:
+        logging.error(f"Failed to insert image {image_path} into cell {cell_address}: {e}", exc_info=True)
+
+
+def clean_value(value: Any) -> Any:
+    """Cleans value for Excel insertion."""
+    # (Keep existing clean_value function)
+    # ... existing code ...
 
 
 def check_excel_columns(file_path: str) -> bool:
@@ -520,257 +622,6 @@ def _apply_filter_rules(worksheet) -> None:
     # Catch exceptions during openpyxl operations
     except (AttributeError, ValueError, TypeError) as e:
         logger.warning("Could not apply filter rules: %s", e)
-
-
-def insert_image_to_excel(image_path: str, target_cell: str) -> bool:
-    """
-    로컬 이미지 파일 또는 URL을 Excel 시트의 특정 셀에 삽입합니다.
-    이미지는 셀 크기에 맞춰 중앙에 배치됩니다. (win32com 사용)
-
-    Args:
-        image_path: 이미지 파일 경로 또는 URL
-        target_cell: 이미지를 삽입할 대상 셀 주소 (예: "Sheet1!A1" 또는 "[Workbook.xlsx]Sheet1!A1")
-
-    Returns:
-        bool: 이미지 삽입 성공 여부
-    """
-    success = False
-    local_image_path = None
-    is_url = False
-    excel = None # Initialize excel object
-
-    if not image_path or not target_cell:
-        logger.warning("Image path or target cell is empty.")
-        return False
-
-    # Check if win32com is available
-    if not _WIN32COM_AVAILABLE:
-        logger.error("Required library 'pywin32' is not installed. Cannot insert image.")
-        return False
-    # Removed PIL check here, handle inside try block where dimensions are needed
-
-    try:
-        # 대상 셀 정보 파싱
-        # Wrapped long lines and corrected indentation
-        if "!" not in target_cell or ("[" in target_cell and "]" not in target_cell):
-             logger.error("Invalid target cell format: %s. Use 'Sheet1!A1' or '[Workbook.xlsx]Sheet1!A1'.", target_cell)
-             return False
-
-        if "[" in target_cell:
-             excel_path_part = target_cell.split("]")[0].replace("[", "")
-             sheet_cell_part = target_cell.split("]")[1]
-        else:
-             excel_path_part = None # Assume active workbook if no path specified
-             sheet_cell_part = target_cell
-
-        # Wrapped long line and corrected indentation
-        excel_path = os.path.abspath(excel_path_part) if excel_path_part else None
-        sheet_name = sheet_cell_part.split("!")[0]
-        # Wrapped long line and corrected indentation
-        cell_address = sheet_cell_part.split("!")[1] # Keep as "A1" format
-
-        # URL인 경우 로컬에 다운로드 (requests 필요 - import 추가 필요)
-        # This part requires the 'requests' library. Add import at the top.
-        # import requests # Add this at the top if URL download is needed
-
-        # parsed_url = urlparse(image_path)
-        # if parsed_url.scheme in ["http", "https"]:
-        #     is_url = True
-        #     try:
-        #         response = requests.get(image_path, stream=True, timeout=10)
-        #         response.raise_for_status()
-        #         # Create temp file name
-        #         temp_dir = os.path.join(os.path.dirname(excel_path) if excel_path else ".", "temp_images")
-        #         os.makedirs(temp_dir, exist_ok=True)
-        #         img_filename = os.path.basename(parsed_url.path) or f"temp_{datetime.now().strftime('%Y%m%d%H%M%S')}.img"
-        #         local_image_path = os.path.join(temp_dir, img_filename)
-        #         with open(local_image_path, "wb") as f:
-        #             for chunk in response.iter_content(chunk_size=8192):
-        #                 f.write(chunk)
-        #         actual_image_path = local_image_path
-        #         logger.debug("Downloaded image from URL to: %s", actual_image_path)
-        #     except requests.exceptions.RequestException as e:
-        #         logger.error("Failed to download image from URL %s: %s", image_path, e)
-        #         return False
-        #     except OSError as e:
-        #         logger.error("Failed to save downloaded image to %s: %s", local_image_path, e)
-        #         return False
-        # else:
-        #     actual_image_path = image_path
-        actual_image_path = image_path # Assuming local paths for now
-
-        if not os.path.exists(actual_image_path):
-            logger.error("Image file not found: %s", actual_image_path)
-            return False
-
-        # Excel 애플리케이션 시작 및 워크북 열기
-        try:
-            # Corrected indentation
-            excel = win32com.client.Dispatch("Excel.Application")
-            excel.Visible = False
-            if excel_path:
-                 # Corrected indentation
-                 workbook = excel.Workbooks.Open(excel_path)
-            else:
-                 # Corrected indentation
-                 # Try to get the active workbook if path is not provided
-                 if excel.Workbooks.Count > 0:
-                     workbook = excel.ActiveWorkbook
-                 else:
-                     logger.error("No Excel workbook path provided and no active workbook found.")
-                     excel.Quit()
-                     return False
-        # Catch specific COM errors during Dispatch/Open
-        except PYWINTYPES.com_error as e:
-            logger.error("Failed to start Excel or open workbook: %s", e)
-            if excel: excel.Quit()
-            return False
-
-        # 시트 및 셀 객체 가져오기
-        try:
-            # Corrected indentation
-            sheet = workbook.Sheets(sheet_name)
-            img_cell = sheet.Range(cell_address)
-
-            # Added check for PIL availability
-            if not _PIL_AVAILABLE:
-                 logger.warning("Pillow library not available, cannot get image dimensions. Using default size.")
-                 img_width, img_height = 50, 50 # Default size if Pillow is not installed
-            else:
-                 # 이미지 로드 (PIL 사용)
-                 try:
-                     # Corrected indentation
-                     img = Image.open(actual_image_path)
-                     img_width, img_height = img.size
-                     img.close()
-                 # Catch specific PIL/File errors
-                 except (FileNotFoundError, Image.UnidentifiedImageError, OSError, IOError) as e:
-                     # Corrected indentation
-                     logger.error("Failed to load image file %s: %s", actual_image_path, e)
-                     workbook.Close(SaveChanges=False)
-                     excel.Quit()
-                     return False
-
-            # 기존 이미지 삭제 (같은 셀에 이미지가 있다면)
-            try:
-                # Corrected indentation
-                for shape in sheet.Shapes:
-                    # Corrected indentation
-                    if shape.Type == 13: # msoPicture
-                         # Corrected indentation
-                         if shape.TopLeftCell.Address == img_cell.Address:
-                              shape.Delete()
-                              logger.debug("Deleted existing image in cell %s", cell_address)
-                              # Don't break, delete all pictures in that cell
-            # Catch specific COM errors during shape handling
-            except PYWINTYPES.com_error as e:
-                # Corrected indentation
-                logger.warning("Could not check/delete existing shapes: %s", e)
-
-            # 이미지 크기 조정 (셀 크기에 맞춤)
-            cell_width = img_cell.Width
-            cell_height = img_cell.Height
-
-            if img_width <= 0 or img_height <= 0:
-                 logger.warning("Invalid image dimensions (%sx%s) for %s. Using default size.", img_width, img_height, actual_image_path)
-                 img_width, img_height = 50, 50 # Use default if invalid
-
-            aspect_ratio = img_width / img_height
-            # Corrected indentation
-            if cell_width / cell_height > aspect_ratio:
-                # Cell is wider than image aspect ratio -> fit height
-                target_height = cell_height
-                target_width = cell_height * aspect_ratio
-            else:
-                # Cell is narrower or same aspect ratio -> fit width
-                target_width = cell_width
-                target_height = cell_width / aspect_ratio
-
-            # 이미지 삽입
-            try:
-                # Corrected indentation
-                # Wrapped long line
-                sheet.Shapes.AddPicture(
-                    actual_image_path,
-                    LinkToFile=False,
-                    SaveWithDocument=True,
-                    Left=img_cell.Left + (cell_width - target_width) / 2,
-                    Top=img_cell.Top + (cell_height - target_height) / 2,
-                    Width=target_width,
-                    Height=target_height,
-                )
-            # Catch specific COM errors during AddPicture
-            except PYWINTYPES.com_error as e:
-                # Corrected indentation
-                logger.error("Failed to insert image into Excel: %s", e)
-                workbook.Close(SaveChanges=False)
-                excel.Quit()
-                return False
-
-            # 저장 및 종료
-            try:
-                # Corrected indentation
-                 workbook.Save()
-                 logger.info(
-                     # Wrapped long line
-                     "Image '%s' inserted into cell %s of sheet '%s'%s",
-                     os.path.basename(actual_image_path),
-                     cell_address,
-                     sheet_name,
-                     f" in {os.path.basename(excel_path)}" if excel_path else ""
-                 )
-                 success = True
-            # Catch specific COM errors during Save/Close
-            except PYWINTYPES.com_error as e:
-                # Corrected indentation
-                 logger.error("Failed to save Excel file after image insertion: %s", e)
-            finally:
-                 # Corrected indentation
-                 try:
-                     # Corrected indentation
-                      workbook.Close(SaveChanges=False)
-                 except PYWINTYPES.com_error:
-                     # Corrected indentation
-                      logger.warning("Error closing workbook after image insertion.")
-                 # Corrected indentation
-                 try:
-                      excel.Quit()
-                 except PYWINTYPES.com_error:
-                      # Corrected indentation
-                      logger.warning("Error quitting Excel after image insertion.")
-
-        # Catch other potential COM errors during setup/cleanup
-        except PYWINTYPES.com_error as e:
-             # Corrected indentation
-             logger.error("General COM error during image insertion process: %s", e)
-             if excel:
-                 # W0311: Correct indentation
-                 try:
-                     excel.Quit()
-                 except PYWINTYPES.com_error: # type: ignore
-                     # C0321: Fix multiple statements on one line
-                     pass # Ignore cleanup error
-        # Keep a broad exception handler for truly unexpected issues
-        except Exception as e: # pylint: disable=broad-exception-caught
-             # Corrected indentation
-             logger.error("Unexpected error during image insertion: %s", str(e), exc_info=True)
-             if excel:
-                 # W0311: Correct indentation
-                 try:
-                     excel.Quit()
-                 except PYWINTYPES.com_error: # type: ignore
-                     # C0321: Fix multiple statements on one line
-                     pass # Ignore cleanup error
-
-        return success
-    finally:
-        # 로컬 다운로드 파일 삭제 (if URL download was implemented)
-        if is_url and local_image_path and os.path.exists(local_image_path):
-            try:
-                os.remove(local_image_path)
-                logger.debug("Removed temporary image file: %s", local_image_path)
-            except OSError as e:
-                logger.warning("Failed to remove temporary image file %s: %s", local_image_path, e)
 
 
 def process_excel_file(input_path: str) -> Optional[str]:

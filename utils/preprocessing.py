@@ -584,26 +584,15 @@ def split_large_file(
 def merge_result_files(file_paths: List[str], original_input: str) -> Optional[str]:
     """분할 처리된 결과 파일들을 다시 하나의 파일로 병합합니다.
 
-    병합된 파일은 원본 입력 파일명에 `_merged_{timestamp}` 접미사가 붙어 저장됩니다.
-    병합 과정에서 각 파일의 헤더는 첫 번째 파일을 제외하고 무시됩니다.
-
     Args:
-        file_paths: 병합할 결과 파일들의 경로 리스트.
-        original_input: 분할 전 원본 입력 파일 경로 (출력 파일명 생성에 사용).
+        file_paths: 병합할 결과 파일 경로 목록
+        original_input: 원본 입력 파일 경로
 
     Returns:
-        Optional[str]: 병합된 최종 파일 경로. 오류 발생 시 None 반환.
-
-    Raises:
-        ValueError: 입력 파일 리스트가 비어있을 경우.
+        Optional[str]: 병합된 파일 경로. 실패 시 None 반환
     """
-    if not file_paths:
-        raise ValueError("File paths list cannot be empty for merging.")
-
-    logger.info("Merging %d result files...", len(file_paths))
-
-    merged_df = pd.DataFrame()
     all_dfs = []
+    logger.info("Starting to merge %d result files", len(file_paths))
 
     try:
         # Read all result files
@@ -613,9 +602,6 @@ def merge_result_files(file_paths: List[str], original_input: str) -> Optional[s
                 continue
             try:
                 df_part = pd.read_excel(fpath)
-                # Assume first file's header is the correct one
-                # For subsequent files, skip header row if reading directly
-                # However, reading all and concatenating is often simpler
                 all_dfs.append(df_part)
                 logger.debug("Read result file: %s (%d rows)", fpath, len(df_part))
             except (FileNotFoundError, pd.errors.EmptyDataError, ValueError, OSError, IOError) as read_err:
@@ -630,18 +616,27 @@ def merge_result_files(file_paths: List[str], original_input: str) -> Optional[s
         merged_df = pd.concat(all_dfs, ignore_index=True)
         logger.info("Concatenated %d DataFrames. Total rows: %d", len(all_dfs), len(merged_df))
 
-        # Create output filename based on the original input file
-        directory = os.path.dirname(original_input)
+        # Create intermediate output filename
         base_name = os.path.splitext(os.path.basename(original_input))[0]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        merged_filename = f"{base_name}_merged_{timestamp}.xlsx"
-        merged_filepath = os.path.join(directory, merged_filename)
+        
+        # Save intermediate result
+        intermediate_filename = f"{base_name}_intermediate_{timestamp}.xlsx"
+        intermediate_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "intermediate")
+        os.makedirs(intermediate_dir, exist_ok=True)
+        intermediate_filepath = os.path.join(intermediate_dir, intermediate_filename)
+        merged_df.to_excel(intermediate_filepath, index=False)
+        logger.info("Intermediate result saved to: %s", intermediate_filepath)
 
-        # Save the merged DataFrame
-        merged_df.to_excel(merged_filepath, index=False)
-        logger.info("Merged result file saved to: %s", merged_filepath)
+        # Save final result
+        final_filename = f"{base_name}_final_{timestamp}.xlsx"
+        final_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "final")
+        os.makedirs(final_dir, exist_ok=True)
+        final_filepath = os.path.join(final_dir, final_filename)
+        merged_df.to_excel(final_filepath, index=False)
+        logger.info("Final result saved to: %s", final_filepath)
 
-        return merged_filepath
+        return final_filepath
 
     except (MemoryError, ValueError, TypeError, KeyError, pd.errors.InvalidIndexError) as merge_err:
         logger.error(f"Error merging DataFrames: {merge_err}")

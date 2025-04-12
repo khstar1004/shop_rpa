@@ -751,20 +751,22 @@ class MainWindow(QMainWindow):
 
         if primary_path and os.path.exists(primary_path):
             message += (
-                tr.get_text("primary_report", filename=os.path.basename(primary_path))
+                tr.get_text("intermediate_report", filename=os.path.basename(primary_path))
                 + "\n"
             )
 
         if secondary_path and os.path.exists(secondary_path):
             message += (
-                tr.get_text(
-                    "secondary_report", filename=os.path.basename(secondary_path)
-                )
+                tr.get_text("final_report", filename=os.path.basename(secondary_path))
                 + "\n"
             )
 
-        message += f"\n{tr.get_text('output_directory', 
-                                   path=os.path.dirname(primary_path or secondary_path))}"
+        # Show both intermediate and final directories
+        intermediate_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "intermediate")
+        final_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "final")
+        
+        message += f"\n{tr.get_text('intermediate_directory', path=intermediate_dir)}"
+        message += f"\n{tr.get_text('final_directory', path=final_dir)}"
 
         QMessageBox.information(self, tr.get_text("complete"), message)
 

@@ -1,181 +1,193 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
-Excel 파일 처리 스크립트
+엑셀 파일 처리 스크립트.
 
-PythonScript 폴더의 Excel 관련 기능을 활용하여 일반적인 Excel 작업을 수행합니다.
+이 스크립트는 utils.excel_utils 모듈의 함수들을 사용하여
+다양한 엑셀 처리 작업을 수행합니다.
+
+인자에 따라 특정 함수를 호출합니다.
 """
 
 import argparse
 import logging
 import os
 import sys
-from datetime import datetime
-from typing import Optional
+from urllib.parse import urlparse # For URL check
 
-# 로깅 설정
-def setup_logging(log_dir: Optional[str] = None) -> None:
-    """로깅 설정"""
-    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    
-    # 로그 디렉토리 설정
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, f"excel_process_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-        logging.basicConfig(
-            level=logging.INFO,
-            format=log_format,
-            handlers=[
-                logging.FileHandler(log_file),
-                logging.StreamHandler(sys.stdout)
-            ]
-        )
-    else:
-        logging.basicConfig(
-            level=logging.INFO,
-            format=log_format,
-            handlers=[logging.StreamHandler(sys.stdout)]
-        )
-    
-    logger = logging.getLogger()
-    logger.info("로깅 설정 완료")
-    return logger
+# 프로젝트 루트 경로 설정 (스크립트 위치 기반)
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+sys.path.append(project_root)
 
+# --- 필요한 함수 임포트 ---
+from utils.excel_utils import (
+    check_excel_columns,
+    convert_xls_to_xlsx,
+    add_hyperlinks_to_excel,
+    filter_excel_by_price_diff,
+    insert_image_to_cell, # Use openpyxl version
+    process_excel_file,
+    download_image, # Import download_image for URL handling
+)
+from openpyxl import load_workbook # Import openpyxl functions
+from openpyxl.utils.exceptions import InvalidFileException
+from pathlib import Path # For temporary file handling
+
+# --- 로깅 설정 ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("process_excel.log", encoding="utf-8"),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+# --- 메인 함수 ---
 def main():
-    """메인 함수"""
-    # 명령줄 인자 처리
-    parser = argparse.ArgumentParser(description="Excel 파일 처리 유틸리티")
-    parser.add_argument("--input-file", help="처리할 Excel 파일 경로")
-    parser.add_argument("--input-dir", help="처리할 Excel 파일이 있는 디렉토리 (XLS 파일 변환에 사용)")
-    parser.add_argument("--output-dir", help="결과 파일을 저장할 디렉토리")
-    parser.add_argument("--log-dir", help="로그 파일을 저장할 디렉토리")
-    
-    # 기능 선택 옵션
-    parser.add_argument("--convert-xls", action="store_true", help="XLS 파일을 XLSX로 변환")
-    parser.add_argument("--check-columns", action="store_true", help="필요한 컬럼이 있는지 확인하고 추가")
-    parser.add_argument("--add-hyperlinks", action="store_true", help="하이퍼링크 추가")
-    parser.add_argument("--filter-price-diff", action="store_true", help="가격 차이가 있는 항목만 필터링")
-    parser.add_argument("--all", action="store_true", help="모든 기능 적용 (위 옵션들의 조합)")
-    
-    # 이미지 삽입 관련 옵션
-    parser.add_argument("--insert-image", action="store_true", help="이미지 삽입 모드")
-    parser.add_argument("--image-path", help="삽입할 이미지 파일 경로")
-    parser.add_argument("--target-cell", help="이미지를 삽입할 셀 주소 (예: A1)")
-    
+    """스크립트 실행 진입점"""
+    parser = argparse.ArgumentParser(description="Process Excel files.")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # 'check' command
+    parser_check = subparsers.add_parser("check", help="Check and add columns to Excel.")
+    parser_check.add_argument("file_path", help="Path to the Excel file (.xlsx)")
+
+    # 'convert' command
+    parser_convert = subparsers.add_parser("convert", help="Convert XLS to XLSX.")
+    # Changed argument to directory
+    parser_convert.add_argument("directory", help="Directory containing XLS files")
+
+    # 'format' command
+    parser_format = subparsers.add_parser("format", help="Add hyperlinks and format.")
+    parser_format.add_argument("file_path", help="Path to the Excel file (.xlsx)")
+
+    # 'filter' command
+    parser_filter = subparsers.add_parser("filter", help="Filter by negative price diff.")
+    parser_filter.add_argument("file_path", help="Path to the Excel file (.xlsx)")
+
+    # 'insert_image' command (modified)
+    parser_image = subparsers.add_parser(
+        "insert_image", help="Insert image into a cell using openpyxl."
+    )
+    parser_image.add_argument("excel_file", help="Path to the target Excel file (.xlsx)")
+    parser_image.add_argument("image_path", help="Path or URL to the image file")
+    parser_image.add_argument("target_cell", help="Target cell address (e.g., 'A1')")
+    parser_image.add_argument("--sheet_name", help="Target sheet name (optional, defaults to active sheet)", default=None)
+
+    # 'process_all' command
+    parser_all = subparsers.add_parser(
+        "process_all", help="Run full processing pipeline (convert, check, filter, format)."
+    )
+    parser_all.add_argument("input_path", help="Path to the input Excel file (.xls or .xlsx)")
+
     args = parser.parse_args()
-    
-    # 로깅 설정
-    logger = setup_logging(args.log_dir)
-    
-    try:
-        # utils 모듈에서 필요한 함수 가져오기
-        from utils.excel_utils import (
-            convert_xls_to_xlsx, 
-            check_excel_columns, 
-            add_hyperlinks_to_excel, 
-            filter_excel_by_price_diff, 
-            insert_image_to_excel,
-            process_excel_file
+
+    # --- Command Execution ---
+    if args.command == "check":
+        logger.info(f"Executing 'check' command for {args.file_path}")
+        check_excel_columns(args.file_path)
+    elif args.command == "convert":
+        logger.info(f"Executing 'convert' command for directory {args.directory}")
+        convert_xls_to_xlsx(args.directory)
+    elif args.command == "format":
+        logger.info(f"Executing 'format' command for {args.file_path}")
+        add_hyperlinks_to_excel(args.file_path)
+    elif args.command == "filter":
+        logger.info(f"Executing 'filter' command for {args.file_path}")
+        filter_excel_by_price_diff(args.file_path)
+
+    elif args.command == "insert_image":
+        logger.info(
+            f"Executing 'insert_image' for {args.excel_file}, image {args.image_path}, cell {args.target_cell}"
         )
-        
-        # 이미지 삽입 모드
-        if args.insert_image:
-            if not args.image_path or not args.target_cell:
-                logger.error("이미지 삽입 모드에서는 --image-path와 --target-cell을 모두 지정해야 합니다.")
-                return 1
-            
-            result = insert_image_to_excel(args.image_path, args.target_cell)
-            if result:
-                logger.info("이미지가 성공적으로 삽입되었습니다.")
-                return 0
-            else:
-                logger.error("이미지 삽입에 실패했습니다.")
-                return 1
-        
-        # 처리할 파일이 지정되지 않은 경우 검사
-        if not args.input_file and not args.input_dir:
-            logger.error("--input-file 또는 --input-dir 중 하나가 필요합니다.")
-            return 1
-        
-        # 전체 프로세스 실행
-        if args.all:
-            if args.input_file:
-                result_path = process_excel_file(args.input_file)
-                if result_path:
-                    logger.info(f"파일 처리 완료: {result_path}")
-                    return 0
+        # --- Modified image insertion logic --- 
+        excel_file_path = args.excel_file
+        image_source = args.image_path
+        target_cell = args.target_cell
+        sheet_name = args.sheet_name
+        local_image_path = None
+        temp_file_created = False
+
+        try:
+            # Handle URL images: Download first
+            if urlparse(image_source).scheme in ["http", "https"]:
+                logger.info(f"Downloading image from URL: {image_source}")
+                img_bytes = download_image(image_source) # Use the existing download function
+                if img_bytes:
+                    # Create a temporary file path
+                    temp_dir = Path(os.path.dirname(excel_file_path)) / "temp_images"
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    # Generate a safe filename (replace invalid chars)
+                    safe_filename = "".join(c if c.isalnum() or c in ('.', '_') else '_' for c in Path(image_source).name)
+                    if not safe_filename: safe_filename = f"temp_image_{os.urandom(4).hex()}.png"
+                    temp_file_path = temp_dir / safe_filename
+                    
+                    with open(temp_file_path, "wb") as f:
+                        f.write(img_bytes)
+                    local_image_path = str(temp_file_path)
+                    temp_file_created = True
+                    logger.info(f"Image downloaded and saved to temporary path: {local_image_path}")
                 else:
-                    logger.error("파일 처리에 실패했습니다.")
-                    return 1
+                    logger.error(f"Failed to download image from URL: {image_source}")
+                    return # Exit if download fails
             else:
-                logger.error("--all 옵션을 사용할 때는 --input-file이 필요합니다.")
-                return 1
-        
-        # 개별 기능 실행
-        result_path = None
-        
-        # XLS -> XLSX 변환
-        if args.convert_xls:
-            input_dir = args.input_dir or os.path.dirname(args.input_file)
-            result_path = convert_xls_to_xlsx(input_dir)
-            if result_path:
-                logger.info(f"XLS 파일이 XLSX로 변환되었습니다: {result_path}")
-                # 다음 단계에서 변환된 파일 사용
-                args.input_file = result_path
-            else:
-                logger.warning("XLS 파일 변환에 실패했습니다.")
-        
-        # 컬럼 확인 및 추가
-        if args.check_columns:
-            if not args.input_file:
-                logger.error("--check-columns 옵션을 사용할 때는 --input-file이 필요합니다.")
-                return 1
-            
-            result = check_excel_columns(args.input_file)
-            if result:
-                logger.info(f"필요한 컬럼이 확인 및 추가되었습니다: {args.input_file}")
-                result_path = args.input_file
-            else:
-                logger.error("컬럼 확인 및 추가에 실패했습니다.")
-                return 1
-        
-        # 하이퍼링크 추가
-        if args.add_hyperlinks:
-            if not args.input_file:
-                logger.error("--add-hyperlinks 옵션을 사용할 때는 --input-file이 필요합니다.")
-                return 1
-            
-            input_file = result_path or args.input_file
-            result_path = add_hyperlinks_to_excel(input_file)
-            if result_path != input_file:
-                logger.info(f"하이퍼링크가 추가된 파일이 생성되었습니다: {result_path}")
-            else:
-                logger.error("하이퍼링크 추가에 실패했습니다.")
-                return 1
-        
-        # 가격 차이 필터링
-        if args.filter_price_diff:
-            if not result_path and not args.input_file:
-                logger.error("--filter-price-diff 옵션을 사용할 때는 처리할 파일이 필요합니다.")
-                return 1
-            
-            input_file = result_path or args.input_file
-            result_path = filter_excel_by_price_diff(input_file)
-            if result_path != input_file:
-                logger.info(f"가격 차이가 필터링된 파일이 생성되었습니다: {result_path}")
-            else:
-                logger.warning("가격 차이 필터링에 실패했거나 필터링할 항목이 없습니다.")
-        
-        # 결과 출력
-        if result_path:
-            logger.info(f"모든 작업이 완료되었습니다. 최종 결과 파일: {result_path}")
-            return 0
+                # Assume local path
+                local_image_path = image_source
+
+            # Check if local image path exists
+            if not local_image_path or not os.path.exists(local_image_path):
+                logger.error(f"Local image file not found or could not be obtained: {local_image_path}")
+                return
+
+            # Load workbook and get worksheet
+            try:
+                wb = load_workbook(excel_file_path)
+                if sheet_name:
+                    ws = wb[sheet_name]
+                else:
+                    ws = wb.active # Default to active sheet
+            except FileNotFoundError:
+                 logger.error(f"Excel file not found: {excel_file_path}")
+                 return
+            except KeyError:
+                 logger.error(f"Sheet '{sheet_name}' not found in {excel_file_path}")
+                 return
+            except InvalidFileException:
+                 logger.error(f"Invalid Excel file (maybe corrupted or wrong format): {excel_file_path}")
+                 return
+
+            # Insert image using openpyxl function
+            insert_image_to_cell(ws, local_image_path, target_cell)
+            # Note: insert_image_to_cell handles its own logging/errors
+
+            # Save the workbook
+            wb.save(excel_file_path)
+            logger.info(f"Image inserted into {target_cell} in {excel_file_path} and file saved.")
+
+        except Exception as e:
+            logger.error(f"An error occurred during image insertion: {e}", exc_info=True)
+        finally:
+            # Clean up temporary file if created
+            if temp_file_created and local_image_path and os.path.exists(local_image_path):
+                try:
+                    os.remove(local_image_path)
+                    logger.info(f"Removed temporary image file: {local_image_path}")
+                except OSError as e_remove:
+                    logger.warning(f"Failed to remove temporary image file {local_image_path}: {e_remove}")
+        # --- End of modified logic ---
+
+    elif args.command == "process_all":
+        logger.info(f"Executing 'process_all' command for {args.input_path}")
+        final_output = process_excel_file(args.input_path)
+        if final_output:
+            logger.info(f"Processing complete. Final output: {final_output}")
         else:
-            logger.warning("작업은 완료되었지만 결과 파일이 생성되지 않았습니다.")
-            return 1
-        
-    except Exception as e:
-        logger.exception(f"처리 중 오류가 발생했습니다: {str(e)}")
-        return 1
+            logger.error("Processing failed.")
+    else:
+        parser.print_help()
+
 
 if __name__ == "__main__":
-    sys.exit(main()) 
+    main() 

@@ -78,8 +78,7 @@ class ProcessingThread(QThread):
                     self.processor.process_file(input_file)
                 )
                 if self._is_running:
-                    self.progress_updated.emit(100)
-                    self.progress_updated.emit(total_items, total_items) # Final state
+                    self.progress_updated.emit(total_items, total_items)  # Final state
                     self.status_updated.emit("처리 완료!")
                     self.processing_complete.emit(
                         primary_report_path, secondary_report_path
@@ -104,20 +103,7 @@ class ProcessingThread(QThread):
                     )
 
                 if self._is_running:
-                    self.progress_updated.emit(100)
-                    # Get total items again for final progress state if not limited
-                    if not self.product_limit:
-                        df = pd.read_excel(input_file)
-                        total_items = len(df)
-                    else:
-                        total_items = self.product_limit
-
-                    # Ensure total_items is not zero before emitting
-                    if total_items > 0:
-                        self.progress_updated.emit(total_items, total_items)
-                    else:
-                        self.progress_updated.emit(0, 0) # Handle zero case
-
+                    self.progress_updated.emit(total_items, total_items)  # Final state
                     if result_file:
                         self.status_updated.emit("처리 완료!")
                         self.processing_finished.emit([result_file])
