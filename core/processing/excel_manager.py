@@ -740,22 +740,30 @@ class ExcelManager:
                         row["판매단가(V포함)(2)"] - row["판매단가(V포함)"]
                         if pd.notna(row.get("판매단가(V포함)(2)"))
                         and pd.notna(row.get("판매단가(V포함)"))
+                        and row["판매단가(V포함)"] > 0  # 본사 가격이 0보다 큰 경우만 계산
+                        and row["판매단가(V포함)(2)"] > 0  # 고려기프트 가격이 0보다 큰 경우만 계산
+                        and abs(row["판매단가(V포함)(2)"] - row["판매단가(V포함)"]) < row["판매단가(V포함)"] * 5  # 가격차이가 본사 가격의 5배를 넘지 않도록 제한
                         else None
                     ),
                     axis=1,
                 )
 
-                # 가격 차이 백분율 계산
+                # 가격 차이 백분율 계산 (절대값 사용)
                 df["가격차이(2)(%)"] = df.apply(
                     lambda row: (
-                        (
-                            (row["판매단가(V포함)(2)"] - row["판매단가(V포함)"])
-                            / row["판매단가(V포함)"]
+                        round(
+                            (
+                                (row["판매단가(V포함)(2)"] - row["판매단가(V포함)"])
+                                / row["판매단가(V포함)"]
+                            )
+                            * 100,
+                            2,  # 소수점 2자리까지만 표시
                         )
-                        * 100
                         if pd.notna(row.get("판매단가(V포함)(2)"))
                         and pd.notna(row.get("판매단가(V포함)"))
-                        and row["판매단가(V포함)"] != 0
+                        and row["판매단가(V포함)"] > 0  # 본사 가격이 0보다 큰 경우만 계산
+                        and row["판매단가(V포함)(2)"] > 0  # 고려기프트 가격이 0보다 큰 경우만 계산
+                        and abs(row["판매단가(V포함)(2)"] - row["판매단가(V포함)"]) < row["판매단가(V포함)"] * 5  # 가격차이가 본사 가격의 5배를 넘지 않도록 제한
                         else None
                     ),
                     axis=1,
@@ -775,28 +783,36 @@ class ExcelManager:
                         row["판매단가(V포함)(3)"] - row["판매단가(V포함)"]
                         if pd.notna(row.get("판매단가(V포함)(3)"))
                         and pd.notna(row.get("판매단가(V포함)"))
+                        and row["판매단가(V포함)"] > 0  # 본사 가격이 0보다 큰 경우만 계산
+                        and row["판매단가(V포함)(3)"] > 0  # 네이버 가격이 0보다 큰 경우만 계산
+                        and abs(row["판매단가(V포함)(3)"] - row["판매단가(V포함)"]) < row["판매단가(V포함)"] * 5  # 가격차이가 본사 가격의 5배를 넘지 않도록 제한
                         else None
                     ),
                     axis=1,
                 )
 
-                # 가격 차이 백분율 계산
+                # 가격 차이 백분율 계산 (절대값 사용)
                 df["가격차이(3)(%)"] = df.apply(
                     lambda row: (
-                        (
-                            (row["판매단가(V포함)(3)"] - row["판매단가(V포함)"])
-                            / row["판매단가(V포함)"]
+                        round(
+                            (
+                                (row["판매단가(V포함)(3)"] - row["판매단가(V포함)"])
+                                / row["판매단가(V포함)"]
+                            )
+                            * 100,
+                            2,  # 소수점 2자리까지만 표시
                         )
-                        * 100
                         if pd.notna(row.get("판매단가(V포함)(3)"))
                         and pd.notna(row.get("판매단가(V포함)"))
-                        and row["판매단가(V포함)"] != 0
+                        and row["판매단가(V포함)"] > 0  # 본사 가격이 0보다 큰 경우만 계산
+                        and row["판매단가(V포함)(3)"] > 0  # 네이버 가격이 0보다 큰 경우만 계산
+                        and abs(row["판매단가(V포함)(3)"] - row["판매단가(V포함)"]) < row["판매단가(V포함)"] * 5  # 가격차이가 본사 가격의 5배를 넘지 않도록 제한
                         else None
                     ),
                     axis=1,
                 )
         except Exception as e:
-            self.logger.warning(f"가격 차이 계산 중 오류 발생: {str(e)}")
+            self.logger.error(f"가격 차이 계산 중 오류 발생: {str(e)}", exc_info=True)
 
     def _reorder_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """컬럼 순서를 예시와 일치하도록 정렬합니다."""
@@ -873,14 +889,28 @@ class ExcelManager:
                 else:
                     row[field] = ""
 
+        # 이미지 URL 처리 함수
+        def process_image_url(url):
+            if not url:
+                return ""
+            try:
+                # HTTP를 HTTPS로 변환
+                if url.startswith('http:'):
+                    url = 'https:' + url[5:]
+                # HTTPS로 시작하는 경우에만 IMAGE 함수 적용
+                if url.startswith('https:'):
+                    # 이미지 크기 제한을 위한 파라미터 추가
+                    return f'=IMAGE("{url}", 2)'
+                return url
+            except Exception as e:
+                self.logger.warning(f"이미지 URL 처리 중 오류 발생: {str(e)}")
+                return ""
+
         # 기본 이미지 URL 설정
         if "본사 이미지" not in row and hasattr(result.source_product, "image_url") and result.source_product.image_url:
-            image_url = result.source_product.image_url
-            if image_url.startswith('http'):
-                # IMAGE 함수로 변환 (fit to cell)
-                row["본사 이미지"] = f'=IMAGE("{image_url}",2)'
-            else:
-                row["본사 이미지"] = image_url
+            row["본사 이미지"] = process_image_url(result.source_product.image_url)
+        elif "본사 이미지" in row and isinstance(row["본사 이미지"], str) and row["본사 이미지"].startswith('http'):
+            row["본사 이미지"] = process_image_url(row["본사 이미지"])
 
         # 기본 URL 설정
         if "본사상품링크" not in row and hasattr(result.source_product, "url"):
@@ -906,139 +936,195 @@ class ExcelManager:
 
     def _add_koryo_match_data(self, row: Dict, koryo_match: object) -> None:
         """고려기프트 매칭 데이터 추가"""
-        if hasattr(koryo_match, "matched_product"):
-            match_product = koryo_match.matched_product
+        try:
+            if hasattr(koryo_match, "matched_product"):
+                match_product = koryo_match.matched_product
 
-            # 매칭 성공 여부 확인
-            match_success = getattr(
-                koryo_match, "text_similarity", 0
-            ) >= self.config.get("MATCHING", {}).get("TEXT_SIMILARITY_THRESHOLD", 0.75)
+                # 매칭 성공 여부 확인 (유사도 기준을 0.85로 상향)
+                match_success = getattr(
+                    koryo_match, "text_similarity", 0
+                ) >= self.config.get("MATCHING", {}).get("TEXT_SIMILARITY_THRESHOLD", 0.85)
 
-            # 가격 정보
-            if hasattr(match_product, "price"):
-                row["판매단가(V포함)(2)"] = match_product.price
+                # 카테고리 매칭 확인
+                if hasattr(match_product, "category") and hasattr(koryo_match.source_product, "category"):
+                    category_match = match_product.category == koryo_match.source_product.category
+                    if not category_match:
+                        match_success = False
 
-            # 가격 차이 정보
-            if hasattr(koryo_match, "price_difference"):
-                row["가격차이(2)"] = koryo_match.price_difference
+                # 브랜드 매칭 확인
+                if hasattr(match_product, "brand") and hasattr(koryo_match.source_product, "brand"):
+                    brand_match = match_product.brand == koryo_match.source_product.brand
+                    if not brand_match:
+                        match_success = False
 
-            if hasattr(koryo_match, "price_difference_percent"):
-                row["가격차이(2)%"] = koryo_match.price_difference_percent
+                # 가격 정보
+                if hasattr(match_product, "price"):
+                    price_in_range = self._is_price_in_range(match_product.price)
+                    if not price_in_range:
+                        match_success = False
+                    row["판매단가(V포함)(2)"] = match_product.price
 
-            # 텍스트 유사도
-            if hasattr(koryo_match, "text_similarity"):
-                row["텍스트유사도(2)"] = koryo_match.text_similarity
+                # 가격 차이 정보
+                if hasattr(koryo_match, "price_difference"):
+                    row["가격차이(2)"] = koryo_match.price_difference
 
-            # 이미지 및 링크
-            if hasattr(match_product, "image_url") and match_product.image_url:
-                image_url = match_product.image_url
-                if image_url.startswith('http'):
-                    # IMAGE 함수로 변환 (fit to cell)
-                    row["고려기프트 이미지"] = f'=IMAGE("{image_url}",2)'
+                if hasattr(koryo_match, "price_difference_percent"):
+                    row["가격차이(2)%"] = koryo_match.price_difference_percent
+
+                # 텍스트 유사도
+                if hasattr(koryo_match, "text_similarity"):
+                    row["텍스트유사도(2)"] = round(koryo_match.text_similarity, 2)  # 소수점 2자리까지만 표시
+
+                # 이미지 및 링크
+                if hasattr(match_product, "image_url") and match_product.image_url:
+                    image_url = match_product.image_url
+                    if image_url.startswith('http:'):
+                        image_url = 'https:' + image_url[5:]
+                    if image_url.startswith('https:'):
+                        # 이미지 크기 제한을 위한 파라미터 추가
+                        row["고려기프트 이미지"] = f'=IMAGE("{image_url}", 2)'
+                    else:
+                        row["고려기프트 이미지"] = image_url
                 else:
-                    row["고려기프트 이미지"] = image_url
-            else:
-                # 이미지 URL이 없는 경우 메시지 설정
-                row["고려기프트 이미지"] = "이미지를 찾을 수 없음"
+                    # 이미지 URL이 없는 경우 메시지 설정
+                    row["고려기프트 이미지"] = "이미지를 찾을 수 없음"
 
-            if hasattr(match_product, "url") and match_product.url:
-                row["고려기프트 상품링크"] = match_product.url
-            else:
-                # 링크가 없는 경우 메시지 설정
-                row["고려기프트 상품링크"] = "상품 링크를 찾을 수 없음"
+                if hasattr(match_product, "url") and match_product.url:
+                    row["고려기프트 상품링크"] = match_product.url
+                else:
+                    # 링크가 없는 경우 메시지 설정
+                    row["고려기프트 상품링크"] = "상품 링크를 찾을 수 없음"
 
-            # 매칭 실패 시 메시지 설정
-            if not match_success:
-                text_similarity = getattr(koryo_match, "text_similarity", 0)
-                threshold = self.config.get("MATCHING", {}).get(
-                    "TEXT_SIMILARITY_THRESHOLD", 0.75
-                )
-                row["매칭_상황(2)"] = (
-                    f"일정 정확도({threshold:.2f}) 이상의 텍스트 유사율({text_similarity:.2f})을 가진 상품이 없음"
-                )
-        else:
-            # 매칭된 상품이 없는 경우
-            row["매칭_상황(2)"] = "고려기프트에서 매칭된 상품이 없음"
-            row["판매단가(V포함)(2)"] = 0
-            row["가격차이(2)"] = 0
-            row["가격차이(2)%"] = 0
-            row["고려기프트 이미지"] = "상품을 찾을 수 없음"
-            row["고려기프트 상품링크"] = "상품을 찾을 수 없음"
+                # 매칭 실패 시 메시지 설정
+                if not match_success:
+                    text_similarity = getattr(koryo_match, "text_similarity", 0)
+                    category_match = getattr(koryo_match, "category_match", True)
+                    brand_match = getattr(koryo_match, "brand_match", True)
+                    price_in_range = getattr(koryo_match, "price_in_range", True)
+                    
+                    error_messages = []
+                    if text_similarity < 0.85:
+                        error_messages.append(f"유사도: {text_similarity:.2f}")
+                    if not category_match:
+                        error_messages.append("카테고리 불일치")
+                    if not brand_match:
+                        error_messages.append("브랜드 불일치")
+                    if not price_in_range:
+                        error_messages.append("가격 범위 초과")
+                    
+                    row["매칭_상황(2)"] = f"매칭 실패 ({', '.join(error_messages)})"
+            else:
+                # 매칭된 상품이 없는 경우
+                row["매칭_상황(2)"] = "고려기프트에서 상품을 찾지 못했습니다"
+                row["판매단가(V포함)(2)"] = 0
+                row["가격차이(2)"] = 0
+                row["가격차이(2)%"] = 0
+                row["고려기프트 이미지"] = "상품을 찾을 수 없음"
+                row["고려기프트 상품링크"] = "상품을 찾을 수 없음"
+        except Exception as e:
+            self.logger.error(f"고려기프트 매칭 데이터 추가 중 오류 발생: {str(e)}", exc_info=True)
+            row["매칭_상황(2)"] = f"오류 발생: {str(e)}"
 
     def _add_naver_match_data(self, row: Dict, naver_match: object) -> None:
         """네이버 매칭 데이터 추가"""
-        if hasattr(naver_match, "matched_product"):
-            match_product = naver_match.matched_product
+        try:
+            if hasattr(naver_match, "matched_product"):
+                match_product = naver_match.matched_product
 
-            # 매칭 성공 여부 확인
-            match_success = getattr(
-                naver_match, "text_similarity", 0
-            ) >= self.config.get("MATCHING", {}).get("TEXT_SIMILARITY_THRESHOLD", 0.75)
+                # 매칭 성공 여부 확인 (유사도 기준을 0.85로 상향)
+                match_success = getattr(
+                    naver_match, "text_similarity", 0
+                ) >= self.config.get("MATCHING", {}).get("TEXT_SIMILARITY_THRESHOLD", 0.85)
 
-            # 공급사 정보
-            if hasattr(match_product, "brand") and match_product.brand:
-                row["공급사명"] = match_product.brand
-            else:
-                row["공급사명"] = "정보 없음"
+                # 카테고리 매칭 확인
+                if hasattr(match_product, "category") and hasattr(naver_match.source_product, "category"):
+                    category_match = match_product.category == naver_match.source_product.category
+                    if not category_match:
+                        match_success = False
 
-            # 가격 정보
-            if hasattr(match_product, "price"):
-                price_in_range = self._is_price_in_range(match_product.price)
-                row["판매단가(V포함)(3)"] = match_product.price
+                # 브랜드 매칭 확인
+                if hasattr(match_product, "brand") and hasattr(naver_match.source_product, "brand"):
+                    brand_match = match_product.brand == naver_match.source_product.brand
+                    if not brand_match:
+                        match_success = False
 
-                if not price_in_range:
-                    row["매칭_상황(3)"] = "가격이 범위 내에 없음"
-
-            # 가격 차이 정보
-            if hasattr(naver_match, "price_difference"):
-                row["가격차이(3)"] = naver_match.price_difference
-
-            if hasattr(naver_match, "price_difference_percent"):
-                row["가격차이(3)%"] = naver_match.price_difference_percent
-
-            # 텍스트 유사도
-            if hasattr(naver_match, "text_similarity"):
-                row["텍스트유사도(3)"] = naver_match.text_similarity
-
-            # 이미지 및 링크
-            if hasattr(match_product, "image_url") and match_product.image_url:
-                image_url = match_product.image_url
-                if image_url.startswith('http'):
-                    # IMAGE 함수로 변환 (fit to cell)
-                    row["네이버 이미지"] = f'=IMAGE("{image_url}",2)'
+                # 공급사 정보
+                if hasattr(match_product, "brand") and match_product.brand:
+                    row["공급사명"] = match_product.brand
                 else:
-                    row["네이버 이미지"] = image_url
-            else:
-                # 이미지 URL이 없는 경우 메시지 설정
-                row["네이버 이미지"] = "이미지를 찾을 수 없음"
+                    row["공급사명"] = "정보 없음"
 
-            if hasattr(match_product, "url") and match_product.url:
-                row["네이버 쇼핑 링크"] = match_product.url
-                row["공급사 상품링크"] = match_product.url
-            else:
-                # 링크가 없는 경우 메시지 설정
-                row["네이버 쇼핑 링크"] = "상품 링크를 찾을 수 없음"
-                row["공급사 상품링크"] = "상품 링크를 찾을 수 없음"
+                # 가격 정보
+                if hasattr(match_product, "price"):
+                    price_in_range = self._is_price_in_range(match_product.price)
+                    if not price_in_range:
+                        match_success = False
+                    row["판매단가(V포함)(3)"] = match_product.price
 
-            # 매칭 실패 시 메시지 설정
-            if not match_success and not row.get("매칭_상황(3)"):
-                text_similarity = getattr(naver_match, "text_similarity", 0)
-                threshold = self.config.get("MATCHING", {}).get(
-                    "TEXT_SIMILARITY_THRESHOLD", 0.75
-                )
-                row["매칭_상황(3)"] = (
-                    f"일정 정확도({threshold:.2f}) 이상의 텍스트 유사율({text_similarity:.2f})을 가진 상품이 없음"
-                )
-        else:
-            # 매칭된 상품이 없는 경우
-            row["매칭_상황(3)"] = "네이버에서 검색된 상품이 없음"
-            row["판매단가(V포함)(3)"] = 0
-            row["가격차이(3)"] = 0
-            row["가격차이(3)%"] = 0
-            row["공급사명"] = "상품을 찾을 수 없음"
-            row["네이버 이미지"] = "상품을 찾을 수 없음"
-            row["네이버 쇼핑 링크"] = "상품을 찾을 수 없음"
-            row["공급사 상품링크"] = "상품을 찾을 수 없음"
+                # 가격 차이 정보
+                if hasattr(naver_match, "price_difference"):
+                    row["가격차이(3)"] = naver_match.price_difference
+
+                if hasattr(naver_match, "price_difference_percent"):
+                    row["가격차이(3)%"] = naver_match.price_difference_percent
+
+                # 텍스트 유사도
+                if hasattr(naver_match, "text_similarity"):
+                    row["텍스트유사도(3)"] = round(naver_match.text_similarity, 2)  # 소수점 2자리까지만 표시
+
+                # 이미지 및 링크
+                if hasattr(match_product, "image_url") and match_product.image_url:
+                    image_url = match_product.image_url
+                    if image_url.startswith('http:'):
+                        image_url = 'https:' + image_url[5:]
+                    if image_url.startswith('https:'):
+                        # 이미지 크기 제한을 위한 파라미터 추가
+                        row["네이버 이미지"] = f'=IMAGE("{image_url}", 2)'
+                    else:
+                        row["네이버 이미지"] = image_url
+                else:
+                    # 이미지 URL이 없는 경우 메시지 설정
+                    row["네이버 이미지"] = "이미지를 찾을 수 없음"
+
+                if hasattr(match_product, "url") and match_product.url:
+                    row["네이버 쇼핑 링크"] = match_product.url
+                    row["공급사 상품링크"] = match_product.url
+                else:
+                    # 링크가 없는 경우 메시지 설정
+                    row["네이버 쇼핑 링크"] = "상품 링크를 찾을 수 없음"
+                    row["공급사 상품링크"] = "상품 링크를 찾을 수 없음"
+
+                # 매칭 실패 시 메시지 설정
+                if not match_success and not row.get("매칭_상황(3)"):
+                    text_similarity = getattr(naver_match, "text_similarity", 0)
+                    category_match = getattr(naver_match, "category_match", True)
+                    brand_match = getattr(naver_match, "brand_match", True)
+                    price_in_range = getattr(naver_match, "price_in_range", True)
+                    
+                    error_messages = []
+                    if text_similarity < 0.85:
+                        error_messages.append(f"유사도: {text_similarity:.2f}")
+                    if not category_match:
+                        error_messages.append("카테고리 불일치")
+                    if not brand_match:
+                        error_messages.append("브랜드 불일치")
+                    if not price_in_range:
+                        error_messages.append("가격 범위 초과")
+                    
+                    row["매칭_상황(3)"] = f"매칭 실패 ({', '.join(error_messages)})"
+            else:
+                # 매칭된 상품이 없는 경우
+                row["매칭_상황(3)"] = "네이버에서 상품을 찾지 못했습니다"
+                row["판매단가(V포함)(3)"] = 0
+                row["가격차이(3)"] = 0
+                row["가격차이(3)%"] = 0
+                row["공급사명"] = "상품을 찾을 수 없음"
+                row["네이버 이미지"] = "상품을 찾을 수 없음"
+                row["네이버 쇼핑 링크"] = "상품을 찾을 수 없음"
+                row["공급사 상품링크"] = "상품을 찾을 수 없음"
+        except Exception as e:
+            self.logger.error(f"네이버 매칭 데이터 추가 중 오류 발생: {str(e)}", exc_info=True)
+            row["매칭_상황(3)"] = f"오류 발생: {str(e)}"
 
     def _is_price_in_range(self, price) -> bool:
         """Check if price is within the valid range."""
