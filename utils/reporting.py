@@ -4,6 +4,8 @@ import os
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from pathlib import Path
+import shutil
 
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -645,10 +647,26 @@ def _generate_report(
     """
     # Handle default value for image_columns
     image_columns = image_columns or []
-    # Removed redundant logger definition
 
-    output_dir = config.get("PATHS", {}).get("OUTPUT_DIR", ".")
-    report_path = os.path.join(output_dir, output_filename)
+    # Get absolute paths for output directories
+    program_root = Path(__file__).parent.parent.absolute()
+    intermediate_dir = program_root / config.get("PATHS", {}).get("INTERMEDIATE_DIR", "output/intermediate")
+    final_dir = program_root / config.get("PATHS", {}).get("FINAL_DIR", "output/final")
+    
+    # Create directories if they don't exist
+    os.makedirs(intermediate_dir, exist_ok=True)
+    os.makedirs(final_dir, exist_ok=True)
+    
+    # Generate timestamp for unique filenames
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create filenames for intermediate and final reports
+    base_name = os.path.splitext(output_filename)[0]
+    intermediate_filename = f"{base_name}_intermediate_{timestamp}.xlsx"
+    final_filename = f"{base_name}_final_{timestamp}.xlsx"
+    
+    intermediate_path = intermediate_dir / intermediate_filename
+    final_path = final_dir / final_filename
 
     try:
         # 1. Prepare Data
@@ -666,7 +684,8 @@ def _generate_report(
                 logger.warning("Image column '%s' not found in DataFrame.", col_name)
 
         # 2. Write to Excel and Apply Formatting
-        with pd.ExcelWriter(report_path, engine="xlsxwriter") as writer:
+        # First write to intermediate file
+        with pd.ExcelWriter(str(intermediate_path), engine="xlsxwriter") as writer:
             workbook = writer.book
             if getattr(workbook, "set_use_zip64", None):
                  workbook.set_use_zip64(True)
@@ -697,38 +716,17 @@ def _generate_report(
             # Add instructions sheet using the helper function
             _add_instructions_sheet(workbook)
 
-        logger.info("Excel report generated successfully: %s", report_path)
-        return report_path
+        # Copy intermediate file to final location
+        shutil.copy2(str(intermediate_path), str(final_path))
 
-    except ImportError:
-        logger.error(
-            "'xlsxwriter' is not installed. Please run 'pip install xlsxwriter'."
-        )
-        # Fallback to default engine without formatting
-        try:
-            df_report.to_excel( # Use original df for fallback
-                report_path, sheet_name=sheet_name, index=False
-            )
-            logger.warning(
-                "Generated report using default engine (no image support/formatting): %s", report_path
-            )
-            return report_path
-        except (OSError, IOError) as fallback_io_err:
-             logger.error("Fallback report save failed (I/O Error): %s", fallback_io_err)
-             return None
-        except Exception as e_fallback:
-            logger.error("Fallback report generation failed: %s", e_fallback)
-            return None
-    except (OSError, IOError) as io_err:
-         logger.error("File I/O error during report generation: %s", io_err)
-         return None
-    except KeyError as key_err:
-         logger.error("Configuration or data key error: %s", key_err)
-         return None
+        logger.info("Excel reports generated successfully:")
+        logger.info("Intermediate report: %s", intermediate_path)
+        logger.info("Final report: %s", final_path)
+        
+        return str(final_path)
+
     except Exception as e:
-        logger.error(
-            "Unexpected error generating report '%s': %s", output_filename, e, exc_info=True
-        )
+        logger.error("Failed to generate Excel report: %s", e, exc_info=True)
         return None
 
 # --- Primary Report Generation ---

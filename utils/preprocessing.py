@@ -39,7 +39,15 @@ def setup_logging(log_dir: Optional[str] = None) -> None:
     try:
         # Create log directory if specified
         if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
+            try:
+                os.makedirs(log_dir, exist_ok=True)
+                print(f"로그 디렉토리 생성/확인: {log_dir}")
+            except OSError as e:
+                print(f"로그 디렉토리 생성 실패: {e}", file=sys.stderr)
+                # 대체 로그 디렉토리 시도
+                log_dir = os.path.join(os.path.expanduser("~"), "Shop_RPA_logs")
+                os.makedirs(log_dir, exist_ok=True)
+                print(f"대체 로그 디렉토리 사용: {log_dir}")
 
         # Get current timestamp for log file names
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -76,44 +84,48 @@ def setup_logging(log_dir: Optional[str] = None) -> None:
         root_logger.addHandler(error_console_handler)
 
         if log_dir:
-            # File handler for all logs (DEBUG level)
-            all_log_file = os.path.join(log_dir, f"all_{timestamp}.log")
-            file_handler = RotatingFileHandler(
-                all_log_file,
-                maxBytes=10 * 1024 * 1024,  # 10MB
-                backupCount=5,
-                encoding="utf-8",
-            )
-            file_handler.setLevel(logging.DEBUG)
-            file_handler.setFormatter(detailed_formatter)
-            root_logger.addHandler(file_handler)
+            try:
+                # File handler for all logs (DEBUG level)
+                all_log_file = os.path.join(log_dir, f"all_{timestamp}.log")
+                file_handler = RotatingFileHandler(
+                    all_log_file,
+                    maxBytes=10 * 1024 * 1024,  # 10MB
+                    backupCount=5,
+                    encoding="utf-8",
+                )
+                file_handler.setLevel(logging.DEBUG)
+                file_handler.setFormatter(detailed_formatter)
+                root_logger.addHandler(file_handler)
+                print(f"일반 로그 파일 생성: {all_log_file}")
 
-            # Error log file handler (ERROR level)
-            error_log_file = os.path.join(log_dir, f"error_{timestamp}.log")
-            error_file_handler = TimedRotatingFileHandler(
-                error_log_file,
-                when="midnight",
-                interval=1,
-                backupCount=30,  # Keep 30 days of error logs
-                encoding="utf-8",
-            )
-            error_file_handler.setLevel(logging.ERROR)
-            error_file_handler.setFormatter(detailed_formatter)
-            root_logger.addHandler(error_file_handler)
+                # Error log file handler (ERROR level)
+                error_log_file = os.path.join(log_dir, f"error_{timestamp}.log")
+                error_file_handler = TimedRotatingFileHandler(
+                    error_log_file,
+                    when="midnight",
+                    interval=1,
+                    backupCount=30,  # Keep 30 days of error logs
+                    encoding="utf-8",
+                )
+                error_file_handler.setLevel(logging.ERROR)
+                error_file_handler.setFormatter(detailed_formatter)
+                root_logger.addHandler(error_file_handler)
+                print(f"에러 로그 파일 생성: {error_log_file}")
 
-            # Create a copy of the latest log file instead of symlink
-            latest_log = os.path.join(log_dir, "latest.log")
-            if os.path.exists(latest_log):
-                os.remove(latest_log)
-            shutil.copy2(all_log_file, latest_log)
+                # Create a copy of the latest log file
+                latest_log = os.path.join(log_dir, "latest.log")
+                if os.path.exists(latest_log):
+                    os.remove(latest_log)
+                shutil.copy2(all_log_file, latest_log)
+                print(f"최신 로그 파일 생성: {latest_log}")
+
+            except Exception as e:
+                print(f"로그 파일 생성 실패: {e}", file=sys.stderr)
+                # 파일 로깅 실패 시 콘솔 로깅만 계속 사용
 
         # Add unhandled exception handler
         def handle_exception(exc_type, exc_value, exc_traceback):
-            """처리되지 않은 예외를 로깅하는 핸들러.
-
-            KeyboardInterrupt는 로깅하지 않고 기본 처리를 따릅니다.
-            그 외 예외는 ERROR 레벨로 로깅합니다.
-            """
+            """처리되지 않은 예외를 로깅하는 핸들러."""
             if issubclass(exc_type, KeyboardInterrupt):
                 sys.__excepthook__(exc_type, exc_value, exc_traceback)
             else:
@@ -124,11 +136,13 @@ def setup_logging(log_dir: Optional[str] = None) -> None:
         sys.excepthook = handle_exception
 
         # Log successful setup
-        root_logger.info("Logging system initialized successfully")
+        root_logger.info("로깅 시스템 초기화 완료")
+        if log_dir:
+            root_logger.info(f"로그 디렉토리: {log_dir}")
 
     except Exception as e:
         # If logging setup fails, try to log to console as last resort
-        print(f"Failed to setup logging: {str(e)}", file=sys.stderr)
+        print(f"로깅 설정 실패: {str(e)}", file=sys.stderr)
         print(traceback.format_exc(), file=sys.stderr)
         raise
 

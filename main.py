@@ -51,22 +51,37 @@ def main():
         intermediate_dir = get_absolute_path(config['PATHS']['INTERMEDIATE_DIR'])
         final_dir = get_absolute_path(config['PATHS']['FINAL_DIR'])
         
-        os.makedirs(cache_dir, exist_ok=True)
-        os.makedirs(output_dir, exist_ok=True)
-        os.makedirs(intermediate_dir, exist_ok=True)
-        os.makedirs(final_dir, exist_ok=True)
-        os.makedirs(log_dir, exist_ok=True)
-    except OSError as e:
-        print(f"오류: 필수 디렉토리 생성 실패 ({e}). 권한을 확인하세요.", file=sys.stderr)
-        log_dir = None 
+        # 디렉토리 생성 시도
+        for dir_path in [log_dir, cache_dir, output_dir, intermediate_dir, final_dir]:
+            try:
+                os.makedirs(dir_path, exist_ok=True)
+                print(f"디렉토리 생성/확인: {dir_path}")
+            except OSError as e:
+                print(f"경고: 디렉토리 생성 실패 ({dir_path}): {e}", file=sys.stderr)
+                if dir_path == log_dir:
+                    # 로그 디렉토리 생성 실패 시 대체 경로 사용
+                    log_dir = os.path.join(os.path.expanduser("~"), "Shop_RPA_logs")
+                    os.makedirs(log_dir, exist_ok=True)
+                    print(f"대체 로그 디렉토리 사용: {log_dir}")
     except KeyError as e:
         print(f"오류: 설정 파일에 필요한 경로 키({e})가 없습니다.", file=sys.stderr)
-        log_dir = None
+        # 기본 로그 디렉토리 설정
+        log_dir = os.path.join(os.path.expanduser("~"), "Shop_RPA_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        print(f"기본 로그 디렉토리 사용: {log_dir}")
     
     # Setup logging (pass log_dir)
-    setup_logging(log_dir=log_dir)
-    logger = logging.getLogger(__name__)
-    logger.info("애플리케이션 시작")
+    try:
+        setup_logging(log_dir=log_dir)
+        logger = logging.getLogger(__name__)
+        logger.info("애플리케이션 시작")
+        logger.info(f"로그 디렉토리: {log_dir}")
+    except Exception as e:
+        print(f"로깅 설정 실패: {e}", file=sys.stderr)
+        # 기본 로깅 설정으로 폴백
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(__name__)
+        logger.error(f"로깅 설정 실패, 기본 로깅 사용: {e}")
     
     # 프록시 사용 여부 로깅
     if args.use_proxies:
