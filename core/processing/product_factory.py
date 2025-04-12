@@ -1,12 +1,137 @@
 import logging
 import re
 from datetime import datetime
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, List
+from dataclasses import dataclass, field
 
 import pandas as pd
 
 from ..data_models import Product
 from .data_cleaner import DataCleaner
+
+
+@dataclass
+class Product:
+    """제품 정보를 담는 데이터 클래스"""
+    id: str
+    name: str
+    price: float
+    source: str  # 'koryo', 'other_source' 등
+    url: str
+    image_url: str = ""
+    image_gallery: List[str] = field(default_factory=list)
+    product_code: str = ""
+    description: str = ""
+    specifications: Dict[str, str] = field(default_factory=dict)
+    quantity_prices: Dict[str, float] = field(default_factory=dict)
+    original_input_data: Dict = field(default_factory=dict)
+    fetched_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    status: str = "pending"  # pending, success, failed
+    error_message: str = ""
+
+    def __post_init__(self):
+        """초기화 후 데이터 검증 및 기본값 설정"""
+        # 필수 필드 검증
+        if not self.id or not self.name or not self.source:
+            raise ValueError("Required fields (id, name, source) must not be empty")
+            
+        # 가격이 없으면 0으로 설정
+        if self.price is None:
+            self.price = 0
+            
+        # URL이 없으면 빈 문자열로 설정
+        if not self.url:
+            self.url = ""
+            
+        # 이미지 URL이 없고 갤러리가 있으면 첫 번째 이미지를 메인 이미지로 설정
+        if not self.image_url and self.image_gallery:
+            self.image_url = self.image_gallery[0]
+            
+        # 수집 시간이 없으면 현재 시간으로 설정
+        if not self.fetched_at:
+            self.fetched_at = datetime.now().isoformat()
+
+    def to_dict(self) -> Dict:
+        """제품 정보를 딕셔너리로 변환"""
+        return {
+            'id': self.id,
+            'name': self.name,
+            'price': self.price,
+            'source': self.source,
+            'url': self.url,
+            'image_url': self.image_url,
+            'image_gallery': self.image_gallery,
+            'product_code': self.product_code,
+            'description': self.description,
+            'specifications': self.specifications,
+            'quantity_prices': self.quantity_prices,
+            'fetched_at': self.fetched_at,
+            'status': self.status,
+            'error_message': self.error_message
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'Product':
+        """딕셔너리에서 제품 객체 생성"""
+        required_fields = {'id', 'name', 'source'}
+        if not all(field in data for field in required_fields):
+            raise ValueError(f"Missing required fields: {required_fields - set(data.keys())}")
+            
+        return cls(
+            id=data['id'],
+            name=data['name'],
+            price=float(data.get('price', 0)),
+            source=data['source'],
+            url=data.get('url', ''),
+            image_url=data.get('image_url', ''),
+            image_gallery=data.get('image_gallery', []),
+            product_code=data.get('product_code', ''),
+            description=data.get('description', ''),
+            specifications=data.get('specifications', {}),
+            quantity_prices=data.get('quantity_prices', {}),
+            fetched_at=data.get('fetched_at', datetime.now().isoformat()),
+            status=data.get('status', 'pending'),
+            error_message=data.get('error_message', '')
+        )
+
+    def validate(self) -> bool:
+        """제품 데이터 유효성 검사"""
+        try:
+            # 필수 필드 검사
+            if not self.id or not self.name or not self.source:
+                self.error_message = "필수 필드 누락"
+                self.status = "failed"
+                return False
+                
+            # 가격 검사
+            if self.price < 0:
+                self.error_message = "잘못된 가격"
+                self.status = "failed"
+                return False
+                
+            # 이미지 URL 검사
+            if not self.image_url and not self.image_gallery:
+                self.error_message = "이미지 없음"
+                self.status = "failed"
+                return False
+                
+            # 모든 검사 통과
+            self.status = "success"
+            return True
+            
+        except Exception as e:
+            self.error_message = f"유효성 검사 중 오류: {str(e)}"
+            self.status = "failed"
+            return False
+
+    def get_status_message(self) -> str:
+        """현재 상태 메시지 반환"""
+        if self.status == "success":
+            return "성공"
+        elif self.status == "failed":
+            return f"실패: {self.error_message}"
+        else:
+            return "처리 중"
 
 
 class ProductFactory:

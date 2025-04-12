@@ -7,6 +7,12 @@ from utils.config import load_config
 from utils.preprocessing import setup_logging
 import logging
 from core.processing.main_processor import ProductProcessor
+from pathlib import Path
+
+def get_absolute_path(relative_path: str) -> str:
+    """Convert relative path to absolute path based on program root directory"""
+    program_root = Path(__file__).parent.absolute()
+    return str(program_root / relative_path)
 
 def main():
     """메인 함수"""
@@ -37,19 +43,25 @@ def main():
         print(f"오류: 설정 파일 로딩 실패. {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Create necessary directories
+    # Create necessary directories with absolute paths
     try:
-        log_dir = config['PATHS']['LOG_DIR']
-        os.makedirs(config['PATHS']['CACHE_DIR'], exist_ok=True)
-        os.makedirs(config['PATHS']['OUTPUT_DIR'], exist_ok=True)
+        log_dir = get_absolute_path(config['PATHS']['LOG_DIR'])
+        cache_dir = get_absolute_path(config['PATHS']['CACHE_DIR'])
+        output_dir = get_absolute_path(config['PATHS']['OUTPUT_DIR'])
+        intermediate_dir = get_absolute_path(config['PATHS']['INTERMEDIATE_DIR'])
+        final_dir = get_absolute_path(config['PATHS']['FINAL_DIR'])
+        
+        os.makedirs(cache_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(intermediate_dir, exist_ok=True)
+        os.makedirs(final_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
     except OSError as e:
         print(f"오류: 필수 디렉토리 생성 실패 ({e}). 권한을 확인하세요.", file=sys.stderr)
-        # Log dir might fail, try logging to console only
         log_dir = None 
     except KeyError as e:
         print(f"오류: 설정 파일에 필요한 경로 키({e})가 없습니다.", file=sys.stderr)
-        log_dir = None # Fallback
+        log_dir = None
     
     # Setup logging (pass log_dir)
     setup_logging(log_dir=log_dir)

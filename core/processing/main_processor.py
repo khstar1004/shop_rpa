@@ -1195,3 +1195,88 @@ class ProductProcessor:
         except Exception as e:
             self.logger.error(f"파일 처리 중 오류 발생: {str(e)}", exc_info=True)
             return None
+
+    def process_koryo_products(self, search_query: str, output_path: str, max_items: int = 50):
+        """Process Koryo Gift products and save to Excel"""
+        try:
+            self.logger.info(f"Starting Koryo Gift product processing for query: {search_query}")
+            
+            # 제품 검색 및 데이터 수집
+            products = self.koryo_scraper.search_product(search_query, max_items=max_items)
+            
+            if not products:
+                self.logger.warning(f"No products found for query: {search_query}")
+                # 빈 결과를 저장할 때도 헤더와 상태 메시지 포함
+                self.excel_manager.save_products([], output_path, "검색결과없음")
+                return
+            
+            self.logger.info(f"Found {len(products)} products from Koryo Gift")
+            
+            # 검색 결과를 엑셀로 저장
+            sheet_name = f"koryo_{datetime.now().strftime('%Y%m%d_%H%M')}"
+            self.excel_manager.save_products(products, output_path, sheet_name)
+            
+            self.logger.info(f"Successfully saved Koryo Gift products to: {output_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Error processing Koryo Gift products: {str(e)}", exc_info=True)
+            raise
+
+    def process_search_results(self, search_query: str, output_path: str, max_items: int = 50):
+        """Process search results from multiple sources"""
+        try:
+            all_products = []
+            
+            # 고려기프트 제품 검색
+            try:
+                koryo_products = self.koryo_scraper.search_product(search_query, max_items=max_items)
+                if koryo_products:
+                    self.logger.info(f"Found {len(koryo_products)} products from Koryo Gift")
+                    all_products.extend(koryo_products)
+                else:
+                    self.logger.warning("No products found from Koryo Gift")
+            except Exception as e:
+                self.logger.error(f"Error searching Koryo Gift: {str(e)}")
+            
+            # 다른 소스의 제품 검색 로직...
+            
+            if not all_products:
+                self.logger.warning(f"No products found for query: {search_query}")
+                # 빈 결과를 저장할 때도 헤더와 상태 메시지 포함
+                self.excel_manager.save_products([], output_path, "검색결과없음")
+                return
+            
+            # 모든 검색 결과를 엑셀로 저장
+            sheet_name = f"search_{datetime.now().strftime('%Y%m%d_%H%M')}"
+            self.excel_manager.save_products(all_products, output_path, sheet_name)
+            
+            self.logger.info(f"Successfully saved all search results to: {output_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Error processing search results: {str(e)}", exc_info=True)
+            raise
+
+    def validate_product_data(self, product: Product) -> bool:
+        """Validate product data before saving"""
+        if not product:
+            return False
+            
+        # 필수 필드 검증
+        required_fields = {
+            'name': product.name,
+            'price': product.price,
+            'url': product.url,
+            'source': product.source
+        }
+        
+        for field, value in required_fields.items():
+            if not value:
+                self.logger.warning(f"Missing required field: {field}")
+                return False
+        
+        # 이미지 URL 검증
+        if not product.image_url and not product.image_gallery:
+            self.logger.warning("No images found for product")
+            return False
+            
+        return True

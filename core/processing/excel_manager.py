@@ -675,7 +675,9 @@ class ExcelManager:
             result_df = self._reorder_columns(result_df)
 
             # 파일명 생성
-            output_file = f"{os.path.splitext(input_file)[0]}-result.xlsx"
+            base_name = os.path.splitext(input_file)[0]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_file = os.path.join('output', f'{base_name}-result_result_{timestamp}_upload_{timestamp}.xlsx')
 
             # 엑셀로 저장
             result_df.to_excel(output_file, index=False)
@@ -704,7 +706,8 @@ class ExcelManager:
                 ]
 
                 error_df = pd.DataFrame(error_data)
-                output_file = f"{os.path.splitext(input_file)[0]}-error-result.xlsx"
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_file = os.path.join('output', f'{os.path.splitext(input_file)[0]}-error-result_result_{timestamp}_upload_{timestamp}.xlsx')
                 error_df.to_excel(output_file, index=False)
 
                 self.logger.warning(
@@ -1313,8 +1316,7 @@ class ExcelManager:
             input_filename = os.path.splitext(os.path.basename(file_path))[0]
             current_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_filename = f"{input_filename}_upload_{current_datetime}.xlsx"
-            output_directory = os.path.dirname(file_path)
-            output_path = os.path.join(output_directory, output_filename)
+            output_path = os.path.join('output', output_filename)
 
             # 데이터프레임 로드
             df = pd.read_excel(file_path)
@@ -1538,3 +1540,134 @@ class ExcelManager:
                     and not bool(urlparse(link_value).scheme)
                 ):
                     row[naver_link_col].value = None
+
+    def _write_product_data(self, worksheet, row_idx: int, product: Product) -> int:
+        """Write product data to worksheet and return the next row index"""
+        try:
+            # 기본 데이터 쓰기
+            worksheet.cell(row=row_idx, column=1, value=product.name or "제품명 없음")
+            worksheet.cell(row=row_idx, column=2, value=product.product_code or "코드 없음")
+            worksheet.cell(row=row_idx, column=3, value=product.price or 0)
+            
+            # 이미지 URL 처리
+            main_image = product.image_url or "이미지 없음"
+            worksheet.cell(row=row_idx, column=4, value=main_image)
+            
+            # 이미지 갤러리 처리
+            gallery_urls = product.image_gallery
+            if gallery_urls:
+                # 갤러리 이미지 URL들을 쉼표로 구분하여 저장
+                gallery_str = " | ".join(gallery_urls)
+                worksheet.cell(row=row_idx, column=5, value=gallery_str)
+            else:
+                worksheet.cell(row=row_idx, column=5, value="추가 이미지 없음")
+            
+            # 제품 URL
+            worksheet.cell(row=row_idx, column=6, value=product.url or "URL 없음")
+            
+            # 소스 정보
+            source = product.source or "알 수 없음"
+            worksheet.cell(row=row_idx, column=7, value=source)
+            
+            # 스크래핑 시간
+            fetched_at = product.fetched_at or datetime.now().isoformat()
+            worksheet.cell(row=row_idx, column=8, value=fetched_at)
+            
+            # 상태 정보
+            status_msg = "성공"
+            if not product.image_url and not product.image_gallery:
+                status_msg = "이미지 추출 실패"
+            elif not product.price:
+                status_msg = "가격 정보 없음"
+            worksheet.cell(row=row_idx, column=9, value=status_msg)
+
+            # 셀 스타일 적용
+            for col in range(1, 10):
+                cell = worksheet.cell(row=row_idx, column=col)
+                cell.border = self.default_border
+                
+                # URL이 있는 셀에 하이퍼링크 스타일 적용
+                if col in [4, 5, 6] and cell.value and cell.value.startswith('http'):
+                    cell.font = self.url_font
+                    cell.hyperlink = cell.value
+            
+            return row_idx + 1
+            
+        except Exception as e:
+            self.logger.error(f"Error writing product data: {str(e)}")
+            # 에러 발생 시에도 빈 셀 없이 에러 정보 기록
+            for col in range(1, 10):
+                cell = worksheet.cell(row=row_idx, column=col)
+                cell.value = "데이터 처리 오류"
+                cell.border = self.default_border
+                cell.fill = self.error_fill
+            return row_idx + 1
+
+    def create_worksheet(self, workbook, sheet_name: str) -> Worksheet:
+        """Create a new worksheet with headers"""
+        worksheet = workbook.create_sheet(title=sheet_name)
+        
+        # 헤더 정의
+        headers = [
+            "제품명",
+            "제품코드",
+            "가격",
+            "메인이미지",
+            "추가이미지",
+            "제품URL",
+            "소스",
+            "수집시간",
+            "상태"
+        ]
+        
+        # 헤더 쓰기
+        for col, header in enumerate(headers, 1):
+            cell = worksheet.cell(row=1, column=col)
+            cell.value = header
+            cell.font = self.header_font
+            cell.fill = self.header_fill
+            cell.border = self.default_border
+            
+        # 열 너비 자동 조정
+        for col in range(1, len(headers) + 1):
+            worksheet.column_dimensions[get_column_letter(col)].width = 20
+            
+        # URL 열은 더 넓게 설정
+        worksheet.column_dimensions[get_column_letter(4)].width = 40  # 메인이미지
+        worksheet.column_dimensions[get_column_letter(5)].width = 50  # 추가이미지
+        worksheet.column_dimensions[get_column_letter(6)].width = 30  # 제품URL
+        
+        return worksheet
+
+    def save_products(self, products: List[Product], output_path: str, sheet_name: str = None):
+        """Save products to Excel file with proper formatting and error handling"""
+        try:
+            workbook = Workbook()
+            
+            # 시트 이름이 없으면 현재 시간으로 생성
+            if not sheet_name:
+                sheet_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # 기본 시트 제거 및 새 시트 생성
+            workbook.remove(workbook.active)
+            worksheet = self.create_worksheet(workbook, sheet_name)
+            
+            # 제품 데이터 쓰기
+            current_row = 2  # 헤더 다음 행부터 시작
+            for product in products:
+                if product.source == 'koryo':  # 고려기프트 제품 확인
+                    self.logger.debug(f"Processing Koryo product: {product.name}")
+                current_row = self._write_product_data(worksheet, current_row, product)
+            
+            # 결과 요약 추가
+            summary_row = current_row + 1
+            worksheet.cell(row=summary_row, column=1, value=f"총 제품 수: {len(products)}")
+            worksheet.cell(row=summary_row, column=2, value=f"처리 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # 파일 저장
+            workbook.save(output_path)
+            self.logger.info(f"Successfully saved {len(products)} products to {output_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Error saving products to Excel: {str(e)}", exc_info=True)
+            raise

@@ -17,8 +17,12 @@ from urllib.parse import urljoin, urlparse
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
+
+# Disable InsecureRequestWarning
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Playwright 지원 (선택적 의존성)
 try:
@@ -29,7 +33,8 @@ except ImportError:
     PlaywrightTimeoutError = None
 
 from ..data_models import Product
-from . import BaseMultiLayerScraper
+from .base_multi_layer_scraper import BaseMultiLayerScraper
+from .utils import extract_main_image
 
 
 class HaeoeumScraper(BaseMultiLayerScraper):
@@ -152,28 +157,30 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         }
 
         # --- requests 세션 설정 강화 ---
-        self.session = self._create_robust_session()
+        self.session = requests.Session()
 
-    def _create_robust_session(self) -> requests.Session:
-        """재시도 로직이 포함된 requests 세션을 생성합니다."""
-        session = requests.Session()
-        session.headers.update({'User-Agent': self.user_agent})
-        session.verify = False
+        # 프록시 설정 (필요한 경우)
+        # ... (proxy logic)
 
-        # Retry 전략 설정
-        retry_strategy = Retry(
-            total=self.max_retries,
-            backoff_factor=self.backoff_factor,
-            status_forcelist=[429, 500, 502, 503, 504],
-            method_whitelist=["HEAD", "GET", "OPTIONS"]
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=100, pool_maxsize=100)
+        # 재시도 전략 및 어댑터 설정
+        try:
+            retry_strategy = Retry(
+                total=max_retries, # Use max_retries from init
+                backoff_factor=self.backoff_factor,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["HEAD", "GET", "OPTIONS"], # Ensure this is allowed_methods
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=100, pool_maxsize=100)
+            self.session.mount("http://", adapter)
+            self.session.mount("https://", adapter)
+            self.logger.info(f"Retry strategy configured with max_retries={max_retries}")
+        except Exception as e:
+            self.logger.error(f"Failed to configure retry strategy: {e}")
 
-        session.mount('http://', adapter)
-        session.mount('https://', adapter)
-
-        self.logger.info("Robust requests session created with retry strategy.")
-        return session
+        # 헤더 설정
+        self.session.headers.update({
+            "User-Agent": self.user_agent
+        })
 
     def get_product(self, product_idx: str) -> Optional[Product]:
         """
@@ -194,98 +201,94 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         url = f"{self.PRODUCT_VIEW_URL}?p_idx={product_idx}"
         self.logger.info(f"Attempting to fetch product data from: {url}")
 
+        # Playwright가 사용 가능한 경우 먼저 시도
+        if self.playwright_available:
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=self.headless)
+                    page = browser.new_page()
+                    page.goto(url, wait_until="networkidle")
+                    
+                    # 이미지가 로드될 때까지 대기
+                    page.wait_for_selector("img", timeout=5000)
+                    
+                    # 페이지의 HTML 가져오기
+                    html = page.content()
+                    soup = BeautifulSoup(html, "html.parser")
+                    
+                    # 이미지 URL 추출
+                    images = page.evaluate("""() => {
+                        const images = [];
+                        document.querySelectorAll('img').forEach(img => {
+                            if (img.src && (img.src.includes('/upload/') || img.src.includes('/product/'))) {
+                                images.push(img.src);
+                            }
+                        });
+                        return images;
+                    }""")
+                    
+                    if images:
+                        self.logger.info(f"Found {len(images)} images using Playwright")
+                        product_data = self._extract_product_data(soup, product_idx, url)
+                        product_data["image_gallery"] = images
+                        product = Product(**product_data)
+                        self.cache_sparse_data(cache_key, product)
+                        return product
+                        
+            except Exception as e:
+                self.logger.warning(f"Playwright extraction failed: {e}")
+
+        # 기존 requests 방식으로 시도
         try:
-            # --- 웹 페이지 요청 (강화된 세션 사용) ---
-            response = self.session.get(
-                url,
-                timeout=self.timeout_config,
-                headers={
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1'
-                }
-            )
+            response = self.session.get(url, timeout=self.timeout_config)
             response.raise_for_status()
             self.logger.info(f"Successfully fetched HTML content for {url} (Status: {response.status_code})")
-
-            # HTML 파싱
-            try:
-                soup = BeautifulSoup(response.content, "html.parser")
-                self.logger.debug(f"HTML parsed successfully for {url}")
-            except Exception as parse_err:
-                self.logger.error(f"Failed to parse HTML for {url}: {parse_err}")
-                if self.debug:
-                    self.logger.error(f"Raw HTML content: {response.text[:500]}...")
-                return None
-
-            # --- 상품 정보 추출 ---
-            try:
-                product_data = self._extract_product_data(soup, product_idx, url)
-                if not product_data:
-                    self.logger.warning(f"Could not extract significant product data from {url}")
-                    return None
-                self.logger.info(f"Product data extracted successfully for p_idx={product_idx}")
-
-            except Exception as extract_err:
-                self.logger.error(f"Error during data extraction for {url}: {extract_err}", exc_info=self.debug)
-                return None
             
-            # --- Product 객체 생성 ---
-            try:
-                product = Product(
-                    id=product_data.get("product_id", f"haeoreum_{product_idx}"),
-                    name=product_data.get("title", ""),
-                    source="haeoreum",
-                    price=float(product_data.get("price", 0.0)),
-                    url=url,
-                    image_url=product_data.get("main_image", ""),
-                    product_code=product_data.get("product_code", ""),
-                    image_gallery=product_data.get("image_gallery", []),
-                )
-
-                # 수량별 가격 정보 추가
-                if "quantity_prices" in product_data:
-                    product.quantity_prices = product_data["quantity_prices"]
-
-                # 품절 정보 추가
-                product.is_in_stock = not product_data.get("is_sold_out", False)
-
-                # 추가 정보 추가
-                if "specifications" in product_data:
-                    product.specifications = product_data["specifications"]
-
-                if "description" in product_data:
-                    product.description = product_data["description"]
-
-                self.logger.debug(f"Product object created for p_idx={product_idx}")
-
-                # 캐시에 저장
-                self.add_sparse_data(cache_key, product, ttl=86400)
+            soup = BeautifulSoup(response.text, "html.parser")
+            product_data = self._extract_product_data(soup, product_idx, url)
+            
+            if product_data:
+                product = Product(**product_data)
+                self.cache_sparse_data(cache_key, product)
                 self.logger.info(f"Product data for p_idx={product_idx} cached.")
                 return product
-
-            except (ValueError, TypeError) as create_err:
-                self.logger.error(f"Error creating Product object for {url}: {create_err}", exc_info=self.debug)
-                return None
-
-        except requests.exceptions.Timeout as timeout_err:
-            self.logger.error(f"Request timed out for {url} after {self.timeout_config}: {timeout_err}")
-            return None
-        except requests.exceptions.RequestException as req_err:
-            self.logger.error(f"Request failed for {url} after {self.max_retries} retries: {req_err}")
-            return None
+                
         except Exception as e:
-            self.logger.error(f"An unexpected error occurred processing {url}: {e}", exc_info=self.debug)
-            return None
+            self.logger.error(f"Failed to fetch product data: {e}")
+            
+        return None
 
     def _extract_product_data(
         self, soup: BeautifulSoup, product_idx: str, url: str
     ) -> Dict[str, Any]:
-        """
-        BeautifulSoup 객체에서 상품 정보를 추출합니다.
-        """
-        product_data = {}
+        """상품 데이터 추출"""
+        product_data = {
+            "source": "haeoreum",
+            "product_id": product_idx,
+            "title": "",
+            "price": 0,
+            "main_image": "",
+            "image_gallery": [],
+            "is_sold_out": False,
+            "quantity_prices": {},
+        }
+
+        # 모든 상품 이미지 URL 추출
+        image_gallery = []
+        for img in soup.find_all('img'):
+            src = img.get('src', '')
+            if src and '/upload/product/' in src:
+                # 작은 이미지(simg3)를 큰 이미지(bimg3)로 변경
+                if 'simg3' in src:
+                    src = src.replace('simg3', 'bimg3')
+                full_url = urljoin(self.BASE_URL, src)
+                if full_url not in image_gallery:  # 중복 제거
+                    image_gallery.append(full_url)
+
+        # 이미지가 있으면 첫 번째 이미지를 메인 이미지로 설정
+        if image_gallery:
+            product_data["main_image"] = image_gallery[0]
+            product_data["image_gallery"] = image_gallery
 
         # 상품명 추출
         title_element = soup.select_one(self.selectors["product_title"]["selector"])
@@ -313,68 +316,6 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         # 고유 ID 생성
         product_id = hashlib.md5(f"haeoeum_{product_code}".encode()).hexdigest()
         product_data["product_id"] = product_id
-
-        # 메인 이미지 URL 추출 - 중요: ID가 target_img인 이미지 찾기
-        main_image_element = soup.select_one(self.selectors["main_image"]["selector"])
-        if main_image_element:
-            main_image = main_image_element.get("src", "")
-        else:
-            # 대체 셀렉터 시도
-            alt_image_element = soup.select_one(
-                self.selectors["alt_main_image"]["selector"]
-            )
-            main_image = alt_image_element.get("src", "") if alt_image_element else ""
-
-        # URL 정규화
-        if main_image and not main_image.startswith(("http://", "https://")):
-            main_image = urljoin(self.BASE_URL, main_image)
-
-        product_data["main_image"] = main_image
-
-        # 모든 이미지 URL 추출 (메인 + 썸네일 + 설명 이미지)
-        image_gallery = []
-
-        # 메인 이미지 추가
-        if main_image:
-            image_gallery.append(main_image)
-
-        # 썸네일 이미지 추가
-        thumbnail_elements = soup.select(self.selectors["thumbnail_images"]["selector"])
-        for img in thumbnail_elements:
-            img_url = img.get("src", "")
-            if img_url and not img_url.startswith(("http://", "https://")):
-                img_url = urljoin(self.BASE_URL, img_url)
-
-            # 중복 제거하고 추가
-            if img_url and img_url not in image_gallery:
-                image_gallery.append(img_url)
-
-        # 설명 이미지 추가
-        desc_img_elements = soup.select(
-            self.selectors["description_images"]["selector"]
-        )
-        for img in desc_img_elements:
-            img_url = img.get("src", "")
-            if img_url and not img_url.startswith(("http://", "https://")):
-                img_url = urljoin(self.BASE_URL, img_url)
-
-            # 중복 제거하고 추가
-            if img_url and img_url not in image_gallery:
-                image_gallery.append(img_url)
-
-        # 페이지 내 모든 img 태그 검색하여 놓친 이미지 없는지 확인
-        all_images = soup.find_all("img")
-        for img in all_images:
-            img_url = img.get("src", "")
-            # 필터링: 실제 상품 이미지만 추가, 아이콘 등은 제외
-            if img_url and ("/upload/" in img_url or "/product/" in img_url):
-                if img_url and not img_url.startswith(("http://", "https://")):
-                    img_url = urljoin(self.BASE_URL, img_url)
-                # 중복 제거하고 추가
-                if img_url and img_url not in image_gallery:
-                    image_gallery.append(img_url)
-
-        product_data["image_gallery"] = image_gallery
 
         # 가격 추출
         price_element = soup.select_one(self.selectors["applied_price"]["selector"])
@@ -406,27 +347,42 @@ class HaeoeumScraper(BaseMultiLayerScraper):
 
         product_data["is_sold_out"] = is_sold_out
 
-        # 수량별 가격 추출
+        # 수량별 가격 추출 - 개선된 버전
         quantity_prices = {}
         price_table = soup.select_one(self.selectors["price_table"]["selector"])
+        
         if price_table:
-            rows = price_table.select("tr")
-            if len(rows) >= 2:
-                quantity_cells = rows[0].select("td")[1:]  # 첫번째 셀(수량)은 제외
-                price_cells = rows[1].select("td")[1:]  # 첫번째 셀(단가)은 제외
-
-                for i in range(min(len(quantity_cells), len(price_cells))):
-                    qty_text = quantity_cells[i].text.strip()
-                    price_text = price_cells[i].text.strip()
-
-                    # 숫자만 추출
+            # 테이블 헤더 찾기
+            headers = []
+            header_row = price_table.select_one("tr:first-child")
+            if header_row:
+                headers = [th.text.strip() for th in header_row.select("th, td")]
+            
+            # 데이터 행 처리
+            data_rows = price_table.select("tr:not(:first-child)")
+            for row in data_rows:
+                cells = row.select("td")
+                if len(cells) >= 2:
+                    # 수량과 가격 추출
+                    qty_text = cells[0].text.strip()
+                    price_text = cells[1].text.strip()
+                    
+                    # 수량 추출 (숫자만)
                     qty_match = re.search(r"\d+", qty_text)
-                    price_match = self.patterns["price_number"].search(price_text)
-
-                    if qty_match and price_match:
+                    if qty_match:
                         qty = int(qty_match.group())
-                        qty_price = int(price_match.group().replace(",", ""))
-                        quantity_prices[str(qty)] = qty_price
+                        
+                        # 가격 추출 (숫자만)
+                        price_match = self.patterns["price_number"].search(price_text)
+                        if price_match:
+                            price = int(price_match.group().replace(",", ""))
+                            
+                            # VAT 포함 여부 확인
+                            vat_included = bool(self.patterns["vat_included"].search(price_text))
+                            if not vat_included:
+                                price = int(price * 1.1)  # VAT 10% 추가
+                                
+                            quantity_prices[str(qty)] = price
 
         # 수량 드롭다운에서 정보 추출 시도
         if not quantity_prices:
@@ -437,62 +393,114 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                 options = quantity_dropdown.select("option")
                 for option in options:
                     option_text = option.text.strip()
-
-                    # 텍스트에서 수량과 가격 추출 시도 (예: "100개 (+1,000원)")
+                    
+                    # 수량과 가격 추출
                     qty_match = self.patterns["quantity"].search(option_text)
                     price_match = self.patterns["price_number"].search(option_text)
-
+                    
                     if qty_match and price_match:
                         qty = int(qty_match.group(1))
-                        option_price = int(price_match.group().replace(",", ""))
-
+                        price = int(price_match.group().replace(",", ""))
+                        
                         # 추가 금액이면 기본 가격에 더함
                         if "+" in option_text:
-                            option_price = price + option_price
-
-                        quantity_prices[str(qty)] = option_price
+                            price = product_data["price"] + price
+                            
+                        # VAT 포함 여부 확인
+                        vat_included = bool(self.patterns["vat_included"].search(option_text))
+                        if not vat_included:
+                            price = int(price * 1.1)  # VAT 10% 추가
+                            
+                        quantity_prices[str(qty)] = price
 
         # 텍스트에서 수량별 가격 정보 찾기
         if not quantity_prices:
             text_content = soup.get_text()
             matches = self.patterns["quantity_price"].findall(text_content)
-
+            
             if matches:
                 for match in matches:
                     qty = int(match[0])
-                    qty_price = int(match[1].replace(",", ""))
-
+                    price = int(match[1].replace(",", ""))
+                    
                     # VAT 포함 여부 확인
-                    vat_included = bool(
-                        self.patterns["vat_included"].search(text_content)
-                    )
+                    vat_included = bool(self.patterns["vat_included"].search(text_content))
                     if not vat_included:
-                        qty_price = int(qty_price * 1.1)  # VAT 10% 추가
-
-                    quantity_prices[str(qty)] = qty_price
+                        price = int(price * 1.1)  # VAT 10% 추가
+                        
+                    quantity_prices[str(qty)] = price
 
         product_data["quantity_prices"] = quantity_prices
 
         # 가격표가 있으면 CSV로 저장
         if quantity_prices:
             try:
-                # 데이터프레임 생성
-                df = pd.DataFrame(
-                    {
-                        "수량": [int(qty) for qty in quantity_prices.keys()],
-                        "일반": [int(price) for price in quantity_prices.values()],
-                    }
-                )
-                df = df.sort_values(by="수량")
+                # 수량과 가격을 정렬
+                sorted_quantities = sorted([int(qty) for qty in quantity_prices.keys()])
+                sorted_prices = [quantity_prices[str(qty)] for qty in sorted_quantities]
+                
+                # 고려 가격 차이 계산
+                koryo_price_differences = [0]  # 첫 번째 항목은 0
+                koryo_price_difference_percentages = [0]  # 첫 번째 항목은 0
+                
+                for i in range(1, len(sorted_prices)):
+                    diff = sorted_prices[i] - sorted_prices[i-1]
+                    koryo_price_differences.append(diff)
+                    
+                    # 가격 차이 백분율 계산 (이전 가격 대비)
+                    if sorted_prices[i-1] > 0:
+                        percentage = round((diff / sorted_prices[i-1]) * 100, 2)
+                    else:
+                        percentage = 0
+                    koryo_price_difference_percentages.append(percentage)
 
+                # TODO: 네이버 가격 데이터 가져오는 로직 추가 필요
+                naver_prices = [0] * len(sorted_quantities) # 임시로 0으로 초기화
+                naver_base_quantity = [0] * len(sorted_quantities) # 임시로 0으로 초기화
+
+                # 네이버 가격 차이 계산 (임시: 고려 가격 - 네이버 가격)
+                naver_price_differences = []
+                naver_price_difference_percentages = []
+                for koryo_price, naver_price in zip(sorted_prices, naver_prices):
+                    # 네이버 가격이 유효할 때만 계산 (현재는 항상 0)
+                    if naver_price > 0:
+                        naver_diff = koryo_price - naver_price
+                        naver_percentage = round((naver_diff / naver_price) * 100, 2) if naver_price > 0 else 0
+                    else:
+                        naver_diff = 0
+                        naver_percentage = 0
+                    naver_price_differences.append(naver_diff)
+                    naver_price_difference_percentages.append(naver_percentage)
+
+                # 데이터프레임 생성 (네이버 컬럼 추가)
+                df = pd.DataFrame({
+                    "고려 기본수량": sorted_quantities,
+                    "판매단가2(VAT포함)": sorted_prices, # 고려 가격
+                    "고려 가격차이": koryo_price_differences,
+                    "고려 가격차이(%)": koryo_price_difference_percentages,
+                    "고려 링크": [url for _ in sorted_quantities],
+                    "네이버 기본수량": naver_base_quantity, # 실제 네이버 데이터로 채워야 함
+                    "판매단가3(VAT포함)": naver_prices, # 실제 네이버 데이터로 채워야 함 (컬럼명 확인 필요)
+                    "네이버 가격차이": naver_price_differences, # 계산된 네이버 가격 차이
+                    "네이버 가격차이(%)": naver_price_difference_percentages # 계산된 네이버 가격 차이(%)
+                })
+                
                 # CSV 저장
-                output_file = (
-                    f"{self.output_dir}/haeoeum_{product_id[:8]}_price_table.csv"
-                )
-                df.to_csv(output_file, index=False)
-                self.logger.info(f"Price table saved to {output_file}")
+                output_file = f"{self.output_dir}/haeoeum_{product_id[:8]}_price_table.csv"
+                df.to_csv(output_file, index=False, encoding='utf-8-sig')
+                self.logger.info(f"가격표 저장 완료: {output_file}")
+                
+                # 데이터 로깅
+                self.logger.info(f"추출된 고려 수량: {sorted_quantities}")
+                self.logger.info(f"추출된 고려 가격: {sorted_prices}")
+                self.logger.info(f"계산된 고려 가격 차이: {koryo_price_differences}")
+                self.logger.info(f"계산된 고려 가격 차이(%): {koryo_price_difference_percentages}")
+                # self.logger.info(f"추출된 네이버 가격: {naver_prices}") # 네이버 가격 로깅 (추후 추가)
+                # self.logger.info(f"계산된 네이버 가격 차이: {naver_price_differences}") # 네이버 가격 차이 로깅
+                # self.logger.info(f"계산된 네이버 가격 차이(%): {naver_price_difference_percentages}") # 네이버 가격 차이(%) 로깅
+                
             except Exception as e:
-                self.logger.error(f"Error saving price table: {e}")
+                self.logger.error(f"가격표 저장 오류: {e}")
 
         # 사양 정보 추출
         specifications = {}

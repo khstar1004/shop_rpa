@@ -6,6 +6,7 @@ import subprocess
 import time
 import traceback
 from typing import List, Optional
+from pathlib import Path
 
 import psutil
 from PyQt5.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
@@ -49,6 +50,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config
         self.logger = logging.getLogger(__name__)
+        self.program_root = Path(__file__).parent.parent.absolute()
 
         # Initialize settings
         self.settings = Settings()
@@ -762,20 +764,22 @@ class MainWindow(QMainWindow):
             )
 
         # Show both intermediate and final directories
-        intermediate_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "intermediate")
-        final_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "final")
+        intermediate_dir = self.program_root / "output" / "intermediate"
+        final_dir = self.program_root / "output" / "final"
         
-        message += f"\n{tr.get_text('intermediate_directory', path=intermediate_dir)}"
-        message += f"\n{tr.get_text('final_directory', path=final_dir)}"
+        message += f"\n{tr.get_text('intermediate_directory', path=str(intermediate_dir))}"
+        message += f"\n{tr.get_text('final_directory', path=str(final_dir))}"
 
         QMessageBox.information(self, tr.get_text("complete"), message)
 
-    def _open_output_directory(self, report_path):
-        """Open the output directory in file explorer"""
+    def open_results_folder(self):
+        """Open the results folder in file explorer"""
         try:
-            output_dir = os.path.dirname(report_path)
-            os.startfile(output_dir)
-            logging.info(tr.get_text("opened_output_dir", path=output_dir))
+            output_dir = self.program_root / "output"
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            os.startfile(str(output_dir))
+            logging.info(tr.get_text("opened_output_dir", path=str(output_dir)))
         except Exception as e:
             logging.warning(tr.get_text("failed_to_open_dir", error=str(e)))
 
@@ -854,19 +858,6 @@ class MainWindow(QMainWindow):
                 event.ignore()
         else:
             event.accept()
-
-    def open_results_folder(self):
-        """Open the results folder in file explorer"""
-        try:
-            output_dir = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)), "output"
-            )
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            os.startfile(output_dir)
-            logging.info(tr.get_text("opened_output_dir", path=output_dir))
-        except Exception as e:
-            logging.warning(tr.get_text("failed_to_open_dir", error=str(e)))
 
     def apply_settings(self):
         """Apply settings from the settings tab"""

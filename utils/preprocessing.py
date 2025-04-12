@@ -13,6 +13,7 @@ import traceback
 from datetime import datetime
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 import pandas as pd
 # Unused imports removed
@@ -582,15 +583,7 @@ def split_large_file(
 
 
 def merge_result_files(file_paths: List[str], original_input: str) -> Optional[str]:
-    """분할 처리된 결과 파일들을 다시 하나의 파일로 병합합니다.
-
-    Args:
-        file_paths: 병합할 결과 파일 경로 목록
-        original_input: 원본 입력 파일 경로
-
-    Returns:
-        Optional[str]: 병합된 파일 경로. 실패 시 None 반환
-    """
+    """분할 처리된 결과 파일들을 다시 하나의 파일로 병합합니다."""
     all_dfs = []
     logger.info("Starting to merge %d result files", len(file_paths))
 
@@ -620,30 +613,26 @@ def merge_result_files(file_paths: List[str], original_input: str) -> Optional[s
         base_name = os.path.splitext(os.path.basename(original_input))[0]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
+        # Get program root directory
+        program_root = Path(__file__).parent.parent.absolute()
+        
         # Save intermediate result
         intermediate_filename = f"{base_name}_intermediate_{timestamp}.xlsx"
-        intermediate_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "intermediate")
+        intermediate_dir = program_root / "output" / "intermediate"
         os.makedirs(intermediate_dir, exist_ok=True)
-        intermediate_filepath = os.path.join(intermediate_dir, intermediate_filename)
+        intermediate_filepath = intermediate_dir / intermediate_filename
         merged_df.to_excel(intermediate_filepath, index=False)
         logger.info("Intermediate result saved to: %s", intermediate_filepath)
 
         # Save final result
         final_filename = f"{base_name}_final_{timestamp}.xlsx"
-        final_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "final")
+        final_dir = program_root / "output" / "final"
         os.makedirs(final_dir, exist_ok=True)
-        final_filepath = os.path.join(final_dir, final_filename)
+        final_filepath = final_dir / final_filename
         merged_df.to_excel(final_filepath, index=False)
         logger.info("Final result saved to: %s", final_filepath)
 
-        return final_filepath
-
-    except (MemoryError, ValueError, TypeError, KeyError, pd.errors.InvalidIndexError) as merge_err:
-        logger.error(f"Error merging DataFrames: {merge_err}")
-        return None
-    except (OSError, IOError) as save_err:
-        logger.error(f"Error saving merged file: {save_err}")
-        return None
-    except Exception as e: # pylint: disable=broad-exception-caught
-        logger.error(f"Unexpected error merging files: {e}", exc_info=True)
+        return str(final_filepath)
+    except Exception as e:
+        logger.error(f"Error merging files: {e}", exc_info=True)
         return None

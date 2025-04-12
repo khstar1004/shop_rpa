@@ -1,0 +1,16 @@
+# 기본 설정
+INTERMEDIATE_DIR: "C:/Users/james/Desktop/Shop_RPA/intermediate"
+CACHE_DIR: "C:/Users/james/Desktop/Shop_RPA/cache"
+LOG_DIR: "C:/Users/james/Desktop/Shop_RPA/logs"
+
+# ChromeDriver 설정
+USE_UNDETECTED_CHROMEDRIVER: true
+CHROME_OPTIONS:
+  - "--headless"
+  - "--no-sandbox"
+  - "--disable-dev-shm-usage"
+
+# 기타 설정
+MAX_IMAGE_DIMENSION: 256
+CACHE_DURATION: 86400
+MAX_CACHE_SIZE_MB: 1024 
