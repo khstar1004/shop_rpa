@@ -61,7 +61,9 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     ):
         """스크래퍼 초기화"""
-        super().__init__(max_retries, cache, (connect_timeout, read_timeout), use_proxies, debug)
+        super().__init__(max_retries=max_retries, timeout=timeout, cache=cache)
+
+        # --- Base Attributes ---
         self.logger = logging.getLogger(__name__)
         self.debug = debug
         self.output_dir = output_dir

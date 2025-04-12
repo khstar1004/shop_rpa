@@ -96,7 +96,6 @@ class ProductProcessor:
             max_retries=self.config["PROCESSING"]["MAX_RETRIES"],
             cache=self.cache,
             timeout=self.config["PROCESSING"].get("REQUEST_TIMEOUT", 30),
-            use_proxies=use_proxies,
         )
 
         # 스크래퍼 설정 적용

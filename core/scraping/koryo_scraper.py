@@ -66,6 +66,17 @@ class KoryoScraper(BaseMultiLayerScraper):
         self.base_url = "https://koreagift.com"
         self.use_proxies = use_proxies
 
+        # New ordering: first create output directory and define headers
+        os.makedirs("output", exist_ok=True)
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Referer": self.base_url,
+        }
+
         # Playwright 설정
         if PLAYWRIGHT_AVAILABLE:
             try:
@@ -83,27 +94,18 @@ class KoryoScraper(BaseMultiLayerScraper):
                         '--disable-site-isolation-trials'
                     ]
                 )
-                self.context = self.browser.new_context(
-                    viewport={'width': 1920, 'height': 1080},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                )
             except Exception as e:
                 self.logger.error(f"Failed to initialize Playwright: {e}")
                 self.playwright = None
                 self.browser = None
-                self.context = None
         else:
             self.logger.warning("Playwright is not available. Some features will be limited.")
             self.playwright = None
             self.browser = None
-            self.context = None
 
         # Selenium 설정
         self.driver = None
         self.setup_selenium()
-
-        # 출력 디렉토리 생성
-        os.makedirs("output", exist_ok=True)
 
         # 사이트 관련 상수 정의 (2023년 URL 업데이트)
         self.mall_url = f"{self.base_url}/ez/mall.php"
@@ -118,22 +120,10 @@ class KoryoScraper(BaseMultiLayerScraper):
             ("전자/디지털", "013004000"),
         ]
 
-        # 요청 헤더 (Selenium에서는 덜 중요하지만 유지)
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Referer": self.base_url,
-        }
-
         # Playwright 사용 가능 여부 체크
         self.playwright_available = PLAYWRIGHT_AVAILABLE
         if not self.playwright_available:
-            self.logger.warning(
-                "Playwright is not installed. Some features will be limited."
-            )
+            self.logger.warning("Playwright is not installed. Some features will be limited.")
 
         # 추출 셀렉터 정의 - 구조화된 다중 레이어 접근 방식
         self.selectors = {
@@ -299,8 +289,20 @@ class KoryoScraper(BaseMultiLayerScraper):
     def search_product_with_playwright(self, query: str, keyword2: str = "") -> List[Product]:
         """Playwright를 사용하여 제품 검색 (crowling_kogift.py 로직 기반 업데이트)"""
         products = []
+        context = None # Initialize context to None
+        page = None # Initialize page to None
+
+        if not self.playwright or not self.browser:
+             self.logger.error("Playwright is not initialized. Cannot perform search.")
+             return []
+
         try:
-            page = self.context.new_page()
+            # Create context and page inside the method
+            context = self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            )
+            page = context.new_page()
             page.set_default_timeout(60000) # 60초 타임아웃
 
             page.on("requestfailed", lambda request: self.logger.warning(f"Request failed: {request.url}"))
@@ -458,28 +460,36 @@ class KoryoScraper(BaseMultiLayerScraper):
                         break
 
 
-            page.close()
+            # Removed page.close() from here as it's handled in finally
             self.logger.info(f"Playwright search finished for '{query}'. Found {len(products)} products.")
             return products
 
         except TimeoutError as te:
              self.logger.error(f"Playwright operation timed out during search for '{query}': {te}", exc_info=True)
-             if 'page' in locals() and page:
+             if page:
                  try:
                      page_content = page.content()
-                     self.logger.debug(f"Page content at timeout:\n{page_content[:500]}...") # 처음 500자 로깅
-                     page.close()
+                     self.logger.debug(f"Page content at timeout:\\n{page_content[:500]}...") # 처음 500자 로깅
+                     # page.close() # Closed in finally
                  except Exception as close_e:
-                     self.logger.error(f"Error getting page content or closing page after timeout: {close_e}")
+                     self.logger.error(f"Error getting page content after timeout: {close_e}")
              return [] # Return empty list on timeout
         except Exception as e:
             self.logger.error(f"Error during Playwright search for '{query}': {e}", exc_info=True)
-            if 'page' in locals() and page:
-                 try:
-                     page.close()
-                 except Exception as close_e:
-                      self.logger.error(f"Error closing page after general exception: {close_e}")
+            # page.close() # Closed in finally
             return [] # Return empty list on other errors
+        finally:
+            # Ensure page and context are closed
+            if page:
+                try:
+                    page.close()
+                except Exception as close_e:
+                    self.logger.error(f"Error closing Playwright page: {close_e}")
+            if context:
+                try:
+                    context.close()
+                except Exception as close_e:
+                    self.logger.error(f"Error closing Playwright context: {close_e}")
 
     def _get_product_details_playwright(self, page, product: Product) -> Product:
         """Playwright를 사용하여 상세 페이지에서 추가 정보 가져오기 (개선 필요할 수 있음)"""

@@ -56,9 +56,8 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
         max_retries: int = 5,
         cache: Optional[FileCache] = None,
         timeout: int = 30,
-        debug: bool = False,
     ):
-        super().__init__(max_retries=max_retries, cache=cache, timeout=timeout, debug=debug)
+        super().__init__(max_retries=max_retries, cache=cache, timeout=timeout)
 
         # 네이버 API 인증 정보
         self.client_id = client_id
@@ -722,16 +721,13 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
     def __init__(
         self,
         max_retries: int = 5,
-        cache: Optional[FileCache] = None,
         timeout: int = 30,
-        use_proxies: bool = False,
-        debug: bool = False,
+        cache: Optional[FileCache] = None,
     ):
-        super().__init__(max_retries, cache, timeout, use_proxies, debug)
+        super().__init__(max_retries, timeout, cache)
         self.logger = logging.getLogger(__name__)
         self.max_retries = max_retries
         self.timeout = timeout
-        self.debug = debug
 
         # API 키 로드
         self.api_keys = self._load_api_keys()
@@ -743,17 +739,13 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
             max_retries=max_retries,
             cache=cache,
             timeout=timeout,
-            debug=debug,
         )
 
         # 단가표 크롤러 생성
         self.price_table_crawler = NaverPriceTableCrawler(
-            output_dir="C:\\RPA\\Image\\Target",
+            output_dir="output",
             headless=False,  # 개발/디버깅 시 False, 배포 시 True로 변경
         )
-
-        # 프록시 설정 (필요 시)
-        self.use_proxies = use_proxies
 
     def _load_api_keys(self) -> Dict[str, str]:
         """
