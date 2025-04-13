@@ -586,7 +586,7 @@ class ProductProcessor:
 
             if not naver_matches:
                 self.logger.info(f"❌ 네이버에서 '{product.name}' 상품을 찾을 수 없음")
-            elif len(naver_matches) == 1 and naver_matches[0].id == "no_match":
+            elif len(naver_matches) == 1 and getattr(naver_matches[0], 'id', '') == "no_match":
                 self.logger.info(
                     f"❌ 네이버에서 '{product.name}' 상품을 찾을 수 없음 (no_match 반환)"
                 )
@@ -595,40 +595,47 @@ class ProductProcessor:
                     f"✅ 네이버에서 '{product.name}' 상품 {len(naver_matches)}개 발견"
                 )
 
-                # 'no_match' 더미 상품 제외
-                real_matches = [m for m in naver_matches if m.id != "no_match"]
+                # 'no_match' 더미 상품 제외 - 이 부분의 필터링 로직도 수정
+                real_matches = []
+                for m in naver_matches:
+                    if not hasattr(m, 'id') or m.id != "no_match":
+                        real_matches.append(m)
+                
+                # 실제 검색 결과가 있는지 다시 확인
+                if real_matches:
+                    # 1단계: 텍스트 유사도만 먼저 계산하여 후보군 추리기
+                    text_filtered_matches = []
+                    for match in real_matches:
+                        text_sim = self.text_matcher.calculate_similarity(
+                            product.name, match.name
+                        )
+                        if text_sim >= initial_text_threshold:
+                            text_filtered_matches.append((match, text_sim))
 
-                # 1단계: 텍스트 유사도만 먼저 계산하여 후보군 추리기
-                text_filtered_matches = []
-                for match in real_matches:
-                    text_sim = self.text_matcher.calculate_similarity(
-                        product.name, match.name
-                    )
-                    if text_sim >= initial_text_threshold:
-                        text_filtered_matches.append((match, text_sim))
-
-                self.logger.info(
-                    f"🔍 텍스트 유사도로 {len(text_filtered_matches)}/{len(real_matches)}개 후보 추려냄 (임계값: {initial_text_threshold:.2f})"
-                )
-
-                # 2단계: 텍스트 유사도가 높은 후보들에 대해서만 이미지 유사도 계산
-                for match, text_sim in text_filtered_matches:
-                    # 기본 MatchResult 생성
-                    match_result = MatchResult(
-                        source_product=product,
-                        matched_product=match,
-                        text_similarity=text_sim,
-                        image_similarity=0.0,
-                        combined_similarity=0.0,
-                        price_difference=0.0,
-                        price_difference_percent=0.0,
+                    self.logger.info(
+                        f"🔍 텍스트 유사도로 {len(text_filtered_matches)}/{len(real_matches)}개 후보 추려냄 (임계값: {initial_text_threshold:.2f})"
                     )
 
-                    # 이미지 유사도 및 가격 차이 계산
-                    self._calculate_image_similarity_and_price(match_result)
+                    # 2단계: 텍스트 유사도가 높은 후보들에 대해서만 이미지 유사도 계산
+                    for match, text_sim in text_filtered_matches:
+                        # 기본 MatchResult 생성
+                        match_result = MatchResult(
+                            source_product=product,
+                            matched_product=match,
+                            text_similarity=text_sim,
+                            image_similarity=0.0,
+                            combined_similarity=0.0,
+                            price_difference=0.0,
+                            price_difference_percent=0.0,
+                        )
 
-                    # 결과 추가
-                    processing_result.naver_matches.append(match_result)
+                        # 이미지 유사도 및 가격 차이 계산
+                        self._calculate_image_similarity_and_price(match_result)
+
+                        # 결과 추가
+                        processing_result.naver_matches.append(match_result)
+                else:
+                    self.logger.info(f"❌ 네이버에서 '{product.name}' 상품의 유효한 매치가 없음")
 
             # 최적 매칭 찾기
             processing_result.best_naver_match = self._find_best_match(
@@ -1367,6 +1374,23 @@ class ProductProcessor:
                     self.logger.warning("No products found from Koryo Gift")
             except Exception as e:
                 self.logger.error(f"Error searching Koryo Gift: {str(e)}")
+            
+            # 네이버 제품 검색
+            try:
+                naver_products = self.naver_crawler.search_product(search_query, max_items=max_items)
+                if naver_products:
+                    self.logger.info(f"Found {len(naver_products)} products from Naver")
+                    all_products.extend(naver_products)
+                    
+                    # 네이버 검색 결과만 별도로 저장
+                    naver_sheet_name = f"naver_{datetime.now().strftime('%Y%m%d_%H%M')}"
+                    naver_output_path = output_path.replace('.xlsx', '_naver.xlsx')
+                    self.excel_manager.save_products(naver_products, naver_output_path, naver_sheet_name)
+                    self.logger.info(f"Successfully saved Naver products to: {naver_output_path}")
+                else:
+                    self.logger.warning("No products found from Naver")
+            except Exception as e:
+                self.logger.error(f"Error searching Naver: {str(e)}")
             
             # 다른 소스의 제품 검색 로직...
             

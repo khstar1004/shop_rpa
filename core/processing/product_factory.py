@@ -2,148 +2,11 @@ import logging
 import re
 from datetime import datetime
 from typing import Any, Dict, Optional, Union, List
-from dataclasses import dataclass, field
 
 import pandas as pd
 
-from ..data_models import Product
+from ..data_models import Product, ProductStatus
 from .data_cleaner import DataCleaner
-
-
-@dataclass
-class Product:
-    """제품 정보를 담는 데이터 클래스"""
-    id: str
-    name: str
-    price: float
-    source: str  # 'koryo', 'other_source' 등
-    url: str
-    image_url: str = ""
-    image_gallery: List[str] = field(default_factory=list)
-    product_code: str = ""
-    description: str = ""
-    specifications: Dict[str, str] = field(default_factory=dict)
-    quantity_prices: Dict[str, float] = field(default_factory=dict)
-    original_input_data: Dict = field(default_factory=dict)
-    fetched_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    status: str = "pending"  # pending, success, failed
-    error_message: str = ""
-    koryo_name: str = ""
-    koryo_price: float = 0
-    koryo_image_url: str = ""
-    koryo_url: str = ""
-
-    def __post_init__(self):
-        """초기화 후 데이터 검증 및 기본값 설정"""
-        # 필수 필드 검증
-        if not self.id or not self.name or not self.source:
-            raise ValueError("Required fields (id, name, source) must not be empty")
-            
-        # 가격이 없으면 0으로 설정
-        if self.price is None:
-            self.price = 0
-            
-        # URL이 없으면 빈 문자열로 설정
-        if not self.url:
-            self.url = ""
-            
-        # 이미지 URL이 없고 갤러리가 있으면 첫 번째 이미지를 메인 이미지로 설정
-        if not self.image_url and self.image_gallery:
-            self.image_url = self.image_gallery[0]
-            
-        # 수집 시간이 없으면 현재 시간으로 설정
-        if not self.fetched_at:
-            self.fetched_at = datetime.now().isoformat()
-
-    def to_dict(self) -> Dict:
-        """제품 정보를 딕셔너리로 변환"""
-        return {
-            'id': self.id,
-            'name': self.name,
-            'price': self.price,
-            'source': self.source,
-            'url': self.url,
-            'image_url': self.image_url,
-            'image_gallery': self.image_gallery,
-            'product_code': self.product_code,
-            'description': self.description,
-            'specifications': self.specifications,
-            'quantity_prices': self.quantity_prices,
-            'fetched_at': self.fetched_at,
-            'status': self.status,
-            'error_message': self.error_message,
-            'koryo_name': self.koryo_name,
-            'koryo_price': self.koryo_price,
-            'koryo_image_url': self.koryo_image_url,
-            'koryo_url': self.koryo_url
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict) -> 'Product':
-        """딕셔너리에서 제품 객체 생성"""
-        required_fields = {'id', 'name', 'source'}
-        if not all(field in data for field in required_fields):
-            raise ValueError(f"Missing required fields: {required_fields - set(data.keys())}")
-            
-        return cls(
-            id=data['id'],
-            name=data['name'],
-            price=float(data.get('price', 0)),
-            source=data['source'],
-            url=data.get('url', ''),
-            image_url=data.get('image_url', ''),
-            image_gallery=data.get('image_gallery', []),
-            product_code=data.get('product_code', ''),
-            description=data.get('description', ''),
-            specifications=data.get('specifications', {}),
-            quantity_prices=data.get('quantity_prices', {}),
-            fetched_at=data.get('fetched_at', datetime.now().isoformat()),
-            status=data.get('status', 'pending'),
-            error_message=data.get('error_message', ''),
-            koryo_name=data.get('koryo_name', ''),
-            koryo_price=float(data.get('koryo_price', 0)),
-            koryo_image_url=data.get('koryo_image_url', ''),
-            koryo_url=data.get('koryo_url', '')
-        )
-
-    def validate(self) -> bool:
-        """제품 데이터 유효성 검사"""
-        try:
-            # 필수 필드 검사
-            if not self.id or not self.name or not self.source:
-                self.error_message = "필수 필드 누락"
-                self.status = "failed"
-                return False
-                
-            # 가격 검사
-            if self.price < 0:
-                self.error_message = "잘못된 가격"
-                self.status = "failed"
-                return False
-                
-            # 이미지 URL 검사
-            if not self.image_url and not self.image_gallery:
-                self.error_message = "이미지 없음"
-                self.status = "failed"
-                return False
-                
-            # 모든 검사 통과
-            self.status = "success"
-            return True
-            
-        except Exception as e:
-            self.error_message = f"유효성 검사 중 오류: {str(e)}"
-            self.status = "failed"
-            return False
-
-    def get_status_message(self) -> str:
-        """현재 상태 메시지 반환"""
-        if self.status == "success":
-            return "성공"
-        elif self.status == "failed":
-            return f"실패: {self.error_message}"
-        else:
-            return "처리 중"
 
 
 class ProductFactory:
@@ -228,34 +91,48 @@ class ProductFactory:
                     )
                     price = 0
 
-            # 기본 Product 객체 생성
-            product = Product(
-                id=product_code,
-                name=product_name,
-                price=price,
-                source="haeoreum",  # 기본 출처
-                url="",  # 기본값으로 빈 문자열 설정
-                original_input_data=row.to_dict(),  # 원본 데이터 보존
-            )
-
-            # 선택적 필드 설정
+            # 이미지 URL
+            image_url = ""
             if (
                 "본사 이미지" in row
                 and not pd.isna(row["본사 이미지"])
                 and str(row["본사 이미지"]).strip()
             ):
                 image_url = self.data_cleaner.clean_url(str(row["본사 이미지"]).strip(), True)
-                product.image_url = image_url
-                product.original_input_data["본사 이미지"] = image_url
 
+            # 제품 URL
+            product_url = ""
             if (
                 "본사상품링크" in row
                 and not pd.isna(row["본사상품링크"])
                 and str(row["본사상품링크"]).strip()
             ):
-                product.url = self.data_cleaner.clean_url(
+                product_url = self.data_cleaner.clean_url(
                     str(row["본사상품링크"]).strip(), True
                 )
+
+            # 상태 확인 및 설정
+            product_status = None
+            if not product_name:
+                product_status = ProductStatus.NOT_FOUND
+            elif not price:
+                product_status = "Price Not Found"  # Price not found
+            elif not image_url:
+                product_status = ProductStatus.IMAGE_NOT_FOUND
+            else:
+                product_status = ProductStatus.OK
+
+            # 기본 Product 객체 생성
+            product = Product(
+                id=product_code,
+                name=product_name,
+                price=price,
+                source="haeoreum",  # 기본 출처
+                url=product_url,  # 제품 URL
+                image_url=image_url,  # 이미지 URL
+                original_input_data=row.to_dict(),  # 원본 데이터 보존
+                status=product_status  # 상태 설정
+            )
 
             # 추가 정보가 있으면 설정
             if "공급사명" in row and not pd.isna(row["공급사명"]):
@@ -264,31 +141,11 @@ class ProductFactory:
             if "중분류카테고리" in row and not pd.isna(row["중분류카테고리"]):
                 product.category = str(row["중분류카테고리"]).strip()
 
-            # 고려기프트 관련 필드 설정
-            if "고려기프트 상품명" in row and not pd.isna(row["고려기프트 상품명"]):
-                product.koryo_name = str(row["고려기프트 상품명"]).strip()
-            else:
-                product.koryo_name = "유사상품 없음"
-
-            if "고려기프트 가격" in row and not pd.isna(row["고려기프트 가격"]):
-                try:
-                    price_str = str(row["고려기프트 가격"]).strip().replace(",", "").replace("원", "")
-                    product.koryo_price = float(price_str)
-                except ValueError:
-                    self.logger.warning(f"Invalid Koryo price format: {row['고려기프트 가격']}")
-                    product.koryo_price = 0
-            else:
-                product.koryo_price = 0
-
-            if "고려기프트 이미지" in row and not pd.isna(row["고려기프트 이미지"]):
-                product.koryo_image_url = self.data_cleaner.clean_url(str(row["고려기프트 이미지"]).strip(), True)
-            else:
-                product.koryo_image_url = "유사상품 없음"
-
-            if "고려기프트 상품링크" in row and not pd.isna(row["고려기프트 상품링크"]):
-                product.koryo_url = self.data_cleaner.clean_url(str(row["고려기프트 상품링크"]).strip(), True)
-            else:
-                product.koryo_url = "유사상품 없음"
+            # 고려기프트 관련 필드 설정 (기존 자체 Product 클래스의 field 제거)
+            # product.koryo_name = ...
+            # product.koryo_price = ...
+            # product.koryo_image_url = ...
+            # product.koryo_url = ...
 
             return product
 
@@ -313,9 +170,12 @@ class ProductFactory:
                     name=fallback_name,
                     price=0.0,
                     source="haeoreum",
+                    url="",
+                    status=ProductStatus.EXTRACT_ERROR,  # 오류 상태 설정
                     original_input_data={"error": str(e)},
                 )
-            except:
+            except Exception as fallback_error:
+                self.logger.error(f"Fallback product creation failed: {fallback_error}")
                 return None
 
     def create_products_from_dataframe(self, df: pd.DataFrame) -> list:

@@ -33,4 +33,10 @@ class TextExtractionStrategy(ExtractionStrategy):
     
     def extract(self, text: str) -> Optional[Dict[str, Any]]:
         """텍스트에서 데이터를 추출합니다."""
-        raise NotImplementedError 
+        raise NotImplementedError
+
+# Available extraction strategies
+strategies = {
+    "dom": DOMExtractionStrategy,
+    "text": TextExtractionStrategy
+} 

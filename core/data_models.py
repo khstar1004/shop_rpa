@@ -1,6 +1,17 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from enum import Enum
+
+
+class ProductStatus(Enum):
+    """Enum representing the status of a product during scraping."""
+    OK = "OK"
+    NOT_FOUND = "Not Found"
+    IMAGE_NOT_FOUND = "Image Not Found"
+    FETCH_ERROR = "Fetch Error"
+    EXTRACT_ERROR = "Extract Error"
+    FETCHED = "Fetched"
 
 
 @dataclass

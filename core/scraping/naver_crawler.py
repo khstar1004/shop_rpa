@@ -249,14 +249,7 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
                 self.logger.info(
                     f"No products found for '{query}' on Naver Shopping API"
                 )
-            else:
-                self.logger.info(
-                    f"Found {len(products)} products for '{query}' on Naver Shopping API"
-                )
-
-            # 매뉴얼 요구사항: 찾지 못하면 "동일상품 없음"으로 처리
-            if not products:
-                # Create a dummy product to indicate "no match found"
+                # 매뉴얼 요구사항: 찾지 못하면 "동일상품 없음"으로 처리
                 no_match_product = Product(
                     id="no_match",
                     name=f"동일상품 없음 - {query}",
@@ -266,6 +259,11 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
                     image_url="",
                 )
                 products.append(no_match_product)
+            else:
+                self.logger.info(
+                    f"Found {len(products)} products for '{query}' on Naver Shopping API"
+                )
+                # 여기서 no_match 제품을 추가하지 않음
 
             return products
 
@@ -829,17 +827,34 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
 
             if not products:
                 self.logger.warning(f"'{processed_query}'에 대한 검색 결과가 없습니다.")
+                # 결과가 없을 때 no_match 제품 생성
+                no_match_product = Product(
+                    id="no_match",
+                    name=f"동일상품 없음 - {processed_query}",
+                    source="naver_shopping",
+                    price=0,
+                    url="",
+                    image_url="",
+                )
+                return [no_match_product]
             else:
                 self.logger.info(
                     f"'{processed_query}'에 대한 검색 결과 {len(products)}개 발견"
                 )
-
-            return products
+                return products
 
         except Exception as e:
             self.logger.error(f"네이버 쇼핑 검색 중 오류 발생: {str(e)}", exc_info=True)
-            # 빈 결과 반환
-            return []
+            # 오류 발생 시에도 no_match 제품 반환
+            no_match_product = Product(
+                id="no_match",
+                name=f"검색 오류 - {query}",
+                source="naver_shopping",
+                price=0,
+                url="",
+                image_url="",
+            )
+            return [no_match_product]
 
     def process_file(self, input_file: str) -> Tuple[Optional[str], Optional[str]]:
         """

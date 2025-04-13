@@ -616,6 +616,20 @@ class ExcelManager:
                 if hasattr(result, "source_product") and result.source_product:
                     processed_count += 1
                     row = {}
+                    
+                    # <<< Logging >>> Check the structure of the result object
+                    self.logger.debug(f"Processing result object: {result}")
+                    if hasattr(result, "best_koryo_match"):
+                        self.logger.debug(f"  -> Found best_koryo_match: {result.best_koryo_match}")
+                    else:
+                        self.logger.debug("  -> best_koryo_match attribute NOT found.")
+                    if hasattr(result, "best_naver_match"):
+                        self.logger.debug(f"  -> Found best_naver_match: {result.best_naver_match}")
+                    elif hasattr(result, "naver_matches") and result.naver_matches:
+                         self.logger.debug(f"  -> Found naver_matches (using first): {result.naver_matches[0]}")
+                    else:
+                        self.logger.debug("  -> best_naver_match / naver_matches attributes NOT found.")
+                    # <<< End Logging >>>
 
                     # 원본 제품 데이터 추출
                     source_data = result.source_product.original_input_data
@@ -647,6 +661,10 @@ class ExcelManager:
                     self._set_default_values(row)
 
                     report_data.append(row)
+                    
+                    # <<< Logging >>> Check the row added to report_data
+                    self.logger.debug(f"  -> Row added to report_data: {row}")
+                    # <<< End Logging >>>
 
             # 로깅 - 처리된 결과 수
             self.logger.info(
@@ -1693,11 +1711,20 @@ class ExcelManager:
             worksheet.cell(row=row_idx, column=8, value=fetched_at)
             
             # 상태 정보
-            status_msg = "성공"
-            if not product.image_url and not product.image_gallery:
-                status_msg = "이미지 추출 실패"
-            elif not product.price:
-                status_msg = "가격 정보 없음"
+            if hasattr(product, 'status') and product.status:
+                # product.status 필드가 존재하고 값이 있으면 우선 사용
+                status_msg = product.status
+                # ProductStatus 열거형인 경우 값을 추출
+                if hasattr(status_msg, 'value'):
+                    status_msg = status_msg.value
+                self.logger.debug(f"Using product status field: {status_msg}")
+            else:
+                # 기존 로직 - status 필드가 없는 경우 현재 상태 판단
+                status_msg = "성공"
+                if not product.image_url and not product.image_gallery:
+                    status_msg = "이미지 추출 실패"
+                elif not product.price:
+                    status_msg = "가격 정보 없음"
             worksheet.cell(row=row_idx, column=9, value=status_msg)
 
             # 셀 스타일 적용
@@ -1758,7 +1785,7 @@ class ExcelManager:
         
         return worksheet
 
-    def save_products(self, products: List[Product], output_path: str, sheet_name: str = None):
+    def save_products(self, products: List[Product], output_path: str, sheet_name: str = None, naver_results: List[Product] = None):
         """Save products to Excel file with proper formatting and error handling"""
         try:
             # Ensure output directory exists
@@ -1779,19 +1806,32 @@ class ExcelManager:
             
             # 제품 데이터 쓰기
             current_row = 2  # 헤더 다음 행부터 시작
-            for product in products:
-                if product.source == 'koryo':  # 고려기프트 제품 확인
-                    self.logger.debug(f"Processing Koryo product: {product.name}")
-                current_row = self._write_product_data(worksheet, current_row, product)
+            
+            # 고려기프트 제품 쓰기
+            if products:
+                self.logger.info(f"Writing {len(products)} products to Excel")
+                for product in products:
+                    if product.source == 'koryo':  # 고려기프트 제품 확인
+                        self.logger.debug(f"Processing Koryo product: {product.name}")
+                    current_row = self._write_product_data(worksheet, current_row, product)
+            
+            # 네이버 검색 결과 쓰기
+            if naver_results:
+                self.logger.info(f"Writing {len(naver_results)} Naver results to Excel")
+                for product in naver_results:
+                    if product.id != "no_match": # no_match 제품은 건너뜁니다
+                        self.logger.debug(f"Processing Naver product: {product.name}")
+                        current_row = self._write_product_data(worksheet, current_row, product)
             
             # 결과 요약 추가
+            total_products = (len(products) if products else 0) + (len([p for p in naver_results if p.id != "no_match"]) if naver_results else 0)
             summary_row = current_row + 1
-            worksheet.cell(row=summary_row, column=1, value=f"총 제품 수: {len(products)}")
+            worksheet.cell(row=summary_row, column=1, value=f"총 제품 수: {total_products}")
             worksheet.cell(row=summary_row, column=2, value=f"처리 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             
             # 파일 저장
             workbook.save(output_path)
-            self.logger.info(f"Successfully saved {len(products)} products to {output_path}")
+            self.logger.info(f"Successfully saved {total_products} products to {output_path}")
             
         except Exception as e:
             self.logger.error(f"Error saving products to Excel: {str(e)}", exc_info=True)

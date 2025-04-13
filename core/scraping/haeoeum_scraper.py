@@ -271,6 +271,7 @@ class HaeoeumScraper(BaseMultiLayerScraper):
             "image_gallery": [],
             "is_sold_out": False,
             "quantity_prices": {},
+            "status": None,  # 상태 필드 기본값
         }
 
         # 모든 상품 이미지 URL 추출
@@ -430,7 +431,28 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                         
                     quantity_prices[str(qty)] = price
 
+        # 수량별 가격 추가
         product_data["quantity_prices"] = quantity_prices
+
+        # 상품 URL 추가
+        product_data["url"] = url
+
+        # 필요한 필드 이름 조정 (API 호환성)
+        product_data["id"] = product_data["product_id"]
+        product_data["name"] = product_data["title"]
+        product_data["image_url"] = product_data["main_image"]
+
+        # 상태 설정 (status)
+        if product_data["is_sold_out"]:
+            product_data["status"] = "Sold Out"
+        elif not product_data["name"]:
+            product_data["status"] = "Title Not Found"
+        elif not product_data["price"]:
+            product_data["status"] = "Price Not Found"
+        elif not product_data["image_url"]:
+            product_data["status"] = "Image Not Found"
+        else:
+            product_data["status"] = "OK"
 
         # 가격표가 있으면 CSV로 저장
         if quantity_prices:

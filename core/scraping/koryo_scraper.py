@@ -10,7 +10,7 @@ import time
 import urllib.parse
 import random
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 from dataclasses import dataclass, field
 
@@ -19,8 +19,10 @@ from playwright.sync_api import sync_playwright, Playwright, Browser, Page, Loca
 # Add imports for caching
 from utils.caching import FileCache, cache_result
 
-from ..data_models import Product
+from ..data_models import Product, ProductStatus
 from .base_multi_layer_scraper import BaseMultiLayerScraper
+from .extraction_strategy import ExtractionStrategy, strategies
+from .selectors import KORYO_SELECTORS
 
 # Add imports for threading
 import threading
@@ -193,6 +195,14 @@ class KoryoScraper(BaseMultiLayerScraper):
             ("전자/디지털", "013004000"),
         ]
         os.makedirs("output", exist_ok=True)
+
+        # Set base URLs to try
+        self.base_search_urls = [
+            "https://koreagift.com/ez/goods/goods_search.php",
+            "https://adpanchok.co.kr/ez/goods/goods_search.php"
+        ]
+        # Keep the original search_url for compatibility if needed elsewhere, but prefer base_search_urls for searching
+        self.search_url = self.base_search_urls[0] 
 
     # --- Playwright 초기화 및 종료 --- 
 
@@ -461,7 +471,6 @@ class KoryoScraper(BaseMultiLayerScraper):
             if not found_title:
                  self.logger.warning(f"Could not find detail title using selectors on {product_link}. Using list title: {title}")
 
-
             # 가격 (상세 페이지 우선)
             price = item.get("price", 0.0) # Use list price as fallback
             found_price = False
@@ -639,7 +648,10 @@ class KoryoScraper(BaseMultiLayerScraper):
                  status = "Image Not Found"
                  self.logger.warning(f"Could not determine main image URL for product: {title} ({product_link})")
             else:
-                 status = "OK" # Everything extracted successfully
+                 if price > 0:
+                     status = "OK"  # 이미지와 가격이 모두 있으면 OK
+                 else:
+                     status = "Price Not Found"  # 이미지는 있지만 가격이 없는 경우
 
             # Product 객체 생성
             product = Product(
@@ -656,7 +668,7 @@ class KoryoScraper(BaseMultiLayerScraper):
                 specifications=specifications if specifications else None,
                 description=description,
                 fetched_at=datetime.now().isoformat(),
-                status=status, # Set the status here
+                status=status, # 업데이트된 status 사용
             )
             self.logger.info(f"Successfully extracted details for product ID: {product.id} with status: {status}")
             return product
@@ -826,321 +838,332 @@ class KoryoScraper(BaseMultiLayerScraper):
             return None
 
     def search_product(self, query: str, max_items: int = 50, keyword2: Optional[str] = None) -> List[Product]:
-        """상품 검색 (Playwright 사용)"""
-        # Use thread-local browser context for this operation
-        self._close_thread_context()  # Ensure clean state
+        """상품 검색 (Playwright 사용, 다중 URL 시도)"""
+        self._close_thread_context() # Ensure clean state
         browser, page = self._create_new_context()
-        
+
         if not browser or not page:
             self.logger.error(f"Search failed for '{query}': Could not create browser context")
             return []
 
-        self.logger.info(f"Searching Koryo Gift for: '{query}' (Secondary: '{keyword2}')")
-        # Caching logic removed for simplicity in this example, assume it's handled elsewhere if needed
-
+        self.logger.info(f"Searching Koryo sites for: '{query}' (Secondary: '{keyword2}')")
         products = []
+        navigation_successful = False
+        active_search_url = None # Store the URL that succeeded
+
         try:
-            # ... (navigation and re-search logic remains the same) ...
+            # --- Build Search Params --- #
             search_params = {
                 "search_keyword": query,
                 "search_type": "all"
             }
-            search_url_with_params = f"{self.search_url}?{urllib.parse.urlencode(search_params)}"
-            self.logger.info(f"Navigating directly to search URL: {search_url_with_params}")
+            # --- End Build Search Params --- #
 
-            # Navigate with robust error handling for net::ERR_ABORTED errors
-            page_response = None
-            try:
-                page_response = page.goto(search_url_with_params, wait_until='networkidle')
-            except Exception as e:
-                if "net::ERR_ABORTED" in str(e):
-                    self.logger.warning(f"Navigation aborted on 'networkidle'. Retrying with 'domcontentloaded': {search_url_with_params} - {e}")
-                    try:
-                         page_response = page.goto(search_url_with_params, wait_until='domcontentloaded')
-                    except Exception as inner_e:
-                         self.logger.error(f"Retry navigation failed for {search_url_with_params}: {inner_e}")
-                         self._close_thread_context()
-                         return [] # Navigation completely failed
-                else:
-                    self.logger.error(f"Navigation error for {search_url_with_params}: {e}")
-                    self._close_thread_context()
-                    return [] # Other navigation error
-            
-            # Check for "Not Found" after navigation attempt
-            try:
-                page_content = page.content().lower() # Get page content for checking
-                page_title = page.title().lower()
-                if "not found" in page_content or "not found" in page_title or (page_response and not page_response.ok()):
-                     status_code = page_response.status if page_response else "N/A"
-                     self.logger.error(f"Search page not found or returned error for URL: {search_url_with_params} (Query: '{query}'). Status: {status_code}. Title: '{page.title()}'")
-                     self._close_thread_context()
-                     return []
-            except Exception as check_e:
-                 # Handle cases where page content/title check fails (e.g., page closed unexpectedly)
-                 self.logger.error(f"Error checking page content/title after navigation for {search_url_with_params}: {check_e}")
-                 self._close_thread_context()
-                 return []
+            # === Navigation Loop: Try Base URLs === #
+            for base_url in self.base_search_urls:
+                current_search_url = f"{base_url}?{urllib.parse.urlencode(search_params)}"
+                self.logger.info(f"Attempting navigation to search URL: {current_search_url}")
+                page_response = None # Reset response for this attempt
 
+                try:
+                    nav_timeout = self.config.navigation_timeout
+                    page_response = page.goto(current_search_url, wait_until='networkidle', timeout=nav_timeout)
 
-            # 2. 상품 개수 확인 (재검색 여부 결정)
+                    # Check 1: Response OK?
+                    if page_response is None or not page_response.ok:
+                        status_code = page_response.status if page_response else "N/A"
+                        self.logger.warning(f"Navigation to {current_search_url} failed or returned non-OK status: {status_code}. Trying next URL.")
+                        continue # Try next base URL
+
+                    # Check 2: Content indicates "Not Found"?
+                    page_content = page.content().lower()
+                    page_title = page.title().lower()
+                    if "not found" in page_content or "not found" in page_title:
+                        self.logger.warning(f"Search page content indicates 'Not Found' for URL: {current_search_url} (Query: '{query}'). Title: '{page.title()}'. Trying next URL.")
+                        continue # Try next base URL
+
+                    # Success for this URL
+                    self.logger.info(f"Successfully navigated to and verified search page: {current_search_url}")
+                    navigation_successful = True
+                    active_search_url = current_search_url # Store the successful URL
+                    break # Exit the loop, proceed with scraping
+
+                # --- Handle Navigation Exceptions --- #
+                except Exception as e:
+                    error_str = str(e)
+                    if (
+                        "net::ERR_CONNECTION_RESET" in error_str or
+                        "net::ERR_EMPTY_RESPONSE" in error_str or
+                        isinstance(e, PlaywrightTimeoutError)
+                    ):
+                        self.logger.warning(f"Network/Timeout error navigating to {current_search_url}: {type(e).__name__}. Trying next URL.")
+                        continue # Try next URL
+                    elif "net::ERR_ABORTED" in error_str:
+                        self.logger.warning(f"Navigation aborted ('networkidle') for {current_search_url}. Retrying ('domcontentloaded').")
+                        try:
+                            page_response = page.goto(current_search_url, wait_until='domcontentloaded', timeout=nav_timeout)
+                            # Check response and content again after retry
+                            if page_response is None or not page_response.ok:
+                                status_code = page_response.status if page_response else "N/A"
+                                self.logger.warning(f"Retry navigation failed for {current_search_url}. Status: {status_code}. Trying next URL.")
+                                continue
+                            page_content = page.content().lower()
+                            page_title = page.title().lower()
+                            if "not found" in page_content or "not found" in page_title:
+                                self.logger.warning(f"Search page 'Not Found' after retry for {current_search_url}. Trying next URL.")
+                                continue
+                            # Retry successful
+                            self.logger.info(f"Successfully navigated (on retry) to: {current_search_url}")
+                            navigation_successful = True
+                            active_search_url = current_search_url
+                            break # Exit loop
+                        except Exception as inner_e:
+                            self.logger.error(f"Retry navigation failed definitively for {current_search_url}: {inner_e}. Trying next URL.")
+                            continue # Try next URL
+                    else:
+                        # Unexpected error during navigation attempt
+                        self.logger.error(f"Unexpected navigation error for {current_search_url}: {e}. Trying next URL.")
+                        continue # Try next URL
+                # --- End Handle Navigation Exceptions --- #
+            # === End Navigation Loop === #
+
+            # --- Check if Navigation Succeeded Overall --- #
+            if not navigation_successful:
+                self.logger.error(f"Failed to navigate successfully to ANY search URL for query: '{query}'.")
+                # No need to proceed further, cleanup will happen in finally
+                return [] # Return empty list immediately
+            # --- End Navigation Check --- #
+
+            # \"\"\" --- Start Scraping Logic (Only runs if navigation_successful is True) --- \"\"\"
+            self.logger.info(f"Starting scraping process on successfully loaded page: {active_search_url}")
+
+            # --- Step 2: Check product count (for potential re-search) --- #
             product_count = 0
             try:
-                 count_locator = page.locator(self.selectors["product_count"]).first
-                 # count_locator.wait_for(state='visible', timeout=10000) # 필요시 요소 대기 추가
-                 count_text = self._safe_get_text(count_locator, timeout=10000)
-                 if count_text:
-                     product_count = int(count_text.replace(',', ''))
-                     self.logger.info(f"Found {product_count} products after initial search.")
+                count_locator = page.locator(self.selectors["product_count"]).first
+                count_text = self._safe_get_text(count_locator, timeout=10000)
+                if count_text:
+                    count_match = re.search(r'\\d+', count_text.replace(',', ''))
+                    if count_match:
+                        product_count = int(count_match.group(0))
+                        self.logger.info(f"Found {product_count} products after initial search.")
+                    else:
+                        self.logger.warning(f"Could not parse product count from text: '{count_text}'")
+                else:
+                    self.logger.warning(f"Could not get text for product count locator.")
             except Exception as e:
-                 self.logger.warning(f"Could not determine product count after initial search: {e}")
+                self.logger.warning(f"Could not determine product count after initial search: {e}")
+            # --- End Step 2 --- #
 
-            # 3. 재검색 조건 및 실행 (페이지 내에서 수행)
+            # --- Step 3: Perform re-search if necessary --- #
             if keyword2 and keyword2.strip() and product_count >= 100:
                 self.logger.info(f"Product count ({product_count}) >= 100. Performing re-search with: '{keyword2}'")
-                re_search_input = self._wait_for_selector(page, self.selectors["re_search_input"])
-                re_search_button = page.locator(self.selectors["re_search_button"]).first
+                re_search_input_loc = self.selectors["re_search_input"]
+                re_search_button_loc = self.selectors["re_search_button"]
+                re_search_input = self._wait_for_selector(page, re_search_input_loc)
+                re_search_button = page.locator(re_search_button_loc).first
                 if re_search_input and re_search_button.is_visible(timeout=5000):
                     re_search_input.fill(keyword2)
-                    # time.sleep(random.uniform(0.5, 1.0)) # 제거
                     if self._click_locator(re_search_button):
-                         self._wait_for_load_state(page, 'networkidle') # 재검색 클릭 후 대기
-                         self.logger.info(f"Re-search submitted for '{keyword2}'.")
-                         # 재검색 후 상품 수 다시 확인 (선택적)
-                         try:
-                              count_locator = page.locator(self.selectors["product_count"]).first
-                              count_text = self._safe_get_text(count_locator, timeout=10000)
-                              if count_text:
-                                   product_count = int(count_text.replace(',', ''))
-                                   self.logger.info(f"Found {product_count} products after re-search.")
-                         except Exception as e:
-                              self.logger.warning(f"Could not determine product count after re-search: {e}")
+                        self._wait_for_load_state(page, 'networkidle')
+                        self.logger.info(f"Re-search submitted for '{keyword2}'.")
+                        # Re-check product count (optional)
+                        try:
+                            count_locator = page.locator(self.selectors["product_count"]).first
+                            count_text = self._safe_get_text(count_locator, timeout=10000)
+                            if count_text:
+                                count_match = re.search(r'\\d+', count_text.replace(',', ''))
+                                if count_match:
+                                    product_count = int(count_match.group(0))
+                                    self.logger.info(f"Found {product_count} products after re-search.")
+                                else:
+                                     self.logger.warning(f"Could not parse count after re-search: '{count_text}'")
+                            else:
+                                 self.logger.warning(f"Could not get count text after re-search.")
+                        except Exception as e:
+                            self.logger.warning(f"Could not determine count after re-search: {e}")
                     else:
-                         self.logger.warning("Failed to click re-search button.")
+                        self.logger.warning("Failed to click re-search button.")
                 else:
-                     self.logger.warning("Re-search elements not found or visible.")
+                    self.logger.warning("Re-search elements not found or visible.")
+            # --- End Step 3 --- #
 
-
-            # 4. 페이지네이션 및 상품 추출
+            # --- Step 4: Paginate and extract product list items --- #
             page_num = 1
             processed_links = set()
-
             while True:
                 if max_items > 0 and len(products) >= max_items:
-                     self.logger.info(f"Reached max items ({max_items}). Stopping pagination.")
-                     break
+                    self.logger.info(f"Reached max items ({max_items}). Stopping pagination.")
+                    break
 
-                self.logger.info(f"Scraping page {page_num} for search '{query}'")
-                # 현재 페이지 상품 목록 대기
+                self.logger.info(f"Scraping page {page_num} for search '{query}' on {page.url}")
                 list_selector = self.selectors["product_list"]["selector"]
-                list_container = self._wait_for_selector(page, list_selector, state='visible')
-                if not list_container:
-                     # 목록 컨테이너는 있지만 내용물이 없는 경우도 고려
-                     if page.locator(list_selector).count() == 0:
-                        self.logger.warning(f"Product list container found but no items inside on page {page_num}. Assuming end of results for '{query}'.")
-                        break
-                     else: # 컨테이너는 있는데 안보이는 경우 잠시 대기 후 재시도 또는 실패 처리
-                          self.logger.warning(f"Product list ({list_selector}) not visible on page {page_num}. Assuming end of results for '{query}'.")
-                          break
+                try:
+                    page.wait_for_selector(list_selector, state='visible', timeout=15000)
+                except PlaywrightTimeoutError:
+                    self.logger.warning(f"Product list ({list_selector}) did not become visible on page {page_num}. Assuming end of results.")
+                    break
 
                 item_locators = page.locator(list_selector).all()
-                if not item_locators and page_num == 1: # 첫 페이지에 결과가 아예 없는 경우
-                    self.logger.info(f"No product items found on the first page for query: '{query}'. Ending search.")
-                    break
-                elif not item_locators and page_num > 1:
-                    self.logger.info(f"No more product items found on page {page_num} for query: '{query}'. Ending pagination.")
+                if not item_locators:
+                    if page_num == 1:
+                        self.logger.info("No product items found on the first page.")
+                    else:
+                        self.logger.info(f"No more product items found on page {page_num}.")
                     break
 
                 found_on_page = 0
-                items_to_fetch_details = [] # Collect items needing detail fetch
-
+                items_to_fetch_details = []
                 for item_locator in item_locators:
-                    if max_items > 0 and len(products) >= max_items:
-                         break
+                    if max_items > 0 and len(products) + len(items_to_fetch_details) >= max_items:
+                        break
                     try:
                         product_data = self._extract_list_item(item_locator)
                         if product_data and product_data.get("link") and product_data["link"] not in processed_links:
-                            # Don't create Product object yet, fetch details first
                             items_to_fetch_details.append(product_data)
                             processed_links.add(product_data["link"])
                             found_on_page += 1
-                            self.logger.debug(f"Found list item: {product_data.get('title')} ({product_data.get('link')})")
-                        elif product_data and product_data.get("link") in processed_links:
-                             self.logger.debug(f"Skipping already processed link: {product_data['link']}")
-
                     except Exception as e:
-                        self.logger.warning(f"Error extracting product data from list element on page {page_num}: {e}", exc_info=self.config.debug)
+                        self.logger.warning(f"Error extracting list item on page {page_num}: {e}", exc_info=self.config.debug)
 
-                self.logger.info(f"Found {found_on_page} potential products on page {page_num}. Fetching details...")
+                self.logger.info(f"Found {found_on_page} new items on page {page_num}. Fetching details...")
 
-                # Fetch details for items found on this page
-                # NOTE: This fetches details sequentially. Consider parallel fetching for performance.
+                # Fetch details (Consider parallelization for performance)
                 for item_data in items_to_fetch_details:
                     if max_items > 0 and len(products) >= max_items:
-                         break
-                    # Detail fetching handles its own context and caching
+                        break
                     detailed_product = self._get_product_details_sync_playwright(item_data)
                     if detailed_product:
-                         products.append(detailed_product)
-                         self.logger.debug(f"Successfully processed product: {detailed_product.name} (Status: {detailed_product.status})")
+                        products.append(detailed_product)
                     else:
-                         # Log failure to get details, but continue search
-                         self.logger.warning(f"Failed to get details for product listed at: {item_data.get('link')}")
+                        self.logger.warning(f"Failed get details for: {item_data.get('link')}")
 
-                # If no new items were even found on the list page (before detail fetch), break.
                 if found_on_page == 0 and page_num > 1:
-                     self.logger.info(f"No new product links found on page {page_num} for query: '{query}'. Ending pagination.")
-                     break
-
-                # 다음 페이지 이동 로직 (JS 우선)
-                js_next_page_locator = page.locator(self.selectors["next_page_js"]["selector"]).last
-                href_next_page_locator = page.locator(self.selectors["next_page_href"]["selector"]).last
-
-                next_page_clicked = False
-                # JS 페이징 시도 (기존 로직 유지)
-                if js_next_page_locator.is_visible(timeout=3000):
-                    # ... (JS click logic) ...
-                    onclick_attr = self._safe_get_attribute(js_next_page_locator, "onclick")
-                    if onclick_attr:
-                         page_match = self.patterns["js_page_number"].search(onclick_attr)
-                         if page_match:
-                              next_page_num_in_js = int(page_match.group(1))
-                              if next_page_num_in_js > page_num:
-                                   self.logger.debug(f"Attempting to click JS next page (to page {next_page_num_in_js})")
-                                   if self._click_locator(js_next_page_locator):
-                                        self._wait_for_load_state(page, 'networkidle')
-                                        page_num = next_page_num_in_js
-                                        next_page_clicked = True
-                                        self.logger.info(f"Successfully navigated to page {page_num} via JS.")
-                                        time.sleep(self.config.request_delay)
-                                   else:
-                                       self.logger.warning("Failed to click JS next page.")
-                         else:
-                              self.logger.debug(f"Could not parse JS page number from onclick: {onclick_attr}")
-
-
-                # JS 페이징 실패 또는 없을 경우, href 페이징 시도
-                if not next_page_clicked and href_next_page_locator.is_visible(timeout=3000):
-                    # ... (href click logic) ...
-                    next_href = self._safe_get_attribute(href_next_page_locator, self.selectors["next_page_href"]["attribute"])
-                    if next_href and next_href != '#' and not next_href.startswith("javascript:"):
-                         next_url = urljoin(page.url, next_href)
-                         self.logger.debug(f"Attempting to navigate to next page via href: {next_url}")
-                         try:
-                              page.goto(next_url, wait_until='networkidle')
-                              page_num += 1 # Increment page number optimistically
-                              next_page_clicked = True
-                              self.logger.info(f"Successfully navigated to page {page_num} via href.")
-                              time.sleep(self.config.request_delay)
-                         except (PlaywrightTimeoutError, PlaywrightError) as nav_err:
-                              self.logger.warning(f"Error navigating to next page via href {next_url}: {nav_err}")
-                    else:
-                         self.logger.debug("Href next page link found but invalid or empty.")
-
-
-                # 다음 페이지 이동 실패 시 종료
-                if not next_page_clicked:
-                    self.logger.info(f"No more pages found or failed to navigate. Ending pagination for query: '{query}'.")
+                    self.logger.info(f"No new links found on page {page_num}. Ending pagination.")
                     break
 
-        except (PlaywrightTimeoutError, PlaywrightError) as e:
-            self.logger.error(f"Playwright error during search for '{query}': {e}", exc_info=self.config.debug)
-            # Return whatever products were found before the error
-            return products
+                # Next Page Logic
+                js_next_selector = self.selectors["next_page_js"]["selector"]
+                href_next_selector = self.selectors["next_page_href"]["selector"]
+                js_next_page_locator = page.locator(js_next_selector).last
+                href_next_page_locator = page.locator(href_next_selector).last
+                next_page_clicked = False
+                # Try JS paging
+                if js_next_page_locator.is_visible(timeout=2000):
+                    js_code_template = self.selectors["next_page_js"].get("js_code", "")
+                    if js_code_template:
+                        js_code = js_code_template.replace("{page_num + 1}", str(page_num + 1))
+                        try:
+                            page.evaluate(js_code)
+                            self._wait_for_load_state(page)
+                            next_page_clicked = True
+                            self.logger.info(f"Moved to page {page_num + 1} (JS).")
+                        except Exception as js_e:
+                            self.logger.warning(f"JS paging failed: {js_e}. Trying href.")
+                    else:
+                        self.logger.warning("JS code template missing.")
+                # Try href paging
+                if not next_page_clicked and href_next_page_locator.is_visible(timeout=2000):
+                    if self._click_locator(href_next_page_locator):
+                        self._wait_for_load_state(page)
+                        next_page_clicked = True
+                        self.logger.info(f"Moved to page {page_num + 1} (href).")
+                    else:
+                        self.logger.warning(f"Failed to click href next link.")
+
+                if not next_page_clicked:
+                    self.logger.info(f"No more pages found after page {page_num}.")
+                    break
+                page_num += 1
+            # --- End Pagination Loop --- #
+            # \"\"\" --- End Scraping Logic --- \"\"\"
+
+        # --- General Exception Handling --- #
         except Exception as e:
-            self.logger.error(f"Unexpected error during search for '{query}': {e}", exc_info=True)
-            # Return whatever products were found before the error
-            return products
+            self.logger.error(f"Major error during Koryo search process for '{query}': {e}", exc_info=True)
+            # products list will contain whatever was scraped before the error
+        # --- End General Exception Handling --- #
+
+        # --- Cleanup --- #
         finally:
-            # Always clean up the thread-local browser context
-            self._close_thread_context()
+            self._close_thread_context() # Ensure context is always closed
+        # --- End Cleanup --- #
 
-        if not products:
-            self.logger.warning(f"Search completed, but no products found matching query: '{query}'")
-        else:
-             self.logger.info(f"Search completed for '{query}'. Found {len(products)} products.")
-
-        # Caching logic removed, add back if needed: self.cache_sparse_data(cache_key, products)
+        self.logger.info(f"Finished Koryo search for '{query}'. Found {len(products)} products.")
         return products
 
-
     def _get_product_details_sync_playwright(self, item: Dict) -> Optional[Product]:
-         """상품 상세 페이지로 이동하여 정보 추출 (Playwright) - Status 필드 처리 포함"""
-         # Use thread-local browser context for this operation
-         self._close_thread_context()  # Ensure clean state
-         browser, page = self._create_new_context()
+        """상품 상세 정보 추출 (Playwright 동기)"""
+        # ... (rest of the _get_product_details_sync_playwright method remains the same) ...
+        # Ensure this method also uses its own context or reuses carefully
+        link = item.get("link")
+        if not link:
+            self.logger.warning("Item dictionary is missing 'link'. Cannot fetch details.")
+            return None
 
-         if not browser or not page:
-             self.logger.error(f"Detail fetch failed for {item.get('link')}: Could not create browser context")
-             return None
-
-         product_link = item.get("link")
-         if not product_link:
-              self.logger.error("Invalid item data for detail fetching: Missing link.")
-              self._close_thread_context() # Clean up
-              return None
-
-         product_id = item.get("product_id") or hashlib.md5(product_link.encode()).hexdigest()
-         cache_key = f"koryo_detail|{product_id}"
-         product: Optional[Product] = None # Initialize product variable
-
-         cached_result = self.get_sparse_data(cache_key)
-         if cached_result:
-             self.logger.debug(f"Using cached detail for: {product_id}")
-             # Ensure cached result is a Product object or reconstruct
-             if isinstance(cached_result, Product):
-                  product = cached_result
-             elif isinstance(cached_result, dict):
-                 try:
-                     # Reconstruct Product from dict, ensuring all fields (including status) are handled
-                     # Note: If Product dataclass changes, this needs careful handling
-                     # Assuming Product(**cached_result) works if cache stores dict correctly
-                     product = Product(**cached_result)
-                     self.logger.debug(f"Reconstructed Product from cached dict for {product_id}")
-                 except TypeError as te:
-                     self.logger.warning(f"Cached data for {product_id} is dict but couldn't reconstruct Product: {te}. Refetching.")
-                     # Invalidate cache? For now, just refetch.
-                     product = None # Force refetch
+        # Cache check
+        cache_key = f"koryo_details_{link}"
+        if self.cache and (cached_product := self.cache.get(cache_key)):
+             if isinstance(cached_product, Product):
+                 self.logger.info(f"Cache hit for Koryo details: {link}")
+                 # Ensure status is updated if needed, maybe re-validate cache freshness?
+                 # cached_product.status = ProductStatus.FETCHED # Or keep cached status
+                 return cached_product
              else:
-                  self.logger.warning(f"Cached data for {product_id} is not a Product object or dict (type: {type(cached_result)}). Refetching.")
-                  product = None # Force refetch
+                 self.logger.warning(f"Invalid data type found in cache for key {cache_key}. Fetching fresh data.")
 
-             if product: # If successfully loaded from cache
-                 self._close_thread_context() # Clean up resources
+
+        self._close_thread_context() # Ensure clean state before getting details
+        browser, page = self._create_new_context()
+        if not browser or not page:
+            self.logger.error(f"Failed to get details for {link}: Could not create browser context")
+            return None
+
+        product: Optional[Product] = None
+        try:
+            self.logger.info(f"Fetching details for Koryo product: {link}")
+            response = page.goto(link, wait_until='domcontentloaded', timeout=self.config.navigation_timeout)
+
+            if not response or not response.ok:
+                 status = response.status if response else "N/A"
+                 self.logger.error(f"Failed to load product page {link}. Status: {status}")
+                 product = Product(id=item.get('id', f"error_{link}"), name=item.get('title', 'Failed to Load'), url=link, source='koryo', status=ProductStatus.FETCH_ERROR) # Assuming ProductStatus enum exists
+                 return product # Return error product
+
+
+            # Wait for essential content if necessary (example: price or title)
+            # self._wait_for_selector(page, self.selectors['details']['title'], timeout=self.config.wait_timeout)
+
+            # Extract details using the existing logic
+            product = self._extract_product_details(page, item)
+
+            if product:
+                 # 상태가 이미 설정되어 있지 않거나 기본 메시지인 경우에만 업데이트
+                 if not product.status or product.status == "Extraction Failed":
+                     product.status = ProductStatus.FETCHED  # Mark as successfully fetched
+                 
+                 self.logger.info(f"Successfully extracted details for: {product.name} with status: {product.status}")
+                 if self.cache:
+                     self.cache.set(cache_key, product)  # Cache the successful result
+            else:
+                 # Extraction failed after successful page load
+                 self.logger.error(f"Failed to extract details from page: {link}")
+                 product = Product(id=item.get('id', f"extract_error_{link}"), name=item.get('title', 'Extraction Failed'), url=link, source='koryo', status=ProductStatus.EXTRACT_ERROR)
+                 # Don't cache extraction errors to allow retry
                  return product
-             # If cache load failed, proceed to fetch
 
-         # If not cached or reconstruction failed, fetch live data
-         try:
-             self.logger.info(f"Fetching live details for: {product_link} (ID: {product_id})")
-             page.goto(product_link, wait_until='domcontentloaded')
-             self._wait_for_load_state(page, 'networkidle')
 
-             # 상세 정보 추출 (this now sets the status internally)
-             product = self._extract_product_details(page, item)
+        except Exception as e:
+            self.logger.error(f"Error fetching/extracting Koryo details for {link}: {e}", exc_info=True)
+            product = Product(id=item.get('id', f"exception_{link}"), name=item.get('title', 'Exception'), url=link, source='koryo', status=ProductStatus.FETCH_ERROR)
+            return product
+        finally:
+            # Close the context created for this detail fetch
+            if page: page.close()
+            # Assuming context closing is handled if _create_new_context stores it
+            # Or manually close: if context: context.close()
+            pass # Ensure cleanup
 
-             if product:
-                 self.logger.info(f"Successfully extracted live details for: {product_id} (Status: {product.status})")
-                 self.cache_sparse_data(cache_key, product) # Cache the Product object
-             else:
-                 # _extract_product_details already logged the specific error
-                 self.logger.warning(f"Failed to extract details from live page: {product_link}")
-                 # Return None to signify failure
-                 product = None
-
-             # Return the product (or None if extraction failed)
-             return product
-
-         except (PlaywrightTimeoutError, PlaywrightError) as e:
-             self.logger.error(f"Playwright error fetching detail page {product_link}: {e}")
-             return None # Indicate failure
-         except Exception as e:
-             self.logger.error(f"Unexpected error getting product details for {product_link}: {e}", exc_info=self.config.debug)
-             return None # Indicate failure
-         finally:
-             # Always clean up the thread-local browser context
-             self._close_thread_context()
-
-         self.cache_sparse_data(cache_key, product)
-         return product
+        return product
 
         
