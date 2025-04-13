@@ -1,6 +1,6 @@
 """Toast notification widget"""
 
-from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint
+from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QRectF
 from PyQt5.QtWidgets import QFrame, QVBoxLayout, QLabel, QHBoxLayout
 from PyQt5.QtGui import QColor, QPainter, QPainterPath
 
@@ -136,15 +136,19 @@ class ToastNotification(QFrame):
     def paintEvent(self, event):
         """Custom paint event for rounded corners"""
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
-        # Create rounded rectangle path
-        path = QPainterPath()
-        path.addRoundedRect(self.rect(), 8, 8)
-        
-        # Fill with background color
-        painter.fillPath(path, QColor(255, 255, 255, 230))
-        
-        # Draw border
-        painter.setPen(QColor(224, 224, 224))
-        painter.drawPath(path) 
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            # Create rounded rectangle path
+            path = QPainterPath()
+            rect = QRectF(self.rect())  # Convert QRect to QRectF
+            path.addRoundedRect(rect, 8, 8)
+            
+            # Fill with background color
+            painter.fillPath(path, QColor(255, 255, 255, 230))
+            
+            # Draw border
+            painter.setPen(QColor(224, 224, 224))
+            painter.drawPath(path)
+        finally:
+            painter.end()  # Always end the painter 

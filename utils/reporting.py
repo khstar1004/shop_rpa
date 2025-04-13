@@ -750,8 +750,15 @@ def _generate_report(
     try:
         # 1. Prepare Data
         report_data = _prepare_report_data(results, columns_to_include, image_columns, config)
+        if not report_data:
+            logger.error("No data to write to Excel report")
+            return None
+            
         df_report = pd.DataFrame(report_data)
+        logger.info(f"Created DataFrame with {len(df_report)} rows and {len(df_report.columns)} columns")
+        
         df_report = df_report.reindex(columns=columns_to_include, fill_value="")
+        logger.info("Reindexed DataFrame with specified columns")
 
         # Apply IMAGE formula transformation to DataFrame copy
         df_report_imagified = df_report.copy()

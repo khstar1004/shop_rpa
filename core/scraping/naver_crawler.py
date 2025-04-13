@@ -364,7 +364,8 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
 
                 # 캐시에 저장
                 if products:
-                    self.add_sparse_data(cache_key, products, ttl=3600)  # 1시간 캐싱
+                    if self.cache:
+                        self.cache_sparse_data(f"naver_api_{query}_{page}", products)
 
                 return products
 

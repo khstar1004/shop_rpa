@@ -35,10 +35,16 @@ class ProductProcessor:
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.progress_callback = None  # 진행상황 콜백 초기화
+        self._is_running = True  # Add running flag
         self._init_components()
 
         # 배치 처리 설정
         self.batch_size = config["PROCESSING"].get("BATCH_SIZE", 10)
+
+    def stop_processing(self):
+        """Stop the processing gracefully."""
+        self.logger.info("Processing stop requested.")
+        self._is_running = False
 
     def _init_components(self):
         """필요한 컴포넌트 초기화"""
@@ -338,15 +344,25 @@ class ProductProcessor:
             return output_file
 
     def _process_single_file(
-        self, input_file: str
-    ) -> Tuple[Optional[str], Optional[str]]:
+        self, input_file: str, output_dir: Optional[str] = None
+    ) -> Optional[str]:
         """단일 입력 파일 처리"""
+        # Reset running flag at the start of processing a file
+        self._is_running = True
         try:
             start_time = datetime.now()
+            self.logger.info(
+                f"Processing file: {input_file}, started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
 
             # 엑셀 파일 읽기
             df = self.excel_manager.read_excel_file(input_file)
+            if df.empty:
+                self.logger.warning(f"Input file is empty: {input_file}")
+                return None
+
             total_items = len(df)
+            self.logger.info(f"Loaded {total_items} items from {input_file}")
 
             # 데이터 정제
             df = self.data_cleaner.clean_dataframe(df)
@@ -355,21 +371,50 @@ class ProductProcessor:
             results = []
             processed_count = 0
 
+            # Emit initial progress
+            if self.progress_callback:
+                try:
+                    self.progress_callback(0, total_items)
+                except Exception as cb_e:
+                    self.logger.error(f"Error in initial progress callback: {cb_e}")
+
             for i in range(0, total_items, self.batch_size):
+                # Check if stopped before starting a new batch
+                if not self._is_running:
+                    self.logger.warning("Processing stopped by request (batch loop).")
+                    break
+
                 batch = df.iloc[i : i + self.batch_size]
                 batch_futures = []
 
                 # 각 행에 대해 Product 생성 및 처리 시작
                 for _, row in batch.iterrows():
+                     # Check if stopped before submitting a new task
+                    if not self._is_running:
+                        self.logger.warning("Processing stopped by request (task submission loop).")
+                        break # Break inner loop
+
                     product = self.product_factory.create_product_from_row(row)
                     if product:  # 유효한 제품만 처리
                         future = self.executor.submit(
                             self._process_single_product, product
                         )
                         batch_futures.append((product, future))
+                
+                # Check again if stopped after submitting tasks for the batch
+                if not self._is_running:
+                    break # Break outer loop if stopped during task submission
 
                 # 배치 완료 대기
                 for product, future in batch_futures:
+                    # Check if stopped before getting result (allows faster stop)
+                    if not self._is_running:
+                        self.logger.warning("Processing stopped by request (result loop).")
+                        # Attempt to cancel pending future if possible
+                        if not future.done():
+                            future.cancel()
+                        continue # Skip getting result and updating progress for this item
+
                     try:
                         result = future.result(timeout=300)  # 5분 타임아웃
                         results.append(result)
@@ -382,38 +427,56 @@ class ProductProcessor:
                         results.append(
                             ProcessingResult(source_product=product, error=str(e))
                         )
+                    finally:
+                        # Ensure progress is updated even if there was an error or stop request
+                        processed_count += 1
+                        if self.progress_callback:
+                             try:
+                                # Use processed_count and total_items
+                                self.progress_callback(processed_count, total_items)
+                             except Exception as cb_e:
+                                 self.logger.error(f"Error in progress callback: {cb_e}")
 
-                    # 진행 상황 업데이트
-                    processed_count += 1
-                    progress_percent = int((processed_count / total_items) * 100)
-                    if self.progress_callback:
-                        self.progress_callback(progress_percent, total_items)
-                    if processed_count % 10 == 0 or processed_count == total_items:
-                        self.logger.info(
-                            f"Progress: {processed_count}/{total_items} ({progress_percent}%)"
-                        )
+                        if processed_count % 10 == 0 or processed_count == total_items:
+                            progress_percent = int((processed_count / total_items) * 100) if total_items > 0 else 0
+                            self.logger.info(
+                                f"Progress: {processed_count}/{total_items} ({progress_percent}%)"
+                            )
+                
+                # Check if stopped after processing the batch
+                if not self._is_running:
+                    break # Break outer loop if stopped
 
-            # 결과 보고서 생성
-            output_file = self.excel_manager.generate_enhanced_output(
-                results, input_file
-            )
+            # Check if processing was stopped before generating output
+            if not self._is_running:
+                self.logger.warning("Processing was stopped. Skipping output file generation.")
+                return None
 
-            # 후처리 작업 수행 (하이퍼링크, 필터링 등)
-            output_file = self.post_process_output_file(output_file)
+            # 결과 보고서 생성 (only if results exist and processing wasn't stopped)
+            if results:
+                output_file = self.excel_manager.generate_enhanced_output(
+                    results, input_file, output_dir # Pass output_dir
+                )
 
-            # 처리 완료 로깅
-            end_time = datetime.now()
-            processing_time = end_time - start_time
-            self.logger.info(
-                f"Processing finished at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            self.logger.info(f"Total processing time: {processing_time}")
+                # 후처리 작업 수행 (하이퍼링크, 필터링 등)
+                output_file = self.post_process_output_file(output_file)
 
-            return output_file, None
+                # 처리 완료 로깅
+                end_time = datetime.now()
+                processing_time = end_time - start_time
+                self.logger.info(
+                    f"Processing finished at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                self.logger.info(f"Total processing time: {processing_time}")
+
+                return output_file, None # Return tuple
+            else:
+                 self.logger.info("No results generated, possibly due to empty input or errors.")
+                 return None, "No results generated" # Return tuple indicating no output
 
         except Exception as e:
             self.logger.error(f"Error in _process_single_file: {str(e)}", exc_info=True)
-            return None, str(e)
+            return None, str(e) # Return tuple
 
     def _process_single_product(self, product: Product) -> ProcessingResult:
         """단일 제품 처리"""
@@ -1119,7 +1182,10 @@ class ProductProcessor:
         self, input_file: str, output_dir: str = None, limit: int = 10
     ) -> Optional[str]:
         """제한된 수의 상품만 처리합니다."""
+        # Reset running flag at the start of processing a file
+        self._is_running = True
         try:
+            start_time = datetime.now()
             self.logger.info(f"파일 처리 시작: {input_file} (최대 {limit}개 상품)")
 
             # Excel 파일 읽기
@@ -1129,7 +1195,8 @@ class ProductProcessor:
                 return None
 
             # 데이터 정제
-            df = self._clean_data(df)
+            # Ensure data cleaning uses the configured cleaner
+            df = self.data_cleaner.clean_dataframe(df)
 
             # 제한된 수의 상품만 선택
             if len(df) > limit:
@@ -1140,34 +1207,45 @@ class ProductProcessor:
             results = []
             total_items = len(df) # Get total items *after* limiting
 
-            # 각 상품 처리
+            # Emit initial progress
+            if self.progress_callback:
+                 try:
+                    self.progress_callback(0, total_items)
+                 except Exception as cb_e:
+                    self.logger.error(f"Error in initial progress callback: {cb_e}")
+
+            # 각 상품 처리 (using ThreadPoolExecutor for potential future parallelization within limit)
+            # Create futures list
+            futures = []
+            product_map = {} # To map future back to product if needed
+
             for idx, row in df.iterrows():
-                # Check if thread is still running before processing
-                if hasattr(self, '_is_running') and not self._is_running:
-                     self.logger.warning("Processing stopped by user request.")
+                 # Check if thread is still running before processing
+                if not self._is_running:
+                     self.logger.warning("Processing stopped by user request (limited file).")
                      break # Exit loop if stopped
 
                 try:
-                    # 상품 처리
-                    result = self._process_single_product(row)
-                    if result:
-                        results.append(result)
+                    # Create Product object
+                    product = self.product_factory.create_product_from_row(row)
+                    if not product:
+                        self.logger.warning(f"Could not create product from row {idx+1}. Skipping.")
+                        # Update progress even for skipped items
+                        if self.progress_callback:
+                            try:
+                                self.progress_callback(idx + 1, total_items)
+                            except Exception as cb_e:
+                                self.logger.error(f"Error in progress callback (skipped item): {cb_e}")
+                        continue
 
-                    # --- Call progress callback ---
-                    if self.progress_callback:
-                        # Use try-except block to avoid crashing if callback signature mismatches
-                        try:
-                             self.progress_callback(idx + 1, total_items) # Pass current index (1-based) and total
-                        except TypeError:
-                            # Fallback or log error if signature is still int
-                            self.logger.warning("Progress callback signature might be outdated. Expected (int, int).")
-                            # Attempt old percentage callback as fallback?
-                            # percentage = int(((idx + 1) / total_items) * 100)
-                            # self.progress_callback(percentage)
+                    # Submit processing task
+                    future = self.executor.submit(self._process_single_product, product)
+                    futures.append(future)
+                    product_map[future] = product # Store product associated with future
 
                 except Exception as e:
                     self.logger.error(
-                        f"상품 처리 중 오류 발생 (행 {idx+1}): {str(e)}", exc_info=True
+                        f"상품 생성/제출 중 오류 발생 (행 {idx+1}): {str(e)}", exc_info=True
                     )
                     # Emit progress even on error to keep UI updated
                     if self.progress_callback:
@@ -1177,24 +1255,72 @@ class ProductProcessor:
                              pass # Ignore signature mismatch error here too
                     continue
 
+            # Process completed futures
+            processed_count = 0
+            from concurrent.futures import as_completed
+
+            for future in as_completed(futures):
+                 # Check if stopped before processing result
+                 if not self._is_running:
+                     self.logger.warning("Processing stopped during result collection (limited file).")
+                     if not future.done():
+                         future.cancel()
+                     continue # Skip remaining futures
+
+                 product = product_map.get(future) # Get the original product
+                 processed_count += 1 # Increment counter for each future completed/checked
+
+                 try:
+                    result = future.result(timeout=300) # Get result
+                    if result:
+                        results.append(result)
+
+                 except Exception as e:
+                    error_msg = f"상품 처리 중 오류 발생 (Product ID: {product.id if product else 'N/A'}): {str(e)}"
+                    self.logger.error(error_msg, exc_info=True)
+                    # Optionally add an error result if needed
+                    if product:
+                         results.append(ProcessingResult(source_product=product, error=str(e)))
+
+                 finally:
+                    # --- Call progress callback ---
+                    if self.progress_callback:
+                        # Use try-except block to avoid crashing if callback signature mismatches
+                        try:
+                             # Use processed_count which reflects completed futures
+                             self.progress_callback(processed_count, total_items)
+                        except Exception as cb_e:
+                             self.logger.error(f"Error in progress callback (limited file): {cb_e}")
+
+            # If processing was stopped, skip output generation
+            if not self._is_running:
+                self.logger.warning("Processing was stopped. Skipping output file generation (limited file).")
+                return None
+
             # 결과가 있는 경우에만 출력 파일 생성
             if results:
                 # 출력 파일명 생성
-                if output_dir:
-                    base_name = os.path.basename(input_file)
-                    output_file = os.path.join(
-                        output_dir, f"{os.path.splitext(base_name)[0]}-result.xlsx"
-                    )
-                else:
-                    output_file = f"{os.path.splitext(input_file)[0]}-result.xlsx"
+                output_file = self.excel_manager.generate_enhanced_output(
+                    results, input_file, output_dir # Pass output_dir
+                )
 
-                # Excel 파일 생성
-                self.excel_manager.generate_enhanced_output(results, output_file)
+                # 후처리 작업 수행 (하이퍼링크, 필터링 등)
+                output_file = self.post_process_output_file(output_file)
+
+                # 처리 완료 로깅
+                end_time = datetime.now()
+                processing_time = end_time - start_time
+                self.logger.info(
+                    f"Limited processing finished at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                self.logger.info(f"Total processing time (limited): {processing_time}")
 
                 self.logger.info(f"파일 처리 완료: {output_file}")
                 return output_file
 
-            return None
+            else:
+                self.logger.info("No results generated from limited processing.")
+                return None
 
         except Exception as e:
             self.logger.error(f"파일 처리 중 오류 발생: {str(e)}", exc_info=True)

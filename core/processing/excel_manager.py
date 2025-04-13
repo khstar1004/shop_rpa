@@ -1654,14 +1654,18 @@ class ExcelManager:
             
             # 이미지 URL 처리
             main_image = product.image_url or "이미지 없음"
-            worksheet.cell(row=row_idx, column=4, value=main_image)
+            if isinstance(main_image, str) and main_image.startswith(("http://", "https://")):
+                worksheet.cell(row=row_idx, column=4, value=main_image)
+            else:
+                worksheet.cell(row=row_idx, column=4, value="이미지 URL 없음")
+                self.logger.warning(f"Invalid image URL for product {product.name}: {main_image}")
             
             # 이미지 갤러리 처리
-            gallery_urls = product.image_gallery
-            if gallery_urls:
+            gallery_urls = product.image_gallery or []
+            if gallery_urls and isinstance(gallery_urls, list):
                 # 갤러리 이미지 URL들을 쉼표로 구분하여 저장
-                gallery_str = " | ".join(gallery_urls)
-                worksheet.cell(row=row_idx, column=5, value=gallery_str)
+                gallery_str = " | ".join(str(url) for url in gallery_urls if isinstance(url, str) and url.startswith(("http://", "https://")))
+                worksheet.cell(row=row_idx, column=5, value=gallery_str or "추가 이미지 없음")
             else:
                 worksheet.cell(row=row_idx, column=5, value="추가 이미지 없음")
             
@@ -1745,6 +1749,12 @@ class ExcelManager:
     def save_products(self, products: List[Product], output_path: str, sheet_name: str = None):
         """Save products to Excel file with proper formatting and error handling"""
         try:
+            # Ensure output directory exists
+            output_dir = os.path.dirname(output_path)
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+                self.logger.info(f"Created output directory: {output_dir}")
+            
             workbook = Workbook()
             
             # 시트 이름이 없으면 현재 시간으로 생성
@@ -1788,6 +1798,21 @@ class ExcelManager:
         try:
             self.logger.info(f"Removing @ symbols from Excel file: {file_path}")
 
+            # 파일이 존재하는지 확인
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}")
+
+            # 파일이 열려있는지 확인
+            try:
+                with open(file_path, 'a'):
+                    pass
+            except PermissionError:
+                raise PermissionError(f"File is currently in use: {file_path}")
+
+            # 임시 파일 경로 생성
+            temp_dir = os.path.dirname(file_path)
+            temp_file = os.path.join(temp_dir, f"temp_{os.path.basename(file_path)}")
+
             # DataFrame 로드
             df = pd.read_excel(file_path)
 
@@ -1796,10 +1821,20 @@ class ExcelManager:
                 if df[column].dtype == 'object':  # 문자열 타입 컬럼만 처리
                     df[column] = df[column].astype(str).str.replace('@', '', regex=False)
 
-            # 결과 저장
-            df.to_excel(file_path, index=False)
-            self.logger.info(f"Successfully removed @ symbols from: {file_path}")
+            # 임시 파일에 저장
+            df.to_excel(temp_file, index=False)
 
+            # 원본 파일 삭제 및 임시 파일 이동
+            try:
+                os.remove(file_path)
+                os.rename(temp_file, file_path)
+            except Exception as e:
+                # 실패 시 임시 파일 삭제
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+                raise e
+
+            self.logger.info(f"Successfully removed @ symbols from: {file_path}")
             return file_path
 
         except Exception as e:

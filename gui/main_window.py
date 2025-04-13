@@ -7,6 +7,7 @@ import time
 import traceback
 from typing import List, Optional
 from pathlib import Path
+import configparser
 
 import psutil
 from PyQt5.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
@@ -103,9 +104,23 @@ class MainWindow(QMainWindow):
         )
 
         # Set application icon
-        icon_path = os.path.join(os.path.dirname(__file__), "assets", "app_icon.svg")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        try:
+            # Try SVG icon first
+            icon_path = os.path.join(os.path.dirname(__file__), "assets", "app_icon.svg")
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QIcon(icon_path))
+            else:
+                # Try PNG icon as fallback
+                icon_path = os.path.join(os.path.dirname(__file__), "assets", "app_icon.png")
+                if os.path.exists(icon_path):
+                    self.setWindowIcon(QIcon(icon_path))
+                else:
+                    # Use default icon if no custom icon found
+                    self.setWindowIcon(self.style().standardIcon(self.style().SP_ComputerIcon))
+        except Exception as e:
+            self.logger.warning(f"Failed to set application icon: {str(e)}")
+            # Use default icon in case of error
+            self.setWindowIcon(self.style().standardIcon(self.style().SP_ComputerIcon))
 
         # Enable drag & drop
         self.setAcceptDrops(True)
@@ -537,11 +552,21 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self):
         """Apply current theme based on settings"""
-        is_dark = self.config["GUI"]["ENABLE_DARK_MODE"]
+        is_dark = self.config.get("GUI", {}).get("ENABLE_DARK_MODE", False)
+        if isinstance(is_dark, str):
+            is_dark = is_dark.lower() == "true"
         if is_dark:
             Styles.apply_dark_mode(self)
+            # Update all child widgets
+            for widget in self.findChildren(QWidget):
+                if isinstance(widget, QGroupBox):
+                    Styles.apply_group_box_style(widget)
         else:
             Styles.apply_light_mode(self)
+            # Update all child widgets
+            for widget in self.findChildren(QWidget):
+                if isinstance(widget, QGroupBox):
+                    Styles.apply_group_box_style(widget)
 
         # Update drop area style
         if hasattr(self, "drop_area"):
@@ -997,8 +1022,18 @@ class MainWindow(QMainWindow):
             self.memory_label.setText("Memory: Unknown")
 
     def toggle_dark_mode(self, enabled):
+        """Toggle dark mode and save setting"""
+        if 'GUI' not in self.config:
+            self.config['GUI'] = {}
+        self.config['GUI']['ENABLE_DARK_MODE'] = str(enabled).lower()
         self.settings.set("dark_mode", enabled)
         self.apply_theme()
+        
+        # Save config to file using configparser
+        config_parser = configparser.ConfigParser()
+        config_parser.read_dict(self.config)
+        with open("config.ini", "w", encoding="utf-8") as f:
+            config_parser.write(f)
 
     def toggle_auto_save(self, enabled):
         self.settings.set("auto_save", enabled)
