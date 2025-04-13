@@ -384,10 +384,21 @@ class ImageMatcher:
             if cached_image is not None:
                 return cached_image
 
-        img = self._download_and_preprocess(url, max_dimension)
-        if img and self.cache:
-            self.cache.set(cache_key, img, ttl=86400)  # 1일 캐싱
-        return img
+        try:
+            img = self._download_and_preprocess(url, max_dimension)
+            if img:
+                # 이미지 크기 제한 (메모리 최적화)
+                if img.size[0] * img.size[1] > 1000000:  # 1메가픽셀 이상
+                    img = img.resize((int(img.size[0] * 0.7), int(img.size[1] * 0.7)), Image.LANCZOS)
+                
+                if self.cache:
+                    # 캐시 TTL을 이미지 크기에 따라 조정 (큰 이미지는 짧은 TTL)
+                    ttl = 3600 if img.size[0] * img.size[1] > 500000 else 86400
+                    self.cache.set(cache_key, img, ttl=ttl)
+                return img
+        except Exception as e:
+            self.logger.error(f"Failed to process image: {e}")
+            return None
 
     def _get_hash_similarity(self, img1: Image.Image, img2: Image.Image) -> float:
         """Calculates hash similarity, potentially using cached hashes."""

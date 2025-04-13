@@ -225,6 +225,8 @@ def load_config() -> Dict[str, Any]:
             "CACHE_DIR": os.path.abspath(config["PATHS"]["CACHE_DIR"]),
             "OUTPUT_DIR": os.path.abspath(config["PATHS"]["OUTPUT_DIR"]),
             "LOG_DIR": os.path.abspath(config["PATHS"]["LOG_DIR"]),
+            "INTERMEDIATE_DIR": os.path.abspath(config["PATHS"]["INTERMEDIATE_DIR"]),
+            "FINAL_DIR": os.path.abspath(config["PATHS"]["FINAL_DIR"]),
         }
 
         # GUI section
@@ -235,6 +237,7 @@ def load_config() -> Dict[str, Any]:
             "ENABLE_DARK_MODE": config["GUI"]["ENABLE_DARK_MODE"].lower() == "true",
             "SHOW_PROGRESS_BAR": config["GUI"]["SHOW_PROGRESS_BAR"].lower() == "true",
             "AUTO_SAVE_INTERVAL": int(config["GUI"]["AUTO_SAVE_INTERVAL"]),
+            "DEBUG_MODE": config["GUI"]["DEBUG_MODE"].lower() == "true",
         }
 
     except Exception as e:

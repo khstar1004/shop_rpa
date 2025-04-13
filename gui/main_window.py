@@ -32,6 +32,8 @@ from PyQt5.QtWidgets import (
     QTabWidget,
     QVBoxLayout,
     QWidget,
+    QDoubleSpinBox,
+    QDialog,
 )
 from PyQt5 import sip
 
@@ -54,6 +56,12 @@ class MainWindow(QMainWindow):
 
         # Initialize settings
         self.settings = Settings()
+
+        # Set debug mode based on config
+        if self.config["GUI"]["DEBUG_MODE"]:
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.INFO)
 
         # 필수 속성 초기화
         self.input_file = None
@@ -88,11 +96,10 @@ class MainWindow(QMainWindow):
 
         # Set window properties
         self.setWindowTitle(tr.get_text("window_title", "상품 가격 비교 시스템"))
-        self.setGeometry(
-            100,
-            100,
-            int(config["GUI"].get("WINDOW_WIDTH", 1600)),  # Default to 1600 if not set
-            int(config["GUI"].get("WINDOW_HEIGHT", 2000)),   # Default to 1000 if not set
+        self.setMinimumSize(800, 600)  # Keep minimum size for compatibility
+        self.resize(
+            int(self.config["GUI"]["WINDOW_WIDTH"]),
+            int(self.config["GUI"]["WINDOW_HEIGHT"])
         )
 
         # Set application icon
@@ -120,8 +127,12 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle(tr.get_text("Shop_RPA"))
-        self.setMinimumSize(1600, 1000)  # Increased from 1200x800 to 1600x1000
-        self.resize(1600, 1000)  # Set initial window size
+        # Use config values for window size
+        self.setMinimumSize(800, 600)  # Keep minimum size for compatibility
+        self.resize(
+            int(self.config["GUI"]["WINDOW_WIDTH"]),
+            int(self.config["GUI"]["WINDOW_HEIGHT"])
+        )
 
         # Create central widget and main layout
         central_widget = QWidget()
@@ -136,6 +147,7 @@ class MainWindow(QMainWindow):
         self.create_dashboard_tab()  # Add dashboard tab
         self.create_analysis_tab()
         self.create_settings_tab()
+        self.create_help_tab()  # Add help tab
 
         # 상태바 설정
         status_bar = self.statusBar()
@@ -166,8 +178,8 @@ class MainWindow(QMainWindow):
         tab_layout.setSpacing(15)
 
         # Create splitter for resizable sections
-        splitter = QSplitter(Qt.Vertical)
-        tab_layout.addWidget(splitter)
+        self.splitter = QSplitter(Qt.Vertical)
+        tab_layout.addWidget(self.splitter)
 
         # Top section (File handling and controls)
         top_section = QWidget()
@@ -178,11 +190,32 @@ class MainWindow(QMainWindow):
         self.file_group, self.drop_area, self.file_path_label = (
             WidgetFactory.create_file_group()
         )
-        self.drop_area.clicked.connect(self.on_drop_area_clicked)  # Add click handler
+        self.drop_area.clicked.connect(self.on_drop_area_clicked)
         top_layout.addWidget(self.file_group)
+        
+        # Add batch processing controls
+        self.batch_files_list = QPlainTextEdit()
+        self.batch_files_list.setReadOnly(True)
+        self.batch_files_list.setPlaceholderText(tr.get_text("batch_files_placeholder"))
+        self.batch_files_list.setMaximumHeight(100)
+        
+        batch_buttons_layout = QHBoxLayout()
+        self.add_file_button = QPushButton(tr.get_text("add_file"))
+        self.add_file_button.clicked.connect(self.on_add_file_clicked)
+        self.clear_files_button = QPushButton(tr.get_text("clear_files"))
+        self.clear_files_button.clicked.connect(self.on_clear_files_clicked)
+        batch_buttons_layout.addWidget(self.add_file_button)
+        batch_buttons_layout.addWidget(self.clear_files_button)
+        
+        batch_group = QGroupBox(tr.get_text("batch_processing"))
+        batch_layout = QVBoxLayout(batch_group)
+        batch_layout.addWidget(self.batch_files_list)
+        batch_layout.addLayout(batch_buttons_layout)
+        
+        top_layout.addWidget(batch_group)
 
         # --- Refactor Controls Group Layout ---
-        self.controls_group = QGroupBox(tr.get_text("processing_controls")) # Use a more descriptive title
+        self.controls_group = QGroupBox(tr.get_text("processing_controls"))
         controls_layout = QGridLayout(self.controls_group) # Use QGridLayout
         controls_layout.setSpacing(10) # Adjust spacing
 
@@ -222,13 +255,22 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self.controls_group)
         # --- End Refactor ---
 
-        self.progress_group, self.progress_bar, self.status_label = (
-            WidgetFactory.create_progress_group()
-        )
-        top_layout.addWidget(self.progress_group)
+        # Add progress bar only if enabled in config
+        if self.config["GUI"]["SHOW_PROGRESS_BAR"]:
+            self.progress_group, self.progress_bar, self.status_label, self.step_indicator, self.resource_graph = (
+                WidgetFactory.create_progress_group()
+            )
+            top_layout.addWidget(self.progress_group)
+        else:
+            self.progress_group = None
+            self.progress_bar = None
+            self.status_label = QLabel()
+            self.step_indicator = None
+            self.resource_graph = None
+            top_layout.addWidget(self.status_label)
 
         # Add top section to splitter
-        splitter.addWidget(top_section)
+        self.splitter.addWidget(top_section)
 
         # Bottom section (Log area)
         bottom_section = QWidget()
@@ -240,10 +282,10 @@ class MainWindow(QMainWindow):
         bottom_layout.addWidget(self.log_area)
 
         # Add bottom section to splitter
-        splitter.addWidget(bottom_section)
+        self.splitter.addWidget(bottom_section)
 
         # Set initial splitter sizes (60% top, 40% bottom)
-        splitter.setSizes([int(self.height() * 0.6), int(self.height() * 0.4)])
+        self.splitter.setSizes([int(self.height() * 0.6), int(self.height() * 0.4)])
 
         # Add tab to tab widget
         self.tab_widget.addTab(tab, tr.get_text("analysis"))
@@ -334,6 +376,21 @@ class MainWindow(QMainWindow):
         timeout_layout.addStretch()
         processing_layout.addLayout(timeout_layout)
 
+        # Similarity threshold setting
+        similarity_layout = QHBoxLayout()
+        similarity_label = QLabel(tr.get_text("similarity_threshold"))
+        similarity_label.setFixedWidth(150)
+        self.similarity_spinbox = QDoubleSpinBox()
+        self.similarity_spinbox.setRange(0.0, 1.0)
+        self.similarity_spinbox.setSingleStep(0.05)
+        self.similarity_spinbox.setDecimals(2)
+        self.similarity_spinbox.setValue(self.settings.get("similarity_threshold", 0.75))
+        self.similarity_spinbox.setToolTip(tr.get_text("similarity_threshold_tooltip"))
+        similarity_layout.addWidget(similarity_label)
+        similarity_layout.addWidget(self.similarity_spinbox)
+        similarity_layout.addStretch()
+        processing_layout.addLayout(similarity_layout)
+
         layout.addWidget(processing_group)
 
         # Add apply button
@@ -400,56 +457,91 @@ class MainWindow(QMainWindow):
 
         return dashboard_tab
 
+    def create_help_tab(self):
+        """Create a help tab with documentation and tooltips"""
+        help_tab = QWidget()
+        help_layout = QVBoxLayout(help_tab)
+        help_layout.setSpacing(20)
+        
+        # Store the help tab as an instance variable for access
+        self.help_tab = help_tab
+        
+        # Add help icon
+        help_icon = QSvgWidget(
+            os.path.join(os.path.dirname(__file__), "assets", "help.svg")
+        )
+        help_icon.setFixedSize(48, 48)
+        icon_layout = QHBoxLayout()
+        icon_layout.addWidget(help_icon, 0, Qt.AlignCenter)
+        help_layout.addLayout(icon_layout)
+        
+        # Create scrollable area for help content
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setSpacing(25)
+        
+        # Basic Usage section
+        usage_group = QGroupBox(tr.get_text("basic_usage"))
+        usage_layout = QVBoxLayout(usage_group)
+        
+        usage_text = QLabel(tr.get_text("basic_usage_text"))
+        usage_text.setWordWrap(True)
+        usage_text.setTextFormat(Qt.RichText)
+        usage_layout.addWidget(usage_text)
+        
+        scroll_layout.addWidget(usage_group)
+        
+        # File Processing section
+        proc_group = QGroupBox(tr.get_text("file_processing"))
+        proc_layout = QVBoxLayout(proc_group)
+        
+        proc_text = QLabel(tr.get_text("file_processing_text"))
+        proc_text.setWordWrap(True)
+        proc_text.setTextFormat(Qt.RichText)
+        proc_layout.addWidget(proc_text)
+        
+        scroll_layout.addWidget(proc_group)
+        
+        # Settings section
+        settings_group = QGroupBox(tr.get_text("settings_help"))
+        settings_layout = QVBoxLayout(settings_group)
+        
+        settings_text = QLabel(tr.get_text("settings_help_text"))
+        settings_text.setWordWrap(True)
+        settings_text.setTextFormat(Qt.RichText)
+        settings_layout.addWidget(settings_text)
+        
+        scroll_layout.addWidget(settings_group)
+        
+        # Troubleshooting section
+        troubleshoot_group = QGroupBox(tr.get_text("troubleshooting"))
+        troubleshoot_layout = QVBoxLayout(troubleshoot_group)
+        
+        troubleshoot_text = QLabel(tr.get_text("troubleshooting_text"))
+        troubleshoot_text.setWordWrap(True)
+        troubleshoot_text.setTextFormat(Qt.RichText)
+        troubleshoot_layout.addWidget(troubleshoot_text)
+        
+        scroll_layout.addWidget(troubleshoot_group)
+        
+        # Finish setting up scroll area
+        scroll_area.setWidget(scroll_content)
+        help_layout.addWidget(scroll_area)
+        
+        # Add tab to tab widget
+        self.tab_widget.addTab(help_tab, tr.get_text("help"))
+        
+        return help_tab
+
     def apply_theme(self):
         """Apply current theme based on settings"""
-        is_dark = self.settings.get("dark_mode")
+        is_dark = self.config["GUI"]["ENABLE_DARK_MODE"]
         if is_dark:
-            # Set BORDER attribute for dark mode
-            Colors.BORDER = Colors.BORDER_DARK
             Styles.apply_dark_mode(self)
-            # Apply dark mode to specific widgets
-            self.tab_widget.setStyleSheet(
-                f"""
-                QTabWidget::pane {{
-                    border: 1px solid {Colors.BORDER};
-                    background: {Colors.BACKGROUND_DARK};
-                }}
-                QTabBar::tab {{
-                    background: {Colors.SIDEBAR_DARK};
-                    color: {Colors.TEXT_DARK};
-                    padding: 8px 20px;
-                    border: 1px solid {Colors.BORDER};
-                    border-bottom: none;
-                }}
-                QTabBar::tab:selected {{
-                    background: {Colors.PRIMARY};
-                    color: white;
-                }}
-            """
-            )
-            self.log_area.setStyleSheet(
-                f"""
-                QPlainTextEdit {{
-                    background-color: {Colors.SIDEBAR_DARK};
-                    color: {Colors.TEXT_DARK};
-                    border: 1px solid {Colors.BORDER};
-                    border-radius: 5px;
-                }}
-            """
-            )
-            self.file_path_label.setStyleSheet(f"color: {Colors.TEXT_DARK};")
-            self.status_label.setStyleSheet(f"color: {Colors.TEXT_DARK};")
-            self.memory_label.setStyleSheet(f"color: {Colors.TEXT_DARK};")
         else:
-            # Set BORDER attribute for light mode
-            Colors.BORDER = Colors.BORDER_LIGHT
             Styles.apply_light_mode(self)
-            # Apply light mode to specific widgets
-            self.tab_widget.setStyleSheet("")
-            self.log_area.setStyleSheet("")
-            self.file_path_label.setStyleSheet("")
-            self.status_label.setStyleSheet("")
-            self.memory_label.setStyleSheet("")
 
         # Update drop area style
         if hasattr(self, "drop_area"):
@@ -457,7 +549,7 @@ class MainWindow(QMainWindow):
 
     def setup_auto_save(self):
         """Setup auto-save functionality"""
-        interval = self.settings.get("auto_save_interval", 300)
+        interval = int(self.config["GUI"]["AUTO_SAVE_INTERVAL"])
         if interval > 0:
             self.auto_save_timer = QTimer()
             self.auto_save_timer.timeout.connect(self.auto_save)
@@ -475,6 +567,9 @@ class MainWindow(QMainWindow):
         root_logger = logging.getLogger()
         root_logger.addHandler(self.gui_handler)
         root_logger.setLevel(self.settings.get_log_level())
+
+        # Set max log lines from config
+        self.max_log_lines = int(self.config["GUI"]["MAX_LOG_LINES"])
 
     def connect_signals(self):
         """Connect all signals to their slots"""
@@ -579,10 +674,11 @@ class MainWindow(QMainWindow):
         self.drop_area.highlight_inactive()
 
     def dropEvent(self, event: QDropEvent):
-        self.drop_area.highlight_inactive()
-        url = event.mimeData().urls()[0]
-        filepath = url.toLocalFile()
-        self._handle_file_selected(filepath)
+        """Handle file drop event"""
+        for url in event.mimeData().urls():
+            file_path = url.toLocalFile()
+            if file_path.lower().endswith((".xlsx", ".xls")):
+                self._add_file_to_batch(file_path)
 
     def _handle_file_selected(self, filepath: str):
         self.input_file = filepath
@@ -633,35 +729,47 @@ class MainWindow(QMainWindow):
         self._start_processing()
 
     def _start_processing(self):
-        """Start the processing thread"""
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
-        self.status_label.setText(tr.get_text("starting"))
-        self.progress_bar.setValue(0)
-        self.log_area.clear()
-        logging.info(tr.get_text("analysis_started"))
+        """Start processing selected files"""
+        try:
+            # Update state
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+            self.status_label.setText(tr.get_text("starting"))
+            self.progress_bar.setValue(0)
+            self.log_area.clear()
+            logging.info(tr.get_text("analysis_started"))
+            
+            # Record start time for statistics
+            self.processing_start_time = time.time()
 
-        # Record start time for statistics
-        self.processing_start_time = time.time()
+            # Determine the files to process
+            input_files = self.input_files if hasattr(self, 'input_files') and self.input_files else [self.input_file]
+            
+            # Get the product limit
+            product_limit = self.product_limit_spinbox.value() if self.product_limit_spinbox.value() > 0 else None
+            if product_limit:
+                logging.info(f"상품 처리 수 제한 설정됨: {product_limit}개")
 
-        # Get product limit from spinbox
-        product_limit = self.product_limit_spinbox.value()
-        if product_limit <= 0: # Treat 0 or less as no limit
-            product_limit = None
-        else:
-             logging.info(f"상품 처리 수 제한 설정됨: {product_limit}개")
+            # Create and start processing thread
+            self.processing_thread = ProcessingThread(
+                self.processor, 
+                input_files, 
+                product_limit=product_limit
+            )
+            self.processing_thread.progress_updated.connect(self.update_progress)
+            self.processing_thread.status_updated.connect(self.update_status)
+            self.processing_thread.log_message.connect(self.append_log)
+            self.processing_thread.processing_complete.connect(self.on_processing_complete)
+            self.processing_thread.processing_error.connect(self.on_processing_error)
+            self.processing_thread.finished.connect(self.on_thread_finished)
 
-        self.processing_thread = ProcessingThread(
-            self.processor, self.input_file, product_limit
-        )
-        self.processing_thread.progress_updated.connect(self.update_progress)
-        self.processing_thread.status_updated.connect(self.update_status)
-        self.processing_thread.log_message.connect(self.append_log)
-        self.processing_thread.processing_complete.connect(self.on_processing_complete)
-        self.processing_thread.processing_error.connect(self.on_processing_error)
-        self.processing_thread.finished.connect(self.on_thread_finished)
+            self.processing_thread.start()
 
-        self.processing_thread.start()
+        except Exception as e:
+            logging.error(f"Error starting processing: {e}")
+            self.status_label.setText(tr.get_text("error_occurred"))
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
 
     @pyqtSlot()
     def on_stop_clicked(self):
@@ -690,14 +798,71 @@ class MainWindow(QMainWindow):
             percentage = int((current_item / total_items) * 100)
             # Ensure percentage is within 0-100 bounds
             percentage = max(0, min(percentage, 100))
-            self.progress_bar.setValue(percentage)
+            
+            # Smoothly animate progress bar value if change is significant
+            current_value = self.progress_bar.value()
+            if abs(percentage - current_value) > 3:  # Only animate if difference is significant
+                # Use property animation for smooth transition
+                self.progress_bar.setValue(percentage)
+            else:
+                self.progress_bar.setValue(percentage)
             
             # Update progress bar text to show both percentage and count
             self.progress_bar.setFormat(f"{percentage}% ({current_item}/{total_items})")
 
+            # During processing, update drop area to show loading
+            if percentage > 0 and percentage < 100 and hasattr(self, 'drop_area'):
+                if not hasattr(self, 'loading_icon') or self.loading_icon is None:
+                    self.loading_icon = QSvgWidget(os.path.join(os.path.dirname(__file__), "assets", "loading.svg"))
+                    self.loading_icon.setFixedSize(48, 48)
+                    # Replace the file icon with the loading icon temporarily
+                    if hasattr(self.drop_area, 'file_icon') and self.drop_area.file_icon:
+                        self.drop_area.file_icon.hide()
+                        # Find the layout containing the file icon
+                        icon_layout = None
+                        for i in range(self.drop_area.layout().count()):
+                            item = self.drop_area.layout().itemAt(i)
+                            if isinstance(item, QHBoxLayout):
+                                icon_layout = item
+                                break
+                        
+                        if icon_layout:
+                            # Add loading icon to the layout
+                            icon_layout.insertWidget(1, self.loading_icon)
+                            self.loading_icon.show()
+                            
+                # Update the hint text to show progress
+                if hasattr(self.drop_area, 'hint_label'):
+                    self.drop_area.hint_label.setText(f"{tr.get_text('processing')}: {percentage}%")
+
             # Update status label with count
             status_text = tr.get_text("processing_progress", current=current_item, total=total_items)
             self.status_label.setText(status_text)
+            
+            # Update step indicator based on progress
+            if hasattr(self, 'step_indicator'):
+                if percentage <= 10:
+                    self.step_indicator.set_current_step(0)  # Load step
+                    self.step_indicator.set_completed_steps(0)
+                elif percentage <= 90:
+                    self.step_indicator.set_current_step(1)  # Process step
+                    self.step_indicator.set_completed_steps(1)
+                else:
+                    self.step_indicator.set_current_step(2)  # Save step
+                    self.step_indicator.set_completed_steps(2)
+            
+            # Update resource graph with real-time data
+            if hasattr(self, 'resource_graph'):
+                try:
+                    import psutil
+                    process = psutil.Process(os.getpid())
+                    memory_mb = process.memory_info().rss / 1024 / 1024
+                    cpu_percent = process.cpu_percent(interval=0.1)
+                    self.resource_graph.update_data(memory_mb, cpu_percent)
+                except ImportError:
+                    pass  # psutil not available
+                except Exception as e:
+                    logging.debug(f"Resource graph update error: {str(e)}")
         else:
             # Handle case where total_items is 0 or less (e.g., empty file)
             self.progress_bar.setValue(0)
@@ -718,59 +883,70 @@ class MainWindow(QMainWindow):
     def on_processing_complete(self, primary_path, secondary_path):
         """Handle processing completion"""
         try:
-            self.status_label.setText(tr.get_text("processing_finished"))
             self._show_completion_message(primary_path, secondary_path)
-
-            # # Commented out historical metrics update
-            # # Increment processed files count
-            # processed_count = self.settings.get("processed_count", 0) + 1
-            # self.settings.set("processed_count", processed_count)
-
-            # # Record processing time
-            # if hasattr(self, 'processing_start_time') and self.processing_start_time:
-            #     elapsed_time = time.time() - self.processing_start_time
-
-            #     # Update average processing time
-            #     total_time = self.settings.get("total_processing_time", 0) + elapsed_time
-            #     self.settings.set("total_processing_time", total_time)
-
-            #     # Store this processing time
-            #     self.settings.set("last_processing_time", elapsed_time)
-
-            # # Save settings
-            # self.settings.save_settings()
-
-            # # Update dashboard if it's visible
-            # if self.tab_widget.currentIndex() == 0:
-            #     self.update_dashboard()
-
+            self._show_results_summary([primary_path, secondary_path])
+            
+            # Show success toast notification
+            toast = WidgetFactory.create_toast_notification(self)
+            toast.show_message(
+                tr.get_text("processing_complete", "Processing completed successfully"),
+                "success"
+            )
         except Exception as e:
-            logging.error(f"Error updating statistics: {e}")
+            logger.error(f"Error handling processing completion: {str(e)}")
+            self._show_error_message(str(e))
+
+    def on_processing_error(self, error_message):
+        """Handle processing error"""
+        try:
+            self.status_label.setText(tr.get_text("status_error", "Error"))
+            self.append_log(f"Error: {error_message}")
+            
+            # Show error toast notification
+            toast = WidgetFactory.create_toast_notification(self)
+            toast.show_message(
+                tr.get_text("processing_error", f"Error: {error_message}"),
+                "error"
+            )
+        except Exception as e:
+            logger.error(f"Error handling processing error: {str(e)}")
+            self._show_error_message(str(e))
+
+    def _show_error_message(self, error_message):
+        """Show error message in a user-friendly way"""
+        try:
+            # Show error toast notification
+            toast = WidgetFactory.create_toast_notification(self)
+            toast.show_message(
+                tr.get_text("error_occurred", f"An error occurred: {error_message}"),
+                "error"
+            )
+            
+            # Log the error
+            logger.error(error_message)
+            self.append_log(error_message)
+        except Exception as e:
+            logger.error(f"Error showing error message: {str(e)}")
+            # Fallback to basic error display
+            self.status_label.setText(f"Error: {str(e)}")
 
     def _show_completion_message(self, primary_path, secondary_path):
-        """Show completion message with report details"""
-        message = tr.get_text("analysis_complete_detail") + "\n\n"
-
-        if primary_path and os.path.exists(primary_path):
-            message += (
-                tr.get_text("intermediate_report", filename=os.path.basename(primary_path))
-                + "\n"
-            )
-
-        if secondary_path and os.path.exists(secondary_path):
-            message += (
-                tr.get_text("final_report", filename=os.path.basename(secondary_path))
-                + "\n"
-            )
-
-        # Show both intermediate and final directories
-        intermediate_dir = self.program_root / "output" / "intermediate"
-        final_dir = self.program_root / "output" / "final"
-        
-        message += f"\n{tr.get_text('intermediate_directory', path=str(intermediate_dir))}"
-        message += f"\n{tr.get_text('final_directory', path=str(final_dir))}"
-
-        QMessageBox.information(self, tr.get_text("complete"), message)
+        """Show completion message with toast notification"""
+        try:
+            message = tr.get_text(
+                "processing_complete_details",
+                "Processing completed:\nPrimary: {primary}\nSecondary: {secondary}"
+            ).format(primary=primary_path, secondary=secondary_path)
+            
+            # Show success toast notification
+            toast = WidgetFactory.create_toast_notification(self)
+            toast.show_message(message, "success")
+            
+            self.status_label.setText(tr.get_text("status_completed", "Completed"))
+            self.append_log(message)
+        except Exception as e:
+            logger.error(f"Error showing completion message: {str(e)}")
+            self._show_error_message(str(e))
 
     def open_results_folder(self):
         """Open the results folder in file explorer"""
@@ -783,20 +959,26 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logging.warning(tr.get_text("failed_to_open_dir", error=str(e)))
 
-    @pyqtSlot(str)
-    def on_processing_error(self, error_message):
-        self.status_label.setText(tr.get_text("error_occurred"))
-        QMessageBox.critical(
-            self,
-            tr.get_text("error"),
-            tr.get_text("processing_error_detail", error=error_message),
-        )
-
     @pyqtSlot()
     def on_thread_finished(self):
+        """Handle thread completion"""
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.processing_thread = None
+        
+        # Restore the file icon if we were showing a loading animation
+        if hasattr(self, 'loading_icon') and self.loading_icon:
+            self.loading_icon.hide()
+            self.loading_icon.deleteLater()
+            self.loading_icon = None
+            
+            # Show the original file icon again
+            if hasattr(self.drop_area, 'file_icon'):
+                self.drop_area.file_icon.show()
+                
+            # Reset the hint text
+            if hasattr(self.drop_area, 'hint_label'):
+                self.drop_area.hint_label.setText(tr.get_text("file_drag_hint"))
 
     def update_memory_usage(self):
         """Update memory usage in status bar"""
@@ -860,38 +1042,56 @@ class MainWindow(QMainWindow):
             event.accept()
 
     def apply_settings(self):
-        """Apply settings from the settings tab"""
-        # Apply theme
-        self.settings.set("dark_mode", self.dark_mode_check.isChecked())
-        self.apply_theme()
+        """Apply current settings"""
+        try:
+            # Save dark mode setting
+            self.settings.set("dark_mode", self.dark_mode_check.isChecked())
+            self.apply_theme()
 
-        # Apply auto-save
-        self.settings.set("auto_save", self.auto_save_check.isChecked())
+            # Save auto-save setting
+            self.settings.set("auto_save", self.auto_save_check.isChecked())
+            self.setup_auto_save()
 
-        # Apply thread count
-        self.settings.set("thread_count", self.thread_spinbox.value())
-        self.threads_spinbox.setValue(self.thread_spinbox.value())
+            # Save language setting
+            old_language = self.settings.get("language")
+            new_language = self.language_combo.currentData()
+            language_changed = old_language != new_language
+            self.settings.set("language", new_language)
 
-        # Apply timeout
-        if "PROCESSING" in self.config:
-            self.config["PROCESSING"]["REQUEST_TIMEOUT"] = str(
-                self.timeout_spinbox.value()
-            )
+            if language_changed:
+                QMessageBox.information(
+                    self,
+                    tr.get_text("language_changed"),
+                    tr.get_text("restart_required"),
+                )
 
-        # Apply language
-        new_lang = self.language_combo.currentData()
-        if new_lang != self.settings.get("language", "ko_KR"):
-            self.settings.set("language", new_lang)
+            # Save thread count and sync with analysis tab
+            self.settings.set("thread_count", self.thread_spinbox.value())
+            self.threads_spinbox.setValue(self.thread_spinbox.value())
+            
+            # Save timeout and update config
+            self.settings.set("timeout", self.timeout_spinbox.value())
+            if "PROCESSING" in self.config:
+                self.config["PROCESSING"]["REQUEST_TIMEOUT"] = str(
+                    self.timeout_spinbox.value()
+                )
+            
+            # Save similarity threshold
+            self.settings.set("similarity_threshold", self.similarity_spinbox.value())
+
+            # Save settings
+            self.settings.save_settings()
+
+            # Show success message
             QMessageBox.information(
-                self, tr.get_text("language_changed"), tr.get_text("restart_required")
+                self, tr.get_text("settings_saved"), tr.get_text("settings_applied")
             )
 
-        # Save settings
-        self.settings.save_settings()
-
-        QMessageBox.information(
-            self, tr.get_text("settings_saved"), tr.get_text("settings_applied")
-        )
+        except Exception as e:
+            self.logger.error(f"설정 저장 실패: {str(e)}", exc_info=True)
+            QMessageBox.warning(
+                self, tr.get_text("warning"), f"{tr.get_text('settings_save_failed')}: {str(e)}"
+            )
 
     def on_drop_area_clicked(self):
         """Handle click on drop area to open file dialog"""
@@ -904,60 +1104,148 @@ class MainWindow(QMainWindow):
         if filepath:
             self._handle_file_selected(filepath)
 
+    @pyqtSlot(list)
     def processing_finished(self, output_files):
-        """처리 완료 시 호출되는 메서드"""
-        self.progress_bar.hide()
-        self.stop_button.setEnabled(False)
+        """Handle processing finished for one or more files"""
+        self.update_status(tr.get_text("processing_finished"))
+        self.progress_bar.setValue(100)  # Ensure progress bar shows completion
+        
+        # Calculate processing time
+        if hasattr(self, 'processing_start_time'):
+            elapsed_time = time.time() - self.processing_start_time
+            self.logger.info(f"처리 시간: {elapsed_time:.2f}초")
+        
+        # Reset UI state
         self.start_button.setEnabled(True)
-
+        self.stop_button.setEnabled(False)
+        
         if not output_files:
-            self.status_label.setText("처리 실패: 출력 파일이 생성되지 않았습니다.")
+            QMessageBox.warning(
+                self,
+                tr.get_text("warning"),
+                tr.get_text("no_reports_generated")
+            )
             return
+            
+        # Create and show results summary dialog
+        self._show_results_summary(output_files)
+        
+        # Add to recent files
+        for file_path in self.input_files if hasattr(self, 'input_files') else [self.input_file]:
+            if file_path and os.path.exists(file_path):
+                self._add_to_recent_files(file_path)
+        
+        # Update dashboard
+        self.update_dashboard()
+            
+    def _show_results_summary(self, output_files):
+        """Show a summary dialog of processing results with visualization options"""
+        summary_dialog = QDialog(self)
+        summary_dialog.setWindowTitle(tr.get_text("processing_complete"))
+        summary_dialog.setMinimumSize(600, 400)
+        
+        layout = QVBoxLayout(summary_dialog)
+        
+        # Header with success message
+        header = QLabel(tr.get_text("analysis_complete_detail"))
+        header.setStyleSheet("font-size: 16px; font-weight: bold; color: green;")
+        layout.addWidget(header)
+        
+        # File list with links
+        file_group = QGroupBox(tr.get_text("generated_reports"))
+        file_layout = QVBoxLayout(file_group)
+        
+        for output_file in output_files:
+            file_name = os.path.basename(output_file)
+            file_row = QHBoxLayout()
+            
+            # File icon
+            icon_label = QLabel()
+            icon_label.setPixmap(self.style().standardPixmap(self.style().SP_FileIcon))
+            
+            # File name with link
+            file_link = QPushButton(file_name)
+            file_link.setStyleSheet("text-align: left; border: none; text-decoration: underline; color: blue;")
+            file_link.setCursor(Qt.PointingHandCursor)
+            
+            # Use lambda with default arg to avoid late binding issues
+            file_link.clicked.connect(lambda checked=False, path=output_file: self._open_file(path))
+            
+            file_row.addWidget(icon_label)
+            file_row.addWidget(file_link, 1)  # Stretch to fill space
+            file_layout.addLayout(file_row)
+        
+        layout.addWidget(file_group)
+        
+        # Action buttons
+        button_layout = QHBoxLayout()
+        
+        open_folder_btn = QPushButton(tr.get_text("open_results_folder"))
+        open_folder_btn.clicked.connect(self.open_results_folder)
+        
+        close_btn = QPushButton(tr.get_text("close"))
+        close_btn.clicked.connect(summary_dialog.accept)
+        
+        button_layout.addWidget(open_folder_btn)
+        button_layout.addStretch()
+        button_layout.addWidget(close_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # Show the dialog
+        summary_dialog.exec_()
+    
+    def _open_file(self, file_path):
+        """Open a file with the system's default application"""
+        if not os.path.exists(file_path):
+            QMessageBox.warning(
+                self,
+                tr.get_text("warning"),
+                tr.get_text("file_not_found")
+            )
+            return
+            
+        try:
+            if os.name == 'nt':  # Windows
+                os.startfile(file_path)
+            elif os.name == 'posix':  # macOS, Linux
+                subprocess.call(('xdg-open', file_path))
+            self.logger.info(f"File opened: {file_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to open file: {e}")
+            QMessageBox.critical(
+                self,
+                tr.get_text("error"),
+                f"{tr.get_text('failed_to_open_file')}: {str(e)}"
+            )
+            
+    def _add_to_recent_files(self, file_path):
+        """Add a file to the recent files list"""
+        recent_files = self.settings.get("recent_files", [])
+        
+        # Add to beginning if not already there, otherwise move to beginning
+        if file_path in recent_files:
+            recent_files.remove(file_path)
+        recent_files.insert(0, file_path)
+        
+        # Limit to 10 recent files
+        recent_files = recent_files[:10]
+        
+        # Save to settings
+        self.settings.set("recent_files", recent_files)
 
-        elapsed_time = time.time() - self.processing_start_time
-        self.status_label.setText(f"처리 완료! (소요 시간: {elapsed_time:.1f}초)")
-
-        # 결과 표시
-        result_message = f"{len(output_files)}개 파일이 생성되었습니다:\n\n"
-        for file in output_files:
-            result_message += f"- {file}\n"
-
-        # 사용자에게 결과 파일 경로 알림
-        QMessageBox.information(self, "처리 완료", result_message)
-
-        # 결과 파일 열기
-        for file in output_files:
-            if file and os.path.exists(file):
-                try:
-                    # Windows에서는 start 명령 사용, 다른 OS는 적절한 명령 사용
-                    if os.name == "nt":
-                        os.startfile(file)
-                    elif os.name == "posix":
-                        subprocess.call(("xdg-open", file))
-                    else:
-                        self.logger.warning(
-                            f"알 수 없는 OS: {os.name}, 파일을 열 수 없습니다."
-                        )
-                except Exception as e:
-                    self.logger.error(f"결과 파일 열기 실패: {str(e)}", exc_info=True)
-                    QMessageBox.warning(
-                        self, "파일 열기 오류", f"결과 파일을 열 수 없습니다: {str(e)}"
-                    )
-
-    @pyqtSlot(str)  # Decorator to mark this as a slot that accepts a string
     def append_log_message(self, msg):
         """Append a log message to the log area safely from any thread."""
         try:
             self.log_area.appendPlainText(msg)
-            # Optional: Limit the number of lines in the log area
-            max_lines = self.settings.get("max_log_lines", 1000)
-            if self.log_area.document().lineCount() > max_lines:
+            # Limit the number of lines in the log area based on config
+            if self.log_area.document().lineCount() > self.max_log_lines:
                 cursor = self.log_area.textCursor()
                 cursor.movePosition(cursor.Start)
                 cursor.movePosition(
                     cursor.Down,
                     cursor.KeepAnchor,
-                    self.log_area.document().lineCount() - max_lines,
+                    self.log_area.document().lineCount() - self.max_log_lines,
                 )
                 cursor.removeSelectedText()
                 cursor.movePosition(cursor.End)
@@ -967,6 +1255,50 @@ class MainWindow(QMainWindow):
         except Exception as e:
             # Fallback logging if GUI update fails
             print(f"Fallback log: {msg}\nError updating log area: {e}")
+
+    def resizeEvent(self, event):
+        """Handle window resize events to adjust layouts"""
+        super().resizeEvent(event)
+        
+        # Adjust splitter sizes based on window height
+        if hasattr(self, 'splitter'):
+            window_height = self.height()
+            self.splitter.setSizes([int(window_height * 0.6), int(window_height * 0.4)])
+
+    def on_add_file_clicked(self):
+        """Add file to batch processing queue"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, tr.get_text("select_file"), "", tr.get_text("excel_files")
+        )
+        if file_path:
+            self._add_file_to_batch(file_path)
+    
+    def on_clear_files_clicked(self):
+        """Clear all files from batch processing queue"""
+        self.batch_files_list.clear()
+        self.input_files = []
+        self.status_label.setText(tr.get_text("batch_cleared"))
+    
+    def _add_file_to_batch(self, file_path):
+        """Add a file to the batch processing queue"""
+        if not hasattr(self, 'input_files'):
+            self.input_files = []
+            
+        # Check if file is already in the list
+        if file_path in self.input_files:
+            return
+            
+        # Add to the list and update the display
+        self.input_files.append(file_path)
+        current_text = self.batch_files_list.toPlainText()
+        if current_text:
+            self.batch_files_list.setPlainText(current_text + "\n" + file_path)
+        else:
+            self.batch_files_list.setPlainText(file_path)
+            
+        # Enable start button if there are files
+        self.start_button.setEnabled(True)
+        self.status_label.setText(tr.get_text("files_in_batch", count=len(self.input_files)))
 
 
 # Custom logging handler to emit logs to the GUI text area

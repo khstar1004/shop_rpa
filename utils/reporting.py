@@ -347,76 +347,147 @@ def _prepare_report_data(
                 row_data[col] = source_data.get(col, "")
 
         # Add Koryo match data
+        koryo_status_message = "" # Initialize Koryo status message
         if result.best_koryo_match:
             match = result.best_koryo_match
-            row_data["매칭_상품명(고려)"] = match.matched_product.name
-            row_data["판매단가(V포함)(2)"] = match.matched_product.price
-            row_data["고려기프트 상품링크"] = match.matched_product.url
-            row_data["고려기프트 이미지"] = match.matched_product.image_url
+            matched_product = match.matched_product
+            status = matched_product.status # Get status from the matched product
+
+            # Populate common fields if product exists
+            row_data["매칭_상품명(고려)"] = matched_product.name
+            row_data["판매단가(V포함)(2)"] = matched_product.price
+            row_data["고려기프트 상품링크"] = matched_product.url
             row_data["가격차이(2)"] = match.price_difference
             row_data["가격차이(2)(%)"] = (
-                "{:.2f}%".format(match.price_difference_percent)
+                match.price_difference_percent # Keep numeric for formatting
                 if match.price_difference_percent is not None else ""
             )
             row_data["텍스트유사도(2)"] = (
-                "{:.3f}".format(match.text_similarity)
+                match.text_similarity # Keep numeric for formatting
                 if match.text_similarity is not None else ""
             )
-            threshold = config.get("MATCHING", {}).get("TEXT_SIMILARITY_THRESHOLD", 0.75)
-            if match.text_similarity < threshold:
-                 row_data["매칭_상황(2)"] = (
-                     "일정 정확도({:.2f}) 이상의 텍스트 유사율({:.2f})을 가진 상품이 없음".format(threshold, match.text_similarity)
-                 )
-        else:
-            row_data["매칭_상황(2)"] = "고려기프트에서 매칭된 상품이 없음"
-            row_data["고려기프트 이미지"] = "상품을 찾을 수 없음"
-            row_data["고려기프트 상품링크"] = "상품을 찾을 수 없음"
 
-        # Add Naver match data
+            # Handle based on status
+            if status == "Extraction Failed":
+                 koryo_status_message = "Extraction Failed (데이터 수집 오류)" # Set status message (Refined)
+                 # Clear or set specific fields to indicate failure
+                 row_data["판매단가(V포함)(2)"] = ""
+                 row_data["고려기프트 상품링크"] = koryo_status_message
+                 row_data["고려기프트 이미지"] = koryo_status_message
+                 row_data["가격차이(2)"] = ""
+                 row_data["가격차이(2)(%)"] = ""
+                 row_data["텍스트유사도(2)"] = ""
+
+            elif status == "Image Not Found":
+                 koryo_status_message = "Image Not Found (이미지 없음)" # Set status message
+                 row_data["고려기프트 이미지"] = koryo_status_message # Explicitly set image column
+                 # Check similarity threshold
+                 threshold = config.get("MATCHING", {}).get("TEXT_SIMILARITY_THRESHOLD", 0.75)
+                 if match.text_similarity < threshold:
+                     # Append similarity issue to status message if applicable
+                     koryo_status_message += f" / Low Similarity ({match.text_similarity:.2f} < {threshold})"
+
+            elif status == "OK" or status is None: # Handle OK or default None status
+                 # Image URL is populated from matched_product
+                 row_data["고려기프트 이미지"] = matched_product.image_url
+                 # Check similarity threshold
+                 threshold = config.get("MATCHING", {}).get("TEXT_SIMILARITY_THRESHOLD", 0.75)
+                 if match.text_similarity < threshold:
+                     koryo_status_message = f"Low Similarity ({match.text_similarity:.2f} < {threshold})"
+                 else:
+                     koryo_status_message = "OK" # Explicit success message
+            else:
+                 # Unknown status? Log it and treat as potential issue
+                 logger.warning(f"Unknown Koryo product status: {status} for {matched_product.url}")
+                 koryo_status_message = f"Unknown Status: {status}"
+                 row_data["고려기프트 이미지"] = koryo_status_message
+
+        else: # No best_koryo_match found
+            # This means either search failed or no match met criteria
+            koryo_status_message = "No Match Found (매칭 없음)"
+            row_data["매칭_상품명(고려)"] = ""
+            row_data["판매단가(V포함)(2)"] = ""
+            row_data["고려기프트 상품링크"] = koryo_status_message
+            row_data["고려기프트 이미지"] = koryo_status_message
+            row_data["가격차이(2)"] = ""
+            row_data["가격차이(2)(%)"] = ""
+            row_data["텍스트유사도(2)"] = ""
+
+        # Set the final Koryo status message
+        row_data["매칭_상황(2)"] = koryo_status_message
+
+        # Add Naver match data (keep existing logic for now)
+        naver_status_message = "" # Initialize Naver status message
         if result.best_naver_match:
             match = result.best_naver_match
+            # ... (existing Naver logic - check if status needs integration later)
+            # For now, just ensure the basic structure remains
             row_data["매칭_상품명(네이버)"] = match.matched_product.name
             row_data["판매단가(V포함)(3)"] = match.matched_product.price
             row_data["네이버 쇼핑 링크"] = match.matched_product.url
             row_data["네이버 이미지"] = match.matched_product.image_url
             row_data["가격차이(3)"] = match.price_difference
             row_data["가격차이(3)(%)"] = (
-                "{:.2f}%".format(match.price_difference_percent)
+                match.price_difference_percent # Keep numeric
                 if match.price_difference_percent is not None else ""
             )
             row_data["텍스트유사도(3)"] = (
-                "{:.3f}".format(match.text_similarity)
+                match.text_similarity # Keep numeric
                 if match.text_similarity is not None else ""
             )
+
+            # Add Naver matching status based on price/similarity (existing logic)
             min_price = config.get("EXCEL", {}).get("PRICE_MIN", 0)
             max_price = config.get("EXCEL", {}).get("PRICE_MAX", 10000000000)
             price = match.matched_product.price
             if price is not None and (price < min_price or price > max_price):
-                 row_data["매칭_상황(3)"] = (
-                     "가격이 범위 내에 없음 (최소: {}, 최대: {})".format(min_price, max_price)
-                 )
-            threshold = config.get("MATCHING", {}).get("TEXT_SIMILARITY_THRESHOLD", 0.75)
-            if match.text_similarity < threshold and "매칭_상황(3)" not in row_data:
-                 row_data["매칭_상황(3)"] = (
-                     "일정 정확도({:.2f}) 이상의 텍스트 유사율({:.2f})을 가진 상품이 없음".format(threshold, match.text_similarity)
-                 )
-        else:
-            row_data["매칭_상황(3)"] = "네이버에서 검색된 상품이 없음"
-            row_data["네이버 이미지"] = "상품을 찾을 수 없음"
-            row_data["네이버 쇼핑 링크"] = "상품을 찾을 수 없음"
-            row_data["공급사 상품링크"] = "상품을 찾을 수 없음"
+                 naver_status_message = f"Price Out of Range ({min_price}~{max_price})"
 
-        # Ensure all columns are present, handling missing image URLs
+            threshold = config.get("MATCHING", {}).get("TEXT_SIMILARITY_THRESHOLD", 0.75)
+            if match.text_similarity < threshold:
+                 sim_message = f"Low Similarity ({match.text_similarity:.2f} < {threshold})"
+                 if naver_status_message:
+                     naver_status_message += f" / {sim_message}"
+                 else:
+                     naver_status_message = sim_message
+
+            if not naver_status_message:
+                 naver_status_message = "OK"
+
+            row_data["매칭_상황(3)"] = naver_status_message
+            # Add supplier info if available (example)
+            row_data["공급사명"] = match.matched_product.brand or ""
+            row_data["공급사 상품링크"] = match.matched_product.original_input_data.get("detail_url", "") # Assuming detail_url is stored
+
+        else: # No best_naver_match
+            row_data["매칭_상황(3)"] = "No Match Found (매칭 없음)"
+            row_data["매칭_상품명(네이버)"] = ""
+            row_data["판매단가(V포함)(3)"] = ""
+            row_data["네이버 쇼핑 링크"] = "No Match Found (매칭 없음)"
+            row_data["네이버 이미지"] = "No Match Found (매칭 없음)"
+            row_data["가격차이(3)"] = ""
+            row_data["가격차이(3)(%)"] = ""
+            row_data["텍스트유사도(3)"] = ""
+            row_data["공급사명"] = ""
+            row_data["공급사 상품링크"] = ""
+
+        # Ensure all columns are present, using default values or status messages
+        # This loop might overwrite some status messages set above, needs review
+        # Let's comment out the part that overwrites Koryo/Naver image status
         for col in columns_to_include:
             if col not in row_data:
                 if col == "본사 이미지":
-                    row_data[col] = result.source_product.image_url
-                elif col == "고려기프트 이미지":
-                    row_data[col] = "https://adpanchok.co.kr/ez/upload/mall/shop_1688718553131990_0.jpg"
-                elif col == "네이버 이미지":
-                    row_data[col] = "https://adpanchok.co.kr/ez/upload/mall/shop_1688718553131990_0.jpg"
+                    row_data[col] = result.source_product.image_url or "Source Image Missing"
+                # elif col == "고려기프트 이미지":
+                #     # Let the logic above handle the default/error state for Koryo image
+                #     pass
+                # elif col == "네이버 이미지":
+                #     # Let the logic above handle the default/error state for Naver image
+                #     pass
                 else:
-                    row_data[col] = ""
+                    row_data[col] = "" # Default empty for other missing source columns
+            elif pd.isna(row_data[col]): # Ensure NaNs become empty strings
+                 row_data[col] = ""
 
         report_data.append(row_data)
 
@@ -577,21 +648,29 @@ def _add_instructions_sheet(workbook):
             (None, None),
             (None, None), # Spacer
             ("6. 오류 메시지 안내:", step_format),
-            ("다음과 같은 빨간색 메시지는 상품 매칭 과정에서 발생한 문제를 나타냅니다:", content_format),
+            ("보고서의 '매칭_상황' 컬럼에 표시되는 다음 메시지들은 상품 매칭 과정에서 발생한 문제를 나타냅니다:", content_format),
             (None, None),
-            ("   a. 일정 정확도(0.75) 이상의 텍스트 유사율을 가진 상품이 없음", error_msg_format),
-            ("      → 검색된 상품이 원본 상품과 충분히 유사하지 않음을 의미합니다. 텍스트 유사도가 임계값보다 낮습니다.", content_format),
+            ("   a. No Match Found (매칭 없음)", error_msg_format),
+            ("      → 해당 쇼핑몰에서 원본 상품과 일치하는 상품을 찾지 못했음을 의미합니다.", content_format),
             (None, None),
-            ("   b. 상품을 찾을 수 없음", error_msg_format),
-            ("      → 해당 상품이 검색 결과에 전혀 없음을 의미합니다.", content_format),
+            ("   b. Extraction Failed (데이터 수집 오류)", error_msg_format),
+            ("      → 상품은 찾았으나, 해당 상품의 가격, 이미지 등 상세 정보를 가져오는 과정에서 오류가 발생했음을 의미합니다.", content_format),
             (None, None),
-            ("   c. 이미지를 찾을 수 없음", error_msg_format),
-            ("      → 매칭된 상품의 이미지 URL을 찾을 수 없음을 의미합니다.", content_format),
+            ("   c. Image Not Found (이미지 없음)", error_msg_format),
+            ("      → 상품 정보는 가져왔으나, 대표 이미지 URL을 찾을 수 없음을 의미합니다. 이미지가 표시되지 않습니다.", content_format),
             (None, None),
-            ("   d. 가격이 범위 내에 없음", error_msg_format),
+            ("   d. Low Similarity (유사도 낮음) (예: 'Low Similarity (0.65 < 0.75)')", error_msg_format),
+            ("      → 상품을 찾았지만, 원본 상품명과의 텍스트 유사도가 설정된 기준치({threshold})보다 낮음을 의미합니다. 다른 상품일 가능성이 있습니다.", content_format),
+            (None, None),
+            ("   e. Price Out of Range (가격 범위 초과)", error_msg_format),
             ("      → 찾은 상품의 가격이 설정된 최소/최대 가격 범위를 벗어났음을 의미합니다.", content_format),
             (None, None),
-            ("※ 중요 알림: 노란색으로 표시된 셀은 가격 차이가 음수인 항목입니다.", important_format),
+            ("   f. Unknown Status (알 수 없는 상태)", error_msg_format),
+            ("      → 예상치 못한 상태값입니다. 개발팀에 문의가 필요할 수 있습니다.", content_format),
+            (None, None),
+            ("   ※ 위 메시지들은 조합되어 나타날 수 있습니다 (예: 'Image Not Found / Low Similarity').", content_format),
+            (None, None),
+            ("※ 중요 알림: 노란색으로 표시된 행은 가격 차이가 음수(-)인 항목입니다 (즉, 찾은 상품이 원본보다 저렴함).", important_format),
             ("※ 이미지는 인터넷 연결이 있어야 정상적으로 표시됩니다.", important_format),
             (None, None),
             ("7. 일반적인 문제 해결:", step_format),

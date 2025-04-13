@@ -120,19 +120,45 @@ class ProcessingThread(QThread):
     def _process_multiple_files(self):
         """여러 파일 처리"""
         try:
-            self.status_updated.emit(f"{len(self.input_files)}개 파일 처리 시작...")
-
-            # 모든 파일 처리
-            output_files = self.processor.process_files(
-                self.input_files, self.output_dir, self.product_limit
-            )
-
-            # Emit final progress if running
             total_files = len(self.input_files)
+            self.status_updated.emit(f"{total_files}개 파일 처리 시작...")
+            
+            # 초기 진행 상태 업데이트
+            self.progress_updated.emit(0, total_files)
+            
+            # 각 파일마다 진행 상황을 추적하기 위한 변수
+            processed_files = 0
+            output_files = []
+            
+            # 파일별로 처리하면서 진행 상황 업데이트
+            for idx, input_file in enumerate(self.input_files):
+                if not self._is_running:
+                    break
+                
+                file_name = os.path.basename(input_file)
+                self.status_updated.emit(f"파일 처리 중 ({idx+1}/{total_files}): {file_name}")
+                
+                try:
+                    # 개별 파일 처리
+                    if hasattr(self.processor, "_process_single_file"):
+                        result_file = self.processor._process_single_file(input_file, self.output_dir)
+                        if result_file:
+                            output_files.append(result_file)
+                except Exception as e:
+                    self.log_message.emit(f"파일 처리 오류 ({file_name}): {str(e)}")
+                    continue
+                
+                # 진행 상황 업데이트
+                processed_files += 1
+                progress_percent = int((processed_files / total_files) * 100)
+                self.progress_updated.emit(processed_files, total_files)
+                
+                # 처리 결과 로그
+                self.log_message.emit(f"파일 처리 완료 ({idx+1}/{total_files}): {file_name}")
+            
+            # 최종 진행 상태 업데이트
             if self._is_running:
-                self.progress_updated.emit(100)
-                # For multiple files, progress is trickier. Maybe update status instead?
-                # self.progress_updated.emit(total_files, total_files) # Or just emit 100%
+                self.progress_updated.emit(total_files, total_files)
                 if output_files:
                     self.status_updated.emit(f"{len(output_files)}개 파일 처리 완료!")
                     self.processing_finished.emit(output_files)

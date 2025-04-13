@@ -508,11 +508,19 @@ class MultiModalMatcher:
         if source_category == candidate_category:
             return True
 
-        # 카테고리 별칭 확인
+        # 카테고리 별칭 확인 (캐시 활용)
+        cache_key = f"category_norm|{source_category}|{candidate_category}"
+        if self.cache:
+            cached_result = self.cache.get(cache_key)
+            if cached_result is not None:
+                return cached_result
+
         normalized_source = self._normalize_category(source_category)
         normalized_candidate = self._normalize_category(candidate_category)
 
         if normalized_source == normalized_candidate:
+            if self.cache:
+                self.cache.set(cache_key, True, ttl=3600)  # 1시간 캐싱
             return True
 
         # 카테고리 호환성 매트릭스 확인
@@ -520,13 +528,19 @@ class MultiModalMatcher:
             if normalized_source == main_category.lower() and normalized_candidate in [
                 c.lower() for c in compatible_categories
             ]:
+                if self.cache:
+                    self.cache.set(cache_key, True, ttl=3600)
                 return True
             if normalized_candidate == main_category.lower() and normalized_source in [
                 c.lower() for c in compatible_categories
             ]:
+                if self.cache:
+                    self.cache.set(cache_key, True, ttl=3600)
                 return True
 
         # 위의 조건에 해당되지 않으면 호환되지 않음
+        if self.cache:
+            self.cache.set(cache_key, False, ttl=3600)
         return False
 
     def _normalize_category(self, category: str) -> str:

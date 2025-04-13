@@ -1,1262 +1,1146 @@
 """
-고려기프트 웹사이트 스크래퍼 모듈
+고려기프트 웹사이트 스크래퍼 모듈 (Playwright 동기 API 기반)
 """
 
-import asyncio
 import hashlib
-import json
 import logging
 import os
 import re
 import time
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
+import random
 from datetime import datetime
-from time import sleep
-from typing import Any, Dict, List, Optional, Tuple
-
-import pandas as pd
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
+from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
+from dataclasses import dataclass, field
 
-# 추가: Playwright 임포트 시도 (선택적 의존성)
-try:
-    from playwright.sync_api import TimeoutError, sync_playwright, Error as PlaywrightError
-
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
+from playwright.sync_api import sync_playwright, Playwright, Browser, Page, Locator, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
 # Add imports for caching
 from utils.caching import FileCache, cache_result
 
 from ..data_models import Product
 from .base_multi_layer_scraper import BaseMultiLayerScraper
-from .extraction_strategy import DOMExtractionStrategy, TextExtractionStrategy
-from .utils import extract_main_image
+
+# Add imports for threading
+import threading
+
+
+@dataclass
+class ScraperConfig:
+    """스크래퍼 설정을 위한 데이터 클래스"""
+    max_retries: int = 3 # 네트워크 오류 재시도 횟수
+    timeout: int = 60000 # Playwright 기본 타임아웃 (ms)
+    navigation_timeout: int = 60000 # 페이지 이동 타임아웃 (ms)
+    wait_timeout: int = 30000 # 특정 요소 대기 타임아웃 (ms)
+    request_delay: float = 1.0 # 작업 사이 지연 시간 (초)
+    headless: bool = True # Headless 모드 사용 여부
+    debug: bool = False # 디버그 로깅 활성화
+    user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
 
 
 class KoryoScraper(BaseMultiLayerScraper):
     """
-    고려기프트 스크래퍼 - Selenium 및 Playwright 활용 다중 레이어 추출 엔진
+    고려기프트 스크래퍼 - Playwright 동기 API 활용
 
     특징:
-    - Selenium 기반 웹 브라우저 자동화
-    - Playwright 지원 (설치된 경우)
-    - DOM, 텍스트, 좌표 기반 추출 전략
-    - 비동기 작업 처리
-    - 메모리 효율적 데이터 구조
-    - 선택적 요소 관찰
-    - 가격표 및 수량별 가격 추출
+    - Playwright 기반 웹 브라우저 자동화
+    - DOM 및 텍스트 기반 추출 전략
+    - 명시적 대기 사용
+    - 캐싱 지원
     """
 
     def __init__(
         self,
-        max_retries: int = 5,
-        timeout: int = 30,
+        config: Optional[ScraperConfig] = None,
         cache: Optional[FileCache] = None,
-        use_proxies: bool = False,
-        debug: bool = False,
+        # BaseMultiLayerScraper 상속을 위한 파라미터 (Playwright 설정으로 대체)
+        max_retries: Optional[int] = None,
+        timeout: Optional[int] = None,
     ):
-        super().__init__(max_retries=max_retries, timeout=timeout, cache=cache)
+        # Playwright 설정을 ScraperConfig에서 가져옴
+        self.config = config or ScraperConfig()
+
+        # BaseScraper 초기화 (max_retries, timeout은 Playwright 설정 사용)
+        # FileCache 사용을 위해 cache 전달
+        super().__init__(max_retries=self.config.max_retries, timeout=self.config.timeout, cache=cache)
+
         self.logger = logging.getLogger(__name__)
-        self.max_retries = max_retries
-        self.timeout = timeout
-        self.debug = debug
         self.base_url = "https://koreagift.com"
-        self.use_proxies = use_proxies
-
-        # Define selector lists for product details
-        self.title_selectors = [
-            "h3.detail_tit",
-            "h3.prd_title",
-            ".view_title",
-            ".product_name",
-            "h1.product-title"
-        ]
-        
-        self.price_selectors = [
-            "dl.detail_price dd",
-            ".price_num",
-            "#main_price",
-            ".product-price",
-            ".price"
-        ]
-        
-        self.code_selectors = [
-            "div.product_code",
-            ".product-code",
-            ".item-code",
-            "span.code"
-        ]
-        
-        self.image_selectors = [
-            "div.swiper-slide img",
-            ".product-image img",
-            ".detail_img img",
-            ".product-gallery img"
-        ]
-
-        # New ordering: first create output directory and define headers
-        os.makedirs("output", exist_ok=True)
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Referer": self.base_url,
-        }
-
-        # Playwright available check remains, but initialization is removed
-        self.playwright_available = PLAYWRIGHT_AVAILABLE
-        if not self.playwright_available:
-            self.logger.warning("Playwright is not available. Some features will be limited.")
-
-        # Selenium 설정
-        self.driver = None
-        self.setup_selenium()
-
-        # 사이트 관련 상수 정의 (2023년 URL 업데이트)
         self.mall_url = f"{self.base_url}/ez/mall.php"
         self.search_url = f"{self.base_url}/ez/goods/goods_search.php"
 
-        # 기본 카테고리 정의 (fallback용)
-        self.categories_cache = []
+        # Playwright 인스턴스 및 리소스 (초기화는 init_playwright에서 수행)
+        self._playwright: Optional[Playwright] = None
+        self._browser: Optional[Browser] = None
+        self._page: Optional[Page] = None
+
+        # Thread-local storage for browser contexts
+        self._thread_local = threading.local()
+
+        # --- 셀렉터 및 패턴 정의 --- (기존 구조 유지, 필요시 수정)
+        self.title_selectors = [
+            ".product_name", # product page analysis
+            "h3.detail_tit",
+            "h3.prd_title",
+            ".view_title",
+            "h1.product-title",
+            ".name" # main page best100 analysis
+        ]
+        self.price_selectors = [
+            "#main_price", # product page analysis
+            "dl.detail_price dd",
+            ".price_num",
+            ".product-price",
+            ".price", # main page best100 analysis
+            ".product-price-num"
+        ]
+        self.code_selectors = [
+            '//div[contains(text(), "상품코드")]', # product page analysis (XPath needed for text containment)
+            # "div.product_code", # Original, less specific
+            ".product-code",
+            ".item-code",
+            "span.code",
+            'td:contains("상품코드") + td',
+            'li:contains("상품코드")'
+        ]
+        self.image_selectors = [
+            "#main_img", # product page analysis
+            ".product_picture .thumnails img", # product page analysis
+            "div.swiper-slide img",
+            ".product-image img",
+            ".detail_img img",
+            ".product-gallery img",
+            # "#main_img", # Duplicate, covered above
+            # ".product_picture .thumnails img", # Duplicate, covered above
+            ".tbl_info img", # product page analysis (specs table images)
+            "div.prd_detail img"
+        ]
+        self.selectors = {
+            "product_list": {
+                # Priority to more specific structures if known context (e.g., best100)
+                # General selectors first for broader compatibility
+                "selector": "div.prd_list_wrap li.prd, ul.prd_list li, table.mall_list td.prd, div.product_list .item, .prd-list .prd-item, .product, .best100_tab .product", # crowling_kogift.py .product 추가, main page best100 analysis 추가
+            },
+            "product_title_list": { # 목록용 제목
+                 "selector": ".name, p.name a, div.name a, td.name a, .prd_name a, a.product-title, div.name > a", # main page best100 analysis 추가, crowling_kogift.py div.name > a 추가
+            },
+            "product_link_list": { # 목록용 링크
+                 "selector": "a, p.name a, div.name a, td.name a, .prd_name a, a.product-title, div.prd_list_wrap li.prd > a, div.pic > a", # Ensure 'a' itself is included for cases like '.product a', crowling_kogift.py div.pic > a 추가
+                 "attribute": "href",
+            },
+            "price_list": { # 목록용 가격
+                "selector": ".price, p.price, div.price, td.price, .prd_price, span.price", # main page best100 analysis 추가, crowling_kogift.py div.price 추가
+            },
+            "thumbnail_list": { # 목록용 썸네일
+                "selector": ".img img, .pic img, img.prd_img, td.img img, .thumb img, img.product-image, div.pic > a > img", # main page best100 analysis 추가, crowling_kogift.py div.pic > a > img 추가
+                "attribute": "src"
+            },
+            "next_page_js": { # JavaScript 기반 페이징 ('다음' 또는 페이지 번호)
+                 "selector": '#pageindex a[onclick*="getPageGo"], div.custom_paging div[onclick*="getPageGo"], .paging a.next, a:contains("다음")', # product page review pagination analysis 추가
+            },
+            "next_page_href": { # href 기반 페이징
+                 # Consider specific pagination structures if known (e.g., #pageindex for reviews)
+                 "selector": '#pageindex a:not([onclick]), .paging a.next, a.next[href]:not([href="#"]):not([href^="javascript:"]), a:contains("다음")[href]:not([href="#"]):not([href^="javascript:"])', # product page review pagination analysis 추가, more specific href check
+                 "attribute": "href",
+            },
+            "quantity_table": {
+                "selector": "table.quantity_price__table", # product page analysis
+            },
+            "specs_table": {
+                "selector": "table.tbl_info", # product page analysis
+            },
+            "description": {
+                # product page analysis mentions #prd_detail_content, but also .prd_detail contains the table etc.
+                # Might need refinement based on what part is desired (text vs html, full vs partial)
+                "selector": "div.prd_detail, #prd_detail_content",
+            },
+            "category_items": {
+                 # main page analysis mentions #div_category_all .tc_link
+                "selector": "#div_category_all .tc_link, #lnb_menu > li > a, .category a, #category_all a, .menu_box a, a[href*='mall.php?cat='], a[href*='mall.php?cate=']", # cate 추가
+            },
+            # --- crowling_kogift.py 에서 사용된 셀렉터들 --- 
+            "main_search_input": 'input[name="keyword"][id="main_keyword"]', # main page analysis confirms id
+            "main_search_button": 'img#search_submit',
+            "re_search_input": 'input#re_keyword',
+            "re_search_button": 'button[onclick="re_search()"]',
+            "product_count": '//div[contains(text(), "개의 상품이 있습니다.")]/span', # XPath 사용 예시
+            "model_text": { # Model / Product code on list/search page
+                "selector": ".product .model"
+            },
+            "options_select": { # Product page options analysis
+                "selector": 'select[name^="option_"]'
+            },
+            "review_table": { # Product page reviews analysis
+                 "selector": 'table.tbl_review'
+            },
+            "review_pagination": { # Product page reviews analysis
+                 "selector": '#pageindex'
+            }
+        }
+        self.patterns = {
+            "price_number": re.compile(r"[\d,]+"),
+            "product_code": re.compile(r"상품코드\s*[:\-]?\s*([A-Za-z0-9_-]+)"),
+            "quantity": re.compile(r"(\d+)\s*(?:개|세트|묶음|ea)", re.IGNORECASE),
+            "quantity_price": re.compile(r"(\d+)개[:\s]+([0-9,]+)원"),
+            "vat_included": re.compile(r"VAT\s*(포함|별도|제외)", re.IGNORECASE),
+            "js_page_number": re.compile(r"getPageGo\d*\((\d+)\)"), # JS 페이징 번호 추출
+        }
         self.default_categories = [
             ("볼펜/사무용품", "013001000"),
             ("텀블러/머그컵", "013002000"),
             ("가방", "013003000"),
             ("전자/디지털", "013004000"),
         ]
+        os.makedirs("output", exist_ok=True)
 
-        # 추출 셀렉터 정의 - 구조화된 다중 레이어 접근 방식
-        self.selectors = {
-            "product_list": {
-                "selector": "div.prd_list_wrap li.prd",
-                "options": {"multiple": True},
-            },
-            "product_title": {
-                "selector": "div.title a",
-                "options": {"multiple": False},
-            },
-            "product_link": {
-                "selector": "div.title a",
-                "options": {"attribute": "href"},
-            },
-            "price": {"selector": "div.price", "options": {"multiple": False}},
-            "thumbnail": {"selector": "img.prd_img", "options": {"attribute": "src"}},
-            "next_page": {
-                "selector": ".paging a.next",
-                "options": {"attribute": "href"},
-            },
-            # 상세 페이지 셀렉터
-            "detail_title": {
-                "selector": "h3.detail_tit",
-                "options": {"multiple": False},
-            },
-            "detail_price": {
-                "selector": "dl.detail_price dd",
-                "options": {"multiple": False},
-            },
-            "detail_code": {
-                "selector": "div.product_code",
-                "options": {"multiple": False},
-            },
-            "detail_images": {
-                "selector": "div.swiper-slide img",
-                "options": {"multiple": True, "attribute": "src"},
-            },
-            "quantity_table": {
-                "selector": "table.quantity_price",
-                "options": {"multiple": False},
-            },
-            "specs_table": {
-                "selector": "table.specs_table",
-                "options": {"multiple": False},
-            },
-            "description": {
-                "selector": "div.prd_detail",
-                "options": {"multiple": False},
-            },
-            # 카테고리 셀렉터
-            "category_items": {
-                "selector": "#lnb_menu > li > a",
-                "options": {"multiple": True},
-            },
-            # 가격표 관련 셀렉터 추가
-            "price_table": {
-                "selector": "table.price_table, table.quantity_table, table.option_table",
-                "options": {"multiple": False},
-            },
-            "quantity_input": {
-                "selector": 'input.qu, input[name*="quantity"], input[name*="qty"]',
-                "options": {"multiple": True, "attribute": "value"},
-            },
-            "price_input": {
-                "selector": 'input.pr, input[name*="price"]',
-                "options": {"multiple": True, "attribute": "value"},
-            },
-        }
+    # --- Playwright 초기화 및 종료 --- 
 
-        # 텍스트 추출용 정규식 패턴 (추가 패턴 포함)
-        self.patterns = {
-            "price_number": re.compile(r"[\d,]+"),
-            "product_code": re.compile(r"상품코드\s*:\s*([A-Za-z0-9-]+)"),
-            "quantity": re.compile(r"(\d+)(개|세트|묶음)"),
-            "quantity_price": re.compile(r"(\d+)개[:\s]+([0-9,]+)원"),  # 수량:가격 패턴
-            "vat_included": re.compile(r"VAT\s*(포함|별도|제외)", re.IGNORECASE),
-            "quantity_price": re.compile(r"(\d+)개[:\s]+([0-9,]+)원"),
-        }
-
-        # 대화 상자 메시지 저장용
-        self.dialog_message = ""
-
-    def _simplify_product_name(self, name: str) -> str:
-        """상품명에서 일반적인 규격, 주석, 괄호 등을 제거하여 간소화"""
-        simplified = name
-        # 1. // 주석 제거
-        simplified = re.sub(r"\s*\/\/.*$", "", simplified).strip()
-        # 2. 괄호 및 내용 제거
-        simplified = re.sub(r"\s*\([^)]*\)", "", simplified).strip()
-        # 3. 규격/사이즈 제거 (예: A4, 0.2T, 100g, 297X210)
-        simplified = re.sub(
-            r"\s*\b(A|B)[0-9]\b", "", simplified, flags=re.IGNORECASE
-        ).strip()
-        simplified = re.sub(
-            r"\s*\d+(\.\d+)?T\b", "", simplified, flags=re.IGNORECASE
-        ).strip()
-        simplified = re.sub(r"\s*\d+g\b", "", simplified, flags=re.IGNORECASE).strip()
-        simplified = re.sub(r"\s*\d+(X|\*)\d+\b", "", simplified).strip()
-        # 4. 맨 끝 숫자 제거 (오작동 가능성 있음, 주의)
-        # simplified = re.sub(r'\s+\d+$', '', simplified).strip()
-        # 5. 중복 공백 제거
-        simplified = re.sub(r"\s+", " ", simplified).strip()
-
-        # 원본과 동일하거나 너무 짧아지면 원본 반환
-        if simplified == name or len(simplified) < 3:
-            return name
-        self.logger.debug(f"Simplified name: '{name}' -> '{simplified}'")
-        return simplified
-
-    def setup_selenium(self):
-        """Selenium WebDriver 설정"""
+    def init_playwright(self) -> bool:
+        """Playwright 인스턴스 및 브라우저 초기화"""
+        if self._page and not self._page.is_closed():
+            self.logger.debug("Playwright page already initialized and open.")
+            return True
         try:
-            chrome_options = Options()
-            chrome_options.add_argument("--headless")  # 헤드리스 모드
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--window-size=1920,1080")
-            chrome_options.add_argument(f"user-agent={self.headers['User-Agent']}")
-            
-            # 추가된 옵션들
-            chrome_options.add_argument("--disable-extensions")
-            chrome_options.add_argument("--disable-popup-blocking")
-            chrome_options.add_argument("--disable-notifications")
-            chrome_options.add_argument("--disable-infobars")
-            chrome_options.add_argument("--disable-web-security")
-            chrome_options.add_argument("--ignore-certificate-errors")
-            chrome_options.add_argument("--ignore-ssl-errors")
-            chrome_options.add_argument("--allow-running-insecure-content")
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            
-            # 네트워크 관련 설정
-            chrome_options.add_argument("--disable-application-cache")
-            chrome_options.add_argument("--disable-cache")
-            chrome_options.add_argument("--disk-cache-size=0")
-            chrome_options.add_argument("--media-cache-size=0")
-            
-            # 성능 관련 설정
-            chrome_options.add_argument("--disable-background-networking")
-            chrome_options.add_argument("--disable-background-timer-throttling")
-            chrome_options.add_argument("--disable-backgrounding-occluded-windows")
-            chrome_options.add_argument("--disable-breakpad")
-            chrome_options.add_argument("--disable-component-extensions-with-background-pages")
-            chrome_options.add_argument("--disable-default-apps")
-            chrome_options.add_argument("--disable-extensions")
-            chrome_options.add_argument("--disable-features=TranslateUI")
-            chrome_options.add_argument("--disable-ipc-flooding-protection")
-            chrome_options.add_argument("--disable-renderer-backgrounding")
-            chrome_options.add_argument("--enable-features=NetworkService,NetworkServiceInProcess")
-            chrome_options.add_argument("--force-color-profile=srgb")
-            chrome_options.add_argument("--metrics-recording-only")
-            chrome_options.add_argument("--no-first-run")
-            chrome_options.add_argument("--password-store=basic")
-            chrome_options.add_argument("--use-mock-keychain")
-            
-            # 로깅 비활성화
-            chrome_options.add_argument("--log-level=3")
-            chrome_options.add_argument("--silent")
-            
-            # Service 객체를 명시적으로 사용
-            try:
-                # ChromeDriverManager 초기화 방식 변경
-                chrome_path = ChromeDriverManager().install()
-                if "THIRD_PARTY_NOTICES.chromedriver" in chrome_path:
-                    chrome_path = chrome_path.replace("THIRD_PARTY_NOTICES.chromedriver", "chromedriver.exe")
-                service = Service(executable_path=chrome_path)
-                
-                # WebDriver 초기화 시도
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                        self.driver.set_page_load_timeout(self.timeout)
-                        self.logger.info("Selenium WebDriver initialized successfully")
-                        break
-                    except Exception as e:
-                        if attempt == max_retries - 1:
-                            raise
-                        self.logger.warning(f"WebDriver initialization attempt {attempt + 1} failed: {str(e)}")
-                        time.sleep(2)  # 재시도 전 대기
-                        
-            except Exception as install_error:
-                self.logger.error(f"Failed to install/find ChromeDriver via webdriver-manager: {install_error}")
-                # 대체 방법 시도
-                try:
-                    from selenium.webdriver.chrome.service import Service as ChromeService
-                    service = ChromeService()
-                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                except Exception as fallback_error:
-                    self.logger.error(f"Fallback ChromeDriver initialization failed: {fallback_error}")
-                    raise
-
-        except Exception as e:
-            self.logger.error(
-                f"Failed to initialize Selenium WebDriver: {str(e)}", exc_info=True
+            self._playwright = sync_playwright().start()
+            self._browser = self._playwright.chromium.launch(headless=self.config.headless)
+            context = self._browser.new_context(
+                user_agent=self.config.user_agent,
+                viewport={'width': 1920, 'height': 1080} # 필요시 뷰포트 설정
             )
-            raise
+            # 기본 타임아웃 설정
+            context.set_default_timeout(self.config.timeout)
+            context.set_default_navigation_timeout(self.config.navigation_timeout)
+
+            self._page = context.new_page()
+            self.logger.info("Playwright initialized successfully.")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Playwright: {e}", exc_info=True)
+            self.close() # 실패 시 자원 정리
+            return False
+
+    def _create_new_context(self) -> tuple[Optional[Browser], Optional[Page]]:
+        """Create a new browser context and page for thread-safe operations"""
+        try:
+            # Start a fresh playwright instance
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(headless=self.config.headless)
+            context = browser.new_context(
+                user_agent=self.config.user_agent,
+                viewport={'width': 1920, 'height': 1080}
+            )
+            
+            # Set timeouts
+            context.set_default_timeout(self.config.timeout)
+            context.set_default_navigation_timeout(self.config.navigation_timeout)
+            
+            # Create a new page
+            page = context.new_page()
+            
+            # Store these in thread local storage
+            self._thread_local.playwright = playwright
+            self._thread_local.browser = browser
+            self._thread_local.context = context
+            self._thread_local.page = page
+            
+            return browser, page
+        except Exception as e:
+            self.logger.error(f"Failed to create new browser context: {e}", exc_info=True)
+            self._close_thread_context()
+            return None, None
+            
+    def _close_thread_context(self):
+        """Close and clean up thread-local browser context"""
+        try:
+            if hasattr(self._thread_local, 'page') and self._thread_local.page:
+                try:
+                    self._thread_local.page.close()
+                except:
+                    pass
+                self._thread_local.page = None
+                
+            if hasattr(self._thread_local, 'context') and self._thread_local.context:
+                try:
+                    self._thread_local.context.close()
+                except:
+                    pass
+                self._thread_local.context = None
+                
+            if hasattr(self._thread_local, 'browser') and self._thread_local.browser and self._thread_local.browser.is_connected():
+                try:
+                    self._thread_local.browser.close()
+                except:
+                    pass
+                self._thread_local.browser = None
+                
+            if hasattr(self._thread_local, 'playwright') and self._thread_local.playwright:
+                try:
+                    self._thread_local.playwright.stop()
+                except:
+                    pass
+                self._thread_local.playwright = None
+        except Exception as e:
+            self.logger.error(f"Error cleaning up thread context: {e}", exc_info=True)
+
+    def close(self):
+        """Playwright 관련 자원 종료"""
+        if self._browser and self._browser.is_connected():
+            try:
+                self._browser.close()
+                self.logger.info("Playwright browser closed.")
+            except Exception as e:
+                 self.logger.error(f"Error closing Playwright browser: {e}")
+        if self._playwright:
+            try:
+                self._playwright.stop()
+                self.logger.info("Playwright instance stopped.")
+            except Exception as e:
+                 self.logger.error(f"Error stopping Playwright: {e}")
+
+        self._page = None
+        self._browser = None
+        self._playwright = None
+        
+        # Also close any thread-local contexts
+        self._close_thread_context()
 
     def __del__(self):
-        """소멸자: WebDriver 자원 해제"""
-        if self.driver:
-            try:
-                self.driver.quit()
-                self.logger.info("Selenium WebDriver closed")
-            except Exception as e:
-                self.logger.error(f"Error closing WebDriver: {str(e)}")
+        """소멸자: 자원 정리 시도"""
+        self.close()
 
-    def search_product(
-        self, query: str, max_items: int = 50, keyword2: str = ""
-    ) -> List[Product]:
-        """고려기프트에서 상품을 검색합니다."""
-        self.logger.info(f"고려기프트에서 '{query}' 검색 시작")
-        
-        # 캐시 확인
-        cache_key = f"koryo_search|{query}|{keyword2}"
-        cached_result = self.get_sparse_data(cache_key)
-        if cached_result:
-            self.logger.info(f"캐시된 검색 결과 사용: '{query}'")
-            return cached_result
+    def _get_page(self) -> Optional[Page]:
+         """초기화된 Playwright Page 객체를 반환하거나 새로 초기화"""
+         if not self._page or self._page.is_closed():
+             if not self.init_playwright():
+                 return None
+         # Also check browser connection status
+         if not self._browser or not self._browser.is_connected():
+             self.logger.warning("Browser is disconnected. Attempting to re-initialize.")
+             if not self.init_playwright():
+                 self.logger.error("Failed to re-initialize Playwright.")
+                 return None
+         return self._page
 
+    # --- Helper Methods --- 
+
+    def _safe_get_text(self, locator: Locator, timeout: Optional[int] = None) -> Optional[str]:
+        """타임아웃 및 오류 처리하여 Locator의 텍스트 콘텐츠 가져오기"""
         try:
-            # 검색 URL 구성
-            search_url = f"{self.base_url}/ez/goods/goods_search.php"
-            params = {
-                "search_keyword": query,
-                "keyword2": keyword2,
-                "search_type": "all"
-            }
-            
-            response = self.session.get(search_url, params=params)
-            response.raise_for_status()
-            
-            soup = self._get_soup(response.text)
-            product_elements = soup.select(self.selectors["product_list"]["selector"])
-            
-            if not product_elements:
-                self.logger.warning(f"❌ 상품이 존재하지 않음: '{query}' 검색 결과 없음")
-                return []
-                
-            products = []
-            for element in product_elements[:max_items]:
-                try:
-                    product_data = self._extract_list_item(element)
-                    if not product_data:
-                        continue
-                        
-                    product = self._get_product_details(product_data)
-                    if product:
-                        products.append(product)
-                        
-                except Exception as e:
-                    self.logger.error(f"상품 추출 중 오류 발생: {str(e)}")
-                    continue
-                
-            if not products:
-                self.logger.warning(f"❌ 상품이 존재하지 않음: '{query}' 검색 결과 없음")
-                return []
-                
-            self.logger.info(f"고려기프트에서 '{query}' 검색 완료 - {len(products)}개 상품 발견")
-            return products
-            
-        except Exception as e:
-            self.logger.error(f"고려기프트 검색 중 오류 발생: {str(e)}")
-            return []
+            return locator.text_content(timeout=timeout or self.config.wait_timeout)
+        except (PlaywrightTimeoutError, PlaywrightError) as e:
+            self.logger.debug(f"Timeout or error getting text content: {e}")
+            return None
 
-    def _search_product_logic(self, query: str, max_items: int = 50) -> List[Product]:
-        products = []
-        max_retries = 3
-        retry_delay = 5  # seconds
-
+    def _safe_get_attribute(self, locator: Locator, attribute: str, timeout: Optional[int] = None) -> Optional[str]:
+        """타임아웃 및 오류 처리하여 Locator의 속성 값 가져오기"""
         try:
-            # 직접 search_url를 사용하여 검색 결과 페이지로 이동
-            search_url = f"{self.search_url}?keyword={urllib.parse.quote(query)}"
-            self.logger.debug(f"검색 URL: {search_url}")
+            return locator.get_attribute(attribute, timeout=timeout or self.config.wait_timeout)
+        except (PlaywrightTimeoutError, PlaywrightError) as e:
+            self.logger.debug(f"Timeout or error getting attribute '{attribute}': {e}")
+            return None
 
-            for attempt in range(max_retries):
-                try:
-                    self.driver.get(search_url)
-                    sleep(3)  # 검색 결과 로딩 대기
-                    self.logger.info(f"Search results page loaded: {self.driver.current_url}")
-                    break
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        self.logger.error(f"Failed to load search page after {max_retries} attempts: {str(e)}")
-                        return []
-                    self.logger.warning(f"Attempt {attempt + 1} failed: {str(e)}")
-                    sleep(retry_delay)
-                    # WebDriver 재초기화 시도
+    def _wait_for_load_state(self, page: Page, state: str = 'networkidle', timeout: Optional[int] = None):
+        """페이지 로드 상태 대기 (오류 처리 포함)"""
+        try:
+            page.wait_for_load_state(state, timeout=timeout or self.config.navigation_timeout)
+            self.logger.debug(f"Page reached load state: '{state}'")
+        except (PlaywrightTimeoutError, PlaywrightError) as e:
+             self.logger.warning(f"Timeout or error waiting for page load state '{state}': {e}")
+             # 오류 발생해도 계속 진행할 수 있도록 예외 처리
+
+    def _wait_for_selector(self, page: Page, selector: str, state: str = 'visible', timeout: Optional[int] = None) -> Optional[Locator]:
+        """특정 셀렉터 대기 (오류 처리 포함)"""
+        try:
+            locator = page.locator(selector)
+            locator.wait_for(state=state, timeout=timeout or self.config.wait_timeout)
+            self.logger.debug(f"Selector '{selector}' is now {state}.")
+            return locator
+        except (PlaywrightTimeoutError, PlaywrightError) as e:
+             self.logger.warning(f"Timeout or error waiting for selector '{selector}' to be {state}: {e}")
+             return None
+
+    def _click_locator(self, locator: Locator, force: bool = False, timeout: Optional[int] = None) -> bool:
+         """안전하게 로케이터 클릭"""
+         try:
+             locator.click(force=force, timeout=timeout or self.config.wait_timeout)
+             self.logger.debug("Clicked locator successfully.")
+             return True
+         except (PlaywrightTimeoutError, PlaywrightError) as e:
+             self.logger.warning(f"Timeout or error clicking locator: {e}")
+             return False
+
+    # --- 데이터 추출 메서드 (Playwright Locator 기반) --- 
+
+    def _extract_list_item(self, element_locator: Locator) -> Optional[Dict]:
+        """제품 목록 항목 Locator에서 기본 정보 추출"""
+        product_data = {}
+        try:
+            # 제품명
+            title_locator = element_locator.locator(self.selectors["product_title_list"]["selector"]).first
+            product_data["title"] = self._safe_get_text(title_locator)
+            if not product_data["title"]:
+                 self.logger.debug("Could not extract title from list item.")
+                 return None # 제목 없으면 유효하지 않음
+
+            # 링크
+            link_locator = element_locator.locator(self.selectors["product_link_list"]["selector"]).first
+            link_attr = self.selectors["product_link_list"].get("attribute", "href")
+            link_href = self._safe_get_attribute(link_locator, link_attr)
+            if not link_href:
+                self.logger.debug("Could not extract link href from list item.")
+                # 링크 없으면 상세 정보 접근 불가, 경우에 따라 처리
+                # return None 
+            product_data["link"] = urljoin(self.base_url, link_href.strip() if link_href else "")
+
+            # 가격
+            price_locator = element_locator.locator(self.selectors["price_list"]["selector"]).first
+            price_text = self._safe_get_text(price_locator)
+            price = 0.0
+            if price_text:
+                price_match = self.patterns["price_number"].search(price_text)
+                if price_match:
                     try:
-                        self.driver.quit()
-                    except:
-                        pass
-                    self.setup_selenium()
-
-            # 현재 페이지 디버깅을 위해 HTML 소스 일부 로깅 (100자로 제한)
-            page_source = self.driver.page_source
-            self.logger.debug(f"Page title: {self.driver.title}")
-            self.logger.debug(f"Page source sample: {page_source[:100]}...")
-
-            # 디버그 모드일 경우 HTML 저장
-            if hasattr(self, "debug") and self.debug:
-                try:
-                    with open(
-                        f"logs/search_results_{query}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
-                        "w",
-                        encoding="utf-8",
-                    ) as f:
-                        f.write(page_source)
-                    self.logger.debug(f"HTML 페이지 저장 완료: search_results_{query}")
-                except Exception as e:
-                    self.logger.error(f"HTML 저장 실패: {str(e)}")
-
-            page = 1
-            while True:
-                self.logger.debug(
-                    f"Processing search results for '{query}', page={page}"
-                )
-
-                # 현재 페이지 파싱
-                soup = BeautifulSoup(self.driver.page_source, "lxml")
-
-                # 제품 목록 추출 시도 (여러 선택자 시도)
-                product_elements = []
-                selectors_to_try = [
-                    "div.product_lists .product",  # 카테고리 페이지의 제품 목록
-                    "#mm_pro_lists .mm_pro",  # 새로운 셀렉터 추가
-                    ".product-list .item",  # 새로운 셀렉터 추가
-                    "div.prd_list_wrap li.prd",  # 기존 셀렉터
-                    "ul.prd_list li",  # 대체 셀렉터
-                    "table.mall_list td.prd",  # 대체 셀렉터
-                    "div.product_list .item",  # 대체 셀렉터
-                    ".prd-list .prd-item",  # 대체 셀렉터
-                    ".product-item",  # 일반적인 제품 아이템 클래스
-                    "li.goods-box",  # 일반적인 제품 목록 항목
-                    "table.mall_tbl tr:not(:first-child)",  # 테이블 기반 목록
-                    'div[class*="product"], div[class*="item"], li[class*="product"], li[class*="item"]',  # 와일드카드 셀렉터
-                ]
-
-                for selector in selectors_to_try:
-                    self.logger.debug(f"Trying selector: {selector}")
-                    product_elements = soup.select(selector)
-                    if product_elements:
-                        self.logger.debug(
-                            f"Found {len(product_elements)} products with selector: {selector}"
-                        )
-                        # 성공한 선택자 저장
-                        self.selectors["product_list"]["selector"] = selector
-                        break
-
-                if not product_elements:
-                    self.logger.warning(
-                        f"No product elements found on page {page} for query '{query}'"
-                    )
-
-                    # 검색 결과가 없는지 확인
-                    no_results_text = soup.select_one(
-                        '.no-results, .empty-results, .search-empty, p:contains("검색결과가 없습니다")'
-                    )
-                    if no_results_text:
-                        self.logger.info(
-                            f"검색 결과 없음 메시지 발견: {no_results_text.text.strip()}"
-                        )
-
-                    # 로그인이 필요한지 확인
-                    login_required = soup.select_one(
-                        '.login-required, .member-only, form[action*="login"]'
-                    )
-                    if login_required:
-                        self.logger.warning(
-                            "로그인이 필요한 페이지로 리디렉션되었습니다."
-                        )
-
-                    break
-
-                # 각 제품 정보 추출
-                for element in product_elements:
-                    try:
-                        product_data = self._extract_list_item(element)
-                        if product_data:
-                            # 상세 페이지 정보 가져오기
-                            detailed_product = self._get_product_details(product_data)
-                            if detailed_product:
-                                products.append(detailed_product)
-                                self.logger.info(
-                                    f"Added product: {detailed_product.name}"
-                                )
-                                if max_items > 0 and len(products) >= max_items:
-                                    return products[:max_items]
-                    except Exception as e:
-                        self.logger.warning(f"Error extracting product data: {str(e)}")
-                        continue
-
-                # 다음 페이지 확인 및 이동
-                try:
-                    # 다음 페이지 링크 찾기
-                    next_link = soup.select_one(
-                        'a.next, a:contains("다음"), .custom_paging .arrow:last-child'
-                    )
-                    if next_link and next_link.get("href"):
-                        next_url = next_link["href"]
-                        if not next_url.startswith("http"):
-                            if next_url.startswith("/"):
-                                next_url = f"{self.base_url}{next_url}"
-                            else:
-                                next_url = f"{self.base_url}/ez/{next_url}"
-
-                        # 다음 페이지 로딩 시도
-                        for attempt in range(max_retries):
-                            try:
-                                self.driver.get(next_url)
-                                sleep(2)
-                                page += 1
-                                break
-                            except Exception as e:
-                                if attempt == max_retries - 1:
-                                    self.logger.error(f"Failed to load next page after {max_retries} attempts: {str(e)}")
-                                    return products
-                                self.logger.warning(f"Attempt {attempt + 1} failed to load next page: {str(e)}")
-                                sleep(retry_delay)
-
-                        # 최대 5페이지로 제한
-                        if page > 5:
-                            self.logger.debug(f"Reached maximum page limit (5)")
-                            break
-                    else:
-                        self.logger.debug("No next page link found")
-                        break
-                except Exception as e:
-                    self.logger.error(f"Error navigating to next page: {str(e)}")
-                    break
-        except Exception as e:
-            self.logger.error(
-                f"Error during Koryo scraping for '{query}': {str(e)}", exc_info=True
-            )
-
-        self.logger.info(
-            f"Koryo Scraper: Found {len(products)} products for query '{query}'"
-        )
-        return products[:max_items] if max_items > 0 else products
-
-    def _extract_list_item(self, element) -> Dict:
-        """제품 목록 항목에서 기본 정보 추출 (Null 체크 강화)"""
-        try:
-            product_data = {}
-
-            # 제품명 추출
-            title_element = None
-            title_selectors = [
-                "p.name a",
-                "div.name a",
-                "td.name a",
-                ".prd_name a",
-                "a.product-title",
-            ]
-
-            for selector in title_selectors:
-                title_element = element.select_one(selector)
-                if title_element:
-                    break
-
-            if not title_element:
-                self.logger.warning("Product title element not found in item")
-                return {}
-            title = title_element.text.strip()
-            product_data["title"] = title
-
-            # 링크 추출
-            link_element = title_element # Usually the link is on the title element
-            if not link_element.get('href'): # Check if title element itself has href
-                link_element = element.select_one('a') # Fallback to first link in element
-
-            if not link_element or not link_element.get('href'):
-                self.logger.warning("Product link not found in item")
-                return {}
-            link = link_element.get('href')
-            if not link.startswith("http"):
-                if link.startswith("/"):
-                    link = f"{self.base_url}{link}"
-                else:
-                    link = f"{self.base_url}/ez/{link}"
-            product_data["link"] = link
-
-            # 가격 추출
-            price_element = None
-            price_selectors = [
-                "p.price",
-                "div.price",
-                "td.price",
-                ".prd_price",
-                "span.price",
-            ]
-
-            for selector in price_selectors:
-                price_element = element.select_one(selector)
-                if price_element:
-                    break
-
-            price_text = price_element.text.strip() if price_element else "0"
-            price_match = self.patterns["price_number"].search(price_text)
-            price = int(price_match.group().replace(",", "")) if price_match else 0
+                        price = float(price_match.group().replace(",", ""))
+                    except ValueError:
+                         self.logger.debug(f"Could not parse price text: {price_text}")
             product_data["price"] = price
 
-            # 썸네일 추출
-            thumbnail_element = None
-            thumbnail_selectors = [
-                ".pic img",
-                "img.prd_img",
-                "td.img img",
-                ".thumb img",
-                "img.product-image",
-            ]
+            # 모델명 추출
+            model_locator = element_locator.locator(self.selectors["model_text"]["selector"]).first
+            model_text = self._safe_get_text(model_locator)
+            product_data["model"] = model_text.strip() if model_text else None
 
-            for selector in thumbnail_selectors:
-                thumbnail_element = element.select_one(selector)
-                if thumbnail_element:
-                    break
+            # 썸네일
+            thumb_locator = element_locator.locator(self.selectors["thumbnail_list"]["selector"]).first
+            thumb_attr = self.selectors["thumbnail_list"].get("attribute", "src")
+            thumb_src = self._safe_get_attribute(thumb_locator, thumb_attr)
+            product_data["image"] = urljoin(self.base_url, thumb_src.strip()) if thumb_src else None
 
-            thumbnail = thumbnail_element.get("src") if thumbnail_element else ""
-            if thumbnail and not thumbnail.startswith("http"):
-                if thumbnail.startswith("/"):
-                    thumbnail = f"{self.base_url}{thumbnail}"
-                else:
-                    thumbnail = f"{self.base_url}/ez/{thumbnail}"
-            product_data["image"] = thumbnail
-
-            # 고유 ID 생성 (link가 None이 아님을 보장)
-            product_id = hashlib.md5(link.encode()).hexdigest()
-            product_data["product_id"] = product_id
+            # ID (링크 기반)
+            if product_data["link"]:
+                product_data["product_id"] = hashlib.md5(product_data["link"].encode()).hexdigest()
+            else:
+                 product_data["product_id"] = None # 링크 없으면 ID 생성 불가
 
             return product_data
 
         except Exception as e:
-            self.logger.warning(f"Error extracting list item: {str(e)}")
-            return {}
-
-    def _get_product_details(self, item: Dict) -> Optional[Product]:
-        """Selenium을 사용하여 제품 상세 정보 가져오기 (오류 처리 강화)"""
-        if not item or not item.get("link") or not item.get("product_id"):
-            self.logger.warning("Invalid item data passed to _get_product_details")
+            self.logger.warning(f"Error extracting list item details: {e}", exc_info=self.config.debug)
             return None
 
-        cache_key = f"koryo_detail|{item['product_id']}"
-        if self.cache:
-            cached_result = self.get_sparse_data(cache_key)
-            if cached_result:
-                return cached_result
+    def _extract_product_details(self, page: Page, item: Dict) -> Optional[Product]:
+        """상세 페이지(Page)에서 정보 추출 (Playwright Page 객체 사용)"""
+        product_id = item.get("product_id")
+        product_link = item.get("link")
+        status = "Extraction Failed"  # Default status
 
-        url = item["link"]
-        current_url = None # Initialize current_url
+        if not product_link:
+             self.logger.warning("Missing product link in item data for detail extraction.")
+             return None
+        if not product_id:
+            product_id = hashlib.md5(product_link.encode()).hexdigest()
+
+        # Wait for essential elements to likely be present after navigation
+        self._wait_for_selector(page, self.title_selectors[0], timeout=10000) # Wait for product name
 
         try:
-            # 현재 페이지 URL 저장 (상세 페이지 이동 전)
-            current_url = self.driver.current_url
-
-            # 상세 페이지 접속
-            try:
-                self.driver.get(url)
-                # Wait for a specific element that indicates page load, e.g., product title or price
-                WebDriverWait(self.driver, self.timeout).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".product_name, h3.prd_title, .view_title, #main_price, .price_num")) # Check multiple possible elements
-                )
-                self.logger.debug(f"Detail page loaded successfully: {url}")
-            except TimeoutException:
-                self.logger.warning(
-                    f"Detail page load timed out for {url}"
-                )
-                self.driver.execute_script("window.stop();") # Stop loading
-                # Even if it timed out, try to parse what we have
-            except Exception as load_err:
-                self.logger.error(f"Error loading detail page {url}: {load_err}")
-                # If loading fails, try to navigate back immediately
-                if current_url:
-                    try:
-                        self.driver.get(current_url)
-                        sleep(1)
-                    except Exception as back_err:
-                        self.logger.error(f"Failed to navigate back after load error: {back_err}")
-                return None
-
-            # HTML 파싱
-            soup = BeautifulSoup(self.driver.page_source, "lxml")
-
-            # 상세 정보 추출 (Null 체크 강화)
-            title = item.get("title", "")
+            # 상품명 (상세 페이지 우선)
+            title = item.get("title", "Unknown Product") # Use list title as fallback
+            found_title = False
             for selector in self.title_selectors:
-                detail_title_element = soup.select_one(selector)
-                if detail_title_element:
-                    title = detail_title_element.text.strip()
-                    break
+                 title_locator = page.locator(selector).first
+                 # Check visibility quickly before attempting to get text
+                 if title_locator.is_visible(timeout=1000):
+                     detail_title = self._safe_get_text(title_locator, timeout=5000)
+                     if detail_title and detail_title.strip():
+                         title = detail_title.strip()
+                         found_title = True
+                         self.logger.debug(f"Found detail title: '{title}' using selector: {selector}")
+                         break
+            if not found_title:
+                 self.logger.warning(f"Could not find detail title using selectors on {product_link}. Using list title: {title}")
 
-            price = item.get("price", 0)
+
+            # 가격 (상세 페이지 우선)
+            price = item.get("price", 0.0) # Use list price as fallback
+            found_price = False
             for selector in self.price_selectors:
-                detail_price_element = soup.select_one(selector)
-                if detail_price_element:
-                    price_text = detail_price_element.text.strip()
-                    price_match = self.patterns["price_number"].search(price_text)
-                    if price_match:
-                        price = int(price_match.group().replace(",", ""))
-                    break
+                price_locator = page.locator(selector).first
+                if price_locator.is_visible(timeout=1000):
+                    price_text = self._safe_get_text(price_locator, timeout=5000)
+                    if price_text:
+                        price_match = self.patterns["price_number"].search(price_text)
+                        if price_match:
+                            try:
+                                price = float(price_match.group().replace(",", ""))
+                                found_price = True
+                                self.logger.debug(f"Found detail price: {price} using selector: {selector}")
+                                break
+                            except ValueError:
+                                self.logger.warning(f"Could not convert detail price text '{price_match.group()}' to float.")
+            if not found_price:
+                self.logger.warning(f"Could not find detail price using selectors on {product_link}. Using list price: {price}")
 
-            product_code = ""
+            # If core info like title or price is missing, we might consider it a failed extraction early
+            if not found_title and title == "Unknown Product":
+                 self.logger.error(f"Extraction failed: Could not determine product title for {product_link}.")
+                 # Optionally set status = "Title Not Found" or similar? For now, stick to generic failure.
+                 return None # Cannot proceed without a title
+
+            # 상품 코드
+            product_code = None
+            found_code = False
             for selector in self.code_selectors:
-                code_element = soup.select_one(selector)
-                if code_element:
-                    code_text = code_element.text.strip()
-                    # ... (existing code extraction logic) ...
-                    break # Found code, no need to check other selectors
-
-            # ... (extract image_gallery, quantity_prices, specifications, description with null checks as needed) ...
-            # Example for image gallery:
-            image_gallery = []
-            for selector in self.image_selectors:
-                elements = soup.select(selector)
-                if elements:
-                    image_elements = elements
-                    break # Found image elements
+                # Handle XPath selector differently
+                if selector.startswith("//"):
+                    code_locator = page.locator(selector).first
                 else:
-                    image_elements = [] # Ensure it's a list even if not found
+                    code_locator = page.locator(selector).first
 
-            if image_elements:
-                 for img in image_elements:
-                     if img:
-                         img_url = img.get("src", "")
-                         if img_url:
-                              # ... (make url absolute) ...
-                              image_gallery.append(img_url)
+                # Check visibility before getting text
+                if code_locator.is_visible(timeout=1000):
+                     code_text = self._safe_get_text(code_locator, timeout=5000)
+                     if code_text:
+                         # If using the XPath selector, the text might contain "상품코드:"
+                         if "상품코드" in code_text:
+                              code_match = self.patterns["product_code"].search(code_text)
+                              if code_match:
+                                   product_code = code_match.group(1).strip()
+                                   found_code = True
+                                   self.logger.debug(f"Found product code: '{product_code}' using selector: {selector} (pattern match)")
+                                   break
+                         # For other selectors, or if pattern fails, use the text directly if it looks like a code
+                         elif len(code_text.strip()) > 3 and not code_text.strip().startswith("상품"):
+                              product_code = code_text.strip()
+                              found_code = True
+                              self.logger.debug(f"Found product code: '{product_code}' using selector: {selector} (direct text)")
+                              break
 
-            # ... Extract quantity_prices, specifications, description similarly ...
+            if not found_code:
+                 # Fallback: Search pattern in page content (less reliable)
+                 try:
+                     all_text = page.content()
+                     code_match = self.patterns["product_code"].search(all_text)
+                     if code_match:
+                         product_code = code_match.group(1).strip()
+                         found_code = True
+                         self.logger.debug(f"Found product code: '{product_code}' using pattern search in page content.")
+                     else:
+                         self.logger.warning(f"Could not find product code using selectors or pattern search on {product_link}")
+                 except Exception as text_ex:
+                     self.logger.debug(f"Could not search for product code pattern in page content: {text_ex}")
 
-            # 제품 객체 생성
+            # 수량별 가격
+            quantity_prices = {}
+            qty_table_selector = self.selectors.get("quantity_table", {}).get("selector")
+            if qty_table_selector:
+                 qty_table_locator = page.locator(qty_table_selector).first
+                 # Wait slightly longer for potentially dynamic tables
+                 if qty_table_locator.is_visible(timeout=7000):
+                     quantity_prices = self._extract_quantity_prices_from_locator(qty_table_locator)
+                 else:
+                     self.logger.debug(f"Quantity price table locator not visible: {qty_table_selector}")
+            else:
+                 self.logger.warning("'quantity_table' selector not defined.")
+
+            # 상세 사양
+            specifications = {}
+            specs_table_selector = self.selectors.get("specs_table", {}).get("selector")
+            if specs_table_selector:
+                specs_table_locator = page.locator(specs_table_selector).first
+                if specs_table_locator.is_visible(timeout=7000):
+                    specifications = self._extract_specifications_from_locator(specs_table_locator)
+                else:
+                    self.logger.debug(f"Specifications table locator not visible: {specs_table_selector}")
+            else:
+                self.logger.warning("'specs_table' selector not defined.")
+
+            # 이미지 갤러리
+            image_gallery = []
+            processed_urls = set()
+            # Add list image as the first potential image if available
+            list_image_url = item.get("image")
+            if list_image_url:
+                 processed_urls.add(list_image_url)
+                 # No need to add to gallery yet, will be set as main_image_url later
+
+            for selector in self.image_selectors:
+                img_locators = page.locator(selector).all()
+                for img_locator in img_locators:
+                    # Ensure the locator is visible before extracting src
+                    if img_locator.is_visible(timeout=500):
+                        img_src = self._safe_get_attribute(img_locator, "src", timeout=1000) or self._safe_get_attribute(img_locator, "data-src", timeout=1000)
+                        if img_src:
+                            # Handle potential relative URLs correctly
+                            try:
+                                 img_url = urljoin(page.url, img_src.strip()) # Use page.url as base
+                            except ValueError:
+                                 self.logger.warning(f"Could not join base URL {page.url} with image src {img_src}")
+                                 continue # Skip invalid URLs
+
+                            if img_url not in processed_urls and not self._is_ui_image(img_url):
+                                image_gallery.append(img_url)
+                                processed_urls.add(img_url)
+
+            # Set main image: prioritize detail page #main_img, then list image, then first gallery image
+            main_image_url = None
+            main_img_locator = page.locator("#main_img").first
+            if main_img_locator.is_visible(timeout=1000):
+                 main_img_src = self._safe_get_attribute(main_img_locator, "src")
+                 if main_img_src:
+                      try:
+                           main_image_url = urljoin(page.url, main_img_src.strip())
+                           self.logger.debug(f"Found main image URL from #main_img: {main_image_url}")
+                      except ValueError:
+                           self.logger.warning(f"Could not join base URL {page.url} with main image src {main_img_src}")
+
+            if not main_image_url:
+                 main_image_url = list_image_url # Use list image if detail main image failed
+                 if main_image_url:
+                      self.logger.debug(f"Using list image URL as main image: {main_image_url}")
+
+            if not main_image_url and image_gallery:
+                 main_image_url = image_gallery[0] # Use first gallery image as last resort
+                 self.logger.debug(f"Using first gallery image as main image: {main_image_url}")
+
+            # 상세 설명
+            description = None
+            desc_selector = self.selectors.get("description", {}).get("selector")
+            if desc_selector:
+                # Split potentially multiple selectors
+                for sel in desc_selector.split(','):
+                    sel = sel.strip()
+                    if not sel: continue
+                    desc_locator = page.locator(sel).first
+                    if desc_locator.is_visible(timeout=5000):
+                        # Prefer inner_html to preserve formatting, fallback to text
+                        try:
+                             description_html = desc_locator.inner_html(timeout=5000)
+                             # Basic check to avoid empty divs
+                             if description_html and len(description_html) > 50:
+                                description = description_html
+                                self.logger.debug(f"Found description using selector: {sel} (html)")
+                                break
+                        except (PlaywrightTimeoutError, PlaywrightError):
+                             # Fallback to text content if inner_html fails or is empty
+                             desc_text = self._safe_get_text(desc_locator)
+                             if desc_text and len(desc_text) > 50:
+                                  description = desc_text
+                                  self.logger.debug(f"Found description using selector: {sel} (text)")
+                                  break # Found description, stop checking selectors
+                if not description:
+                     self.logger.debug(f"Description content not found or too short using selectors: {desc_selector}")
+            else:
+                 self.logger.warning("'description' selector not defined.")
+
+            # Determine final status
+            if not main_image_url:
+                 status = "Image Not Found"
+                 self.logger.warning(f"Could not determine main image URL for product: {title} ({product_link})")
+            else:
+                 status = "OK" # Everything extracted successfully
+
+            # Product 객체 생성
             product = Product(
-                id=item.get("product_id"), # Already checked this exists
-                name=title,
+                id=product_id,
+                name=title.strip() if title else "Unknown Product",
                 price=price,
                 source="koryo",
                 original_input_data=item,
-                url=url, # Use the navigated URL
-                image_url=item.get("image", "") or (image_gallery[0] if image_gallery else ""),
-                image_gallery=image_gallery,
+                url=product_link,
+                image_url=main_image_url,
+                image_gallery=image_gallery if image_gallery else None,
                 product_code=product_code,
-                # Add other extracted fields like description, specs, quantity_prices
-                fetched_at=datetime.now().isoformat(), # Add timestamp
+                quantity_prices=quantity_prices if quantity_prices else None,
+                specifications=specifications if specifications else None,
+                description=description,
+                fetched_at=datetime.now().isoformat(),
+                status=status, # Set the status here
             )
-            # ... (set other product attributes) ...
-
-            # 캐시에 저장
-            if self.cache:
-                 self.add_sparse_data(cache_key, product)  # 기본 캐시 기간 사용
-
-            # 이전 페이지로 돌아가기 (current_url이 설정되었는지 확인)
-            if current_url:
-                self.driver.get(current_url)
-                sleep(1)
-            else:
-                self.logger.warning("Could not navigate back, original URL was not stored.")
-
+            self.logger.info(f"Successfully extracted details for product ID: {product.id} with status: {status}")
             return product
 
         except Exception as e:
-            self.logger.error(
-                f"Error getting product details for {url}: {str(e)}", exc_info=True
-            )
-            # 예외 발생 시 이전 페이지로 돌아가기 (current_url 확인)
-            if current_url:
-                try:
-                    self.driver.get(current_url)
-                    sleep(1)
-                except Exception as back_e:
-                    self.logger.error(f"Failed to navigate back after error: {back_e}")
+            self.logger.error(f"Error extracting product details from page {product_link}: {e}", exc_info=self.config.debug)
+            # Return None to indicate failure
             return None
 
-    def _extract_quantity_prices(self, table_element) -> Dict[str, float]:
-        """수량별 가격 테이블에서 가격 정보 추출"""
+    def _extract_quantity_prices_from_locator(self, table_locator: Locator) -> Dict[str, float]:
+        """가격 테이블 Locator에서 수량별 가격 정보 추출 (Updated for .quantity_price__table)"""
         quantity_prices = {}
         try:
-            rows = table_element.select("tr")
-            for row in rows[1:]:  # 헤더 행 제외
-                cells = row.select("td")
-                if len(cells) >= 2:
-                    qty_cell = cells[0].text.strip()
-                    price_cell = cells[1].text.strip()
+            # Assuming first row is header (quantity tiers)
+            # Assuming second row is prices
+            rows = table_locator.locator("tr").all()
+            if len(rows) >= 2:
+                qty_cells = rows[0].locator("td, th").all() # Header can use th or td
+                price_cells = rows[1].locator("td, th").all()
 
-                    # 수량 추출
-                    qty_match = self.patterns["quantity"].search(qty_cell)
-                    qty = int(qty_match.group(1)) if qty_match else 0
+                if len(qty_cells) == len(price_cells):
+                    for i in range(len(qty_cells)):
+                        qty_text = self._safe_get_text(qty_cells[i], timeout=500)
+                        price_text = self._safe_get_text(price_cells[i], timeout=500)
 
-                    # 가격 추출
-                    price_match = self.patterns["price_number"].search(price_cell)
-                    price = (
-                        int(price_match.group().replace(",", "")) if price_match else 0
-                    )
+                        if qty_text and price_text:
+                            # Extract numbers robustly
+                            qty_match = re.search(r"(\d[\d,]*)", qty_text.replace(",", ""))
+                            qty = int(qty_match.group(1)) if qty_match else 0
 
-                    if qty and price:
-                        quantity_prices[str(qty)] = price
+                            price_match = self.patterns["price_number"].search(price_text)
+                            price = float(price_match.group().replace(",", "")) if price_match else 0.0
+
+                            if qty > 0 and price > 0:
+                                quantity_prices[str(qty)] = price
+                else:
+                    self.logger.warning("Quantity table header and price row cell count mismatch.")
+            else:
+                 self.logger.warning("Quantity table has less than 2 rows.")
+
         except Exception as e:
-            self.logger.error(f"Error extracting quantity prices: {str(e)}")
-
+            self.logger.error(f"Error extracting quantity prices from locator: {e}", exc_info=self.config.debug)
         return quantity_prices
 
-    def _extract_specifications(self, table_element) -> Dict[str, str]:
-        """제품 사양 테이블에서 정보 추출"""
+    def _extract_specifications_from_locator(self, table_locator: Locator) -> Dict[str, str]:
+        """사양 테이블 Locator에서 정보 추출 (Updated for .tbl_info)"""
         specs = {}
         try:
-            rows = table_element.select("tr")
-            for row in rows:
-                header_cell = row.select_one("th")
-                value_cell = row.select_one("td")
+            rows = table_locator.locator("tr").all()
+            for row_locator in rows:
+                # Expecting structure: <tr><th>Key</th><td>Value</td></tr>
+                header_locator = row_locator.locator("th").first
+                value_locator = row_locator.locator("td").first
 
-                if header_cell and value_cell:
-                    key = header_cell.text.strip()
-                    value = value_cell.text.strip()
-                    if key and value:
-                        specs[key] = value
+                # Check if both key and value cells exist
+                if header_locator.count() > 0 and value_locator.count() > 0:
+                     key = self._safe_get_text(header_locator, timeout=1000)
+                     value = self._safe_get_text(value_locator, timeout=1000) # Consider inner_html if needed
+
+                     if key and value:
+                         # Clean up key (remove trailing ':')
+                         cleaned_key = key.strip().rstrip(':').strip()
+                         if cleaned_key:
+                             specs[cleaned_key] = value.strip()
+                     elif key and not value:
+                          # Handle cases where value might be empty or complex (e.g., nested elements)
+                          self.logger.debug(f"Specification key '{key.strip()}' found but value is empty or couldn't be extracted as simple text.")
+                else:
+                     # Handle potentially different row structures if necessary
+                     self.logger.debug("Skipping row in specs table, expected th+td structure not found.")
+
         except Exception as e:
-            self.logger.error(f"Error extracting specifications: {str(e)}")
-
+            self.logger.error(f"Error extracting specifications from locator: {e}", exc_info=self.config.debug)
         return specs
 
-    def get_categories(self) -> List[Dict]:
-        """사이트의 모든 카테고리 정보 가져오기"""
-        categories = []
+    def _is_ui_image(self, url: str) -> bool:
+        """URL이 UI 요소 이미지인지 간단히 확인"""
+        url_lower = url.lower()
+        ui_patterns = [
+            'btn_', 'icon_', 'dot_', 'bottom_', '/bbs/image/',
+            'guide1.jpg', 's1.png', '/common/', '/layout/', '/banner/',
+            '.gif'
+        ]
+        return any(pattern in url_lower for pattern in ui_patterns)
 
+    # --- Playwright 기반 스크래핑 메서드 --- 
+
+    def get_product(self, product_id: str) -> Optional[Product]:
+        """상품 ID로 상품 정보 가져오기 (Playwright)
+           고려기프트는 ID로 직접 접근하는 URL 패턴이 불명확하여, 검색 기반으로 구현.
+        """
+        self.logger.info(f"Attempting to get product by ID (via direct URL and search): {product_id}")
+        # 상품 ID가 URL의 no= 파라미터 값이라고 가정
+        # 또는 상품 코드가 ID일 수도 있음. 여기서는 no= 값으로 가정.
+        # 실제로는 상품 코드로 검색하는 것이 더 일반적일 수 있음.
+        potential_url = f"{self.base_url}/ez/goods/goods_view.php?no={product_id}"
+
+        # Use thread-local browser context for this operation
+        self._close_thread_context()  # Ensure clean state
+        browser, page = self._create_new_context()
+
+        if not browser or not page:
+            self.logger.error(f"Get product failed for ID {product_id}: Could not create browser context")
+            return None
+
+        product: Optional[Product] = None
         try:
-            # 메인 페이지 접속
-            self.driver.get(f"{self.base_url}/ez/index.php")
-            sleep(3)  # 페이지 로딩 대기
+            self.logger.info(f"Attempting direct URL access for product ID {product_id}: {potential_url}")
+            page.goto(potential_url, wait_until='domcontentloaded')
+            self._wait_for_load_state(page, 'networkidle')
 
-            # HTML 파싱
-            soup = BeautifulSoup(self.driver.page_source, "lxml")
-
-            # 카테고리 요소 추출 시도 (다양한 선택자)
-            category_elements = []
-            category_selectors = [
-                ".category a",
-                "#category_all a",
-                ".menu_box a",
-                'a[href*="mall.php?cat="]',
-            ]
-
-            for selector in category_selectors:
-                self.logger.debug(f"Trying category selector: {selector}")
-                elements = soup.select(selector)
-                if elements:
-                    self.logger.debug(
-                        f"Found {len(elements)} categories with selector: {selector}"
-                    )
-                    category_elements = elements
-                    break
-
-            if not category_elements:
-                # 마지막 방법: 직접 카테고리 페이지 접근
-                self.logger.debug("Trying to access category page directly")
-                self.driver.get(f"{self.base_url}/ez/mall.php")
-                sleep(2)
-
-                soup = BeautifulSoup(self.driver.page_source, "lxml")
-                for selector in category_selectors:
-                    elements = soup.select(selector)
-                    if elements:
-                        self.logger.debug(
-                            f"Found {len(elements)} categories from direct page with selector: {selector}"
-                        )
-                        category_elements = elements
-                        break
-
-            for element in category_elements:
-                try:
-                    category_name = element.text.strip()
-                    category_url = element.get("href")
-
-                    # 실제 링크가 있는지 확인
-                    if (
-                        not category_url
-                        or category_url == "#"
-                        or category_url.startswith("javascript:")
-                    ):
-                        continue
-
-                    # "cat=" 파라미터가 있는 URL만 고려 (카테고리 URL 패턴)
-                    if "cat=" not in category_url and "cate=" not in category_url:
-                        continue
-
-                    if category_name and category_url:
-                        if not category_url.startswith("http"):
-                            if category_url.startswith("/"):
-                                category_url = f"{self.base_url}{category_url}"
-                            else:
-                                category_url = f"{self.base_url}/ez/{category_url}"
-
-                        category_id = hashlib.md5(category_url.encode()).hexdigest()
-
-                        categories.append(
-                            {
-                                "id": category_id,
-                                "name": category_name,
-                                "url": category_url,
-                            }
-                        )
-                        self.logger.debug(
-                            f"Added category: {category_name} - {category_url}"
-                        )
-                except Exception as e:
-                    self.logger.warning(f"Error extracting category: {str(e)}")
-                    continue
-
-            # 카테고리가 없는 경우 기본 카테고리 추가
-            if not categories:
-                for name, cat_id in self.default_categories:
-                    url = f"{self.mall_url}?cat={cat_id}"
-                    category_id = hashlib.md5(url.encode()).hexdigest()
-                    categories.append({"id": category_id, "name": name, "url": url})
-                    self.logger.debug(f"Added default category: {name} - {url}")
-
-        except Exception as e:
-            self.logger.error(f"Error getting categories: {str(e)}", exc_info=True)
-
-        self.logger.info(f"Found {len(categories)} categories")
-        return categories
-
-    def crawl_all_categories(
-        self, max_products_per_category: int = 50
-    ) -> List[Product]:
-        """모든 카테고리의 제품을 크롤링"""
-        all_products = []
-
-        # 카테고리 목록 가져오기
-        categories = self.get_categories()
-
-        for category in categories:
-            try:
-                self.logger.info(f"Crawling category: {category['name']}")
-
-                # 카테고리 페이지 접속
-                self.driver.get(category["url"])
-                sleep(2)
-
-                products = []
-                page = 1
-
-                while True:
-                    # 현재 페이지 파싱
-                    soup = BeautifulSoup(self.driver.page_source, "lxml")
-
-                    # 제품 목록 추출
-                    product_elements = self.extract(
-                        soup,
-                        self.selectors["product_list"]["selector"],
-                        **self.selectors["product_list"]["options"],
-                    )
-
-                    if not product_elements:
-                        break
-
-                    # 각 제품 정보 추출
-                    for element in product_elements:
-                        try:
-                            product_data = self._extract_list_item(element)
-                            if product_data:
-                                # 상세 페이지 정보 가져오기
-                                detailed_product = self._get_product_details(product_data)
-                                if detailed_product:
-                                    products.append(detailed_product)
-                                    all_products.append(detailed_product)
-
-                                    if (
-                                        max_products_per_category > 0
-                                        and len(products) >= max_products_per_category
-                                    ):
-                                        break
-                        except Exception as e:
-                            self.logger.warning(
-                                f"Error extracting product data: {str(e)}"
-                            )
-                            continue
-
-                    # 최대 제품 수 도달 시 중단
-                    if (
-                        max_products_per_category > 0
-                        and len(products) >= max_products_per_category
-                    ):
-                        break
-
-                    # 다음 페이지 확인 및 이동
-                    try:
-                        next_button = self.driver.find_element(
-                            By.CSS_SELECTOR, "a.next"
-                        )
-                        next_button.click()
-                        sleep(2)
-                        page += 1
-
-                        # 최대 5페이지로 제한
-                        if page > 5:
-                            break
-                    except NoSuchElementException:
-                        break
-                    except Exception as e:
-                        self.logger.error(f"Error navigating to next page: {str(e)}")
-                        break
-
-                self.logger.info(
-                    f"Found {len(products)} products in category '{category['name']}'"
-                )
-
-            except Exception as e:
-                self.logger.error(
-                    f"Error crawling category {category['name']}: {str(e)}",
-                    exc_info=True,
-                )
-
-    def browse_category(
-        self, category_id: str = None, max_items: int = 50
-    ) -> List[Product]:
-        """카테고리를 직접 브라우징하여 제품 가져오기"""
-        products = []
-
-        try:
-            # 카테고리 ID가 있으면 해당 카테고리 페이지로 이동
-            if category_id:
-                url = f"{self.mall_url}?cat={category_id}"
-                self.logger.info(f"Browsing category with ID: {category_id}")
+            # 페이지 로드 후, 해당 ID의 상품이 맞는지 확인 (예: 상품명 또는 코드 확인)
+            # 여기서는 간단히 페이지 내용을 기반으로 item 생성 후 상세 정보 추출 시도
+            item_data = {
+                "link": potential_url,
+                "product_id": product_id,
+                # 기본 정보는 알 수 없으므로 상세 추출에 의존
+                "title": None,
+                "price": None,
+                "image": None
+            }
+            product = self._extract_product_details(page, item_data)
+            if product:
+                 self.logger.info(f"Successfully fetched and extracted product via direct URL for ID: {product_id}")
+                 self.cache_sparse_data(f"koryo_detail|{product_id}", product)
+                 # return product # Don't return yet, close context in finally block
             else:
-                # 기본 첫 번째 카테고리 사용
-                _, default_id = self.default_categories[0]
-                url = f"{self.mall_url}?cat={default_id}"
-                self.logger.info(
-                    f"Browsing default category: {self.default_categories[0][0]}"
-                )
+                 self.logger.warning(f"Could not extract valid product details for ID: {product_id} via direct URL: {potential_url}. Will try searching.")
+                 product = None # Ensure product is None if extraction failed
 
-            try:
-                self.driver.get(url)
-                sleep(3)  # 페이지 로딩 대기
-                self.logger.info(f"Category page loaded: {self.driver.current_url}")
-            except TimeoutException:
-                self.logger.warning(
-                    f"Category page load timed out, trying with longer timeout"
-                )
-                self.driver.execute_script("window.stop();")
-                sleep(3)
-
-            page = 1
-            while True:
-                self.logger.debug(f"Processing category page {page}")
-
-                # 현재 페이지 파싱
-                soup = BeautifulSoup(self.driver.page_source, "lxml")
-
-                # 제품 목록 추출 시도 (여러 선택자 시도)
-                product_elements = []
-                selectors_to_try = [
-                    "ul.prd_list li",
-                    "table.mall_list td.prd",
-                    "div.product_list .item",
-                    ".prd-list .prd-item",
-                    "table.mall_tbl tr:not(:first-child)",
-                ]
-
-                for selector in selectors_to_try:
-                    self.logger.debug(f"Trying selector: {selector}")
-                    product_elements = soup.select(selector)
-                    if product_elements:
-                        self.logger.debug(
-                            f"Found {len(product_elements)} products with selector: {selector}"
-                        )
-                        break
-
-                # 제품을 찾지 못한 경우
-                if not product_elements:
-                    self.logger.warning("No products found in this category page")
-                    break
-
-                # 각 제품 정보 추출
-                for element in product_elements:
-                    try:
-                        product_data = self._extract_list_item(element)
-                        if product_data:
-                            # 상세 페이지 정보 가져오기
-                            detailed_product = self._get_product_details(product_data)
-                            if detailed_product:
-                                products.append(detailed_product)
-                                self.logger.info(
-                                    f"Added product: {detailed_product.name}"
-                                )
-
-                                if max_items > 0 and len(products) >= max_items:
-                                    return products[:max_items]
-                    except Exception as e:
-                        self.logger.warning(f"Error extracting product data: {str(e)}")
-                        continue
-
-                # 다음 페이지 확인 및 이동
-                try:
-                    # 다음 페이지 링크 찾기
-                    next_link = soup.select_one('a.next, a:contains("다음")')
-                    if next_link and next_link.get("href"):
-                        next_url = next_link["href"]
-                        if not next_url.startswith("http"):
-                            if next_url.startswith("/"):
-                                next_url = f"{self.base_url}{next_url}"
-                            else:
-                                next_url = f"{self.base_url}/ez/{next_url}"
-
-                        self.driver.get(next_url)
-                        sleep(2)
-                        page += 1
-
-                        # 최대 5페이지로 제한
-                        if page > 5:
-                            self.logger.debug(f"Reached maximum page limit (5)")
-                            break
-                    else:
-                        self.logger.debug("No next page link found")
-                        break
-                except Exception as e:
-                    self.logger.error(f"Error navigating to next page: {str(e)}")
-                    break
-
+        except (PlaywrightTimeoutError, PlaywrightError) as e:
+            self.logger.error(f"Playwright error accessing direct URL for product ID {product_id}: {e}. Will try searching.")
+            product = None # Ensure product is None if direct access failed
         except Exception as e:
-            self.logger.error(
-                f"Error during category browsing: {str(e)}", exc_info=True
-            )
+             self.logger.error(f"Unexpected error accessing direct URL for product ID {product_id}: {e}", exc_info=self.config.debug)
+             product = None # Ensure product is None
+        finally:
+            # Clean up context from direct URL attempt
+            self._close_thread_context()
 
-        self.logger.info(f"Found {len(products)} products in category")
-        return products[:max_items] if max_items > 0 else products
+        # If direct URL access/extraction failed, try searching using the ID as a query
+        if product is None:
+            self.logger.info(f"Attempting search using ID '{product_id}' as query.")
+            # Search requires its own context, which it handles internally
+            search_results = self.search_product(query=product_id, max_items=1)
+            if search_results:
+                 self.logger.info(f"Found product via search using ID as query: {product_id}")
+                 product = search_results[0]
+                 # Detail fetching (including status setting) happens within search_product -> _get_product_details_sync_playwright if needed
+                 # Or, if search_product just returns list items, we might need to fetch details here.
+                 # Let's assume search_product returns Product objects with details already fetched or cached.
+                 # If it only returned list items, we'd need another call:
+                 # product = self._get_product_details_sync_playwright(search_results[0].original_input_data)
 
-    def _extract_product_data(
-        self, soup: BeautifulSoup, product_idx: str, url: str
-    ) -> Dict[str, Any]:
-        """상품 데이터 추출"""
-        product_data = {
-            "source": "koryo",
-            "product_id": product_idx,
-            "title": "",
-            "price": 0,
-            "main_image": "",
-            "image_gallery": [],
-            "is_sold_out": False,
-            "quantity_prices": {},
-        }
+            else:
+                 self.logger.error(f"Product not found for ID {product_id} via direct URL or search.")
+                 # Return None explicitly if not found
+                 return None
 
-        # 이미지 URL들을 저장할 리스트
-        image_gallery = []
+        # If product was found either way, return it
+        if product:
+            self.logger.info(f"Final result for get_product(ID={product_id}): Found Product (Status: {product.status})")
+            return product
+        else:
+            # This case should be covered by the search failure log above, but added for clarity
+            self.logger.error(f"Final result for get_product(ID={product_id}): Product Not Found")
+            return None
 
+    def search_product(self, query: str, max_items: int = 50, keyword2: Optional[str] = None) -> List[Product]:
+        """상품 검색 (Playwright 사용)"""
+        # Use thread-local browser context for this operation
+        self._close_thread_context()  # Ensure clean state
+        browser, page = self._create_new_context()
+        
+        if not browser or not page:
+            self.logger.error(f"Search failed for '{query}': Could not create browser context")
+            return []
+
+        self.logger.info(f"Searching Koryo Gift for: '{query}' (Secondary: '{keyword2}')")
+        # Caching logic removed for simplicity in this example, assume it's handled elsewhere if needed
+
+        products = []
         try:
-            # 1. 메인 이미지 추출
-            main_img = soup.find('img', id='main_img')
-            if main_img and main_img.get('src'):
-                main_img_url = urljoin(url, main_img['src'])
-                if main_img_url not in image_gallery:
-                    image_gallery.append(main_img_url)
-                    product_data["main_image"] = main_img_url
+            # ... (navigation and re-search logic remains the same) ...
+            search_params = {
+                "search_keyword": query,
+                "search_type": "all"
+            }
+            search_url_with_params = f"{self.search_url}?{urllib.parse.urlencode(search_params)}"
+            self.logger.info(f"Navigating directly to search URL: {search_url_with_params}")
 
-            # 2. 썸네일 이미지들 추출
-            thumbnails = soup.select('.product_picture .thumnails img')
-            for thumb in thumbnails:
-                if thumb.get('src'):
-                    thumb_url = urljoin(url, thumb['src'])
-                    if thumb_url not in image_gallery:
-                        image_gallery.append(thumb_url)
+            # Navigate with robust error handling for net::ERR_ABORTED errors
+            page_response = None
+            try:
+                page_response = page.goto(search_url_with_params, wait_until='networkidle')
+            except Exception as e:
+                if "net::ERR_ABORTED" in str(e):
+                    self.logger.warning(f"Navigation aborted on 'networkidle'. Retrying with 'domcontentloaded': {search_url_with_params} - {e}")
+                    try:
+                         page_response = page.goto(search_url_with_params, wait_until='domcontentloaded')
+                    except Exception as inner_e:
+                         self.logger.error(f"Retry navigation failed for {search_url_with_params}: {inner_e}")
+                         self._close_thread_context()
+                         return [] # Navigation completely failed
+                else:
+                    self.logger.error(f"Navigation error for {search_url_with_params}: {e}")
+                    self._close_thread_context()
+                    return [] # Other navigation error
+            
+            # Check for "Not Found" after navigation attempt
+            try:
+                page_content = page.content().lower() # Get page content for checking
+                page_title = page.title().lower()
+                if "not found" in page_content or "not found" in page_title or (page_response and not page_response.ok()):
+                     status_code = page_response.status if page_response else "N/A"
+                     self.logger.error(f"Search page not found or returned error for URL: {search_url_with_params} (Query: '{query}'). Status: {status_code}. Title: '{page.title()}'")
+                     self._close_thread_context()
+                     return []
+            except Exception as check_e:
+                 # Handle cases where page content/title check fails (e.g., page closed unexpectedly)
+                 self.logger.error(f"Error checking page content/title after navigation for {search_url_with_params}: {check_e}")
+                 self._close_thread_context()
+                 return []
 
-            # 3. 상세 이미지들 (상품 정보 테이블 내 이미지)
-            detail_images = soup.select('.tbl_info img')
-            for img in detail_images:
-                if img.get('src'):
-                    img_url = img['src']
-                    if not img_url.startswith(('http://', 'https://')):
-                        img_url = urljoin(url, img_url)
-                    if img_url not in image_gallery:
-                        image_gallery.append(img_url)
 
-            # 4. 상세 이미지들 (상품 설명 영역의 모든 테이블)
-            tables = soup.find_all('table')
-            for table in tables:
-                images = table.find_all('img')
-                for img in images:
-                    if img.get('src'):
-                        img_url = img['src']
-                        if not img_url.startswith(('http://', 'https://')):
-                            img_url = urljoin(url, img_url)
-                        if img_url not in image_gallery:
-                            image_gallery.append(img_url)
+            # 2. 상품 개수 확인 (재검색 여부 결정)
+            product_count = 0
+            try:
+                 count_locator = page.locator(self.selectors["product_count"]).first
+                 # count_locator.wait_for(state='visible', timeout=10000) # 필요시 요소 대기 추가
+                 count_text = self._safe_get_text(count_locator, timeout=10000)
+                 if count_text:
+                     product_count = int(count_text.replace(',', ''))
+                     self.logger.info(f"Found {product_count} products after initial search.")
+            except Exception as e:
+                 self.logger.warning(f"Could not determine product count after initial search: {e}")
 
-            # 5. 리뷰 이미지들
-            review_images = soup.select('.tbl_review img')
-            for img in review_images:
-                if img.get('src'):
-                    img_url = urljoin(url, img['src'])
-                    if img_url not in image_gallery:
-                        image_gallery.append(img_url)
+            # 3. 재검색 조건 및 실행 (페이지 내에서 수행)
+            if keyword2 and keyword2.strip() and product_count >= 100:
+                self.logger.info(f"Product count ({product_count}) >= 100. Performing re-search with: '{keyword2}'")
+                re_search_input = self._wait_for_selector(page, self.selectors["re_search_input"])
+                re_search_button = page.locator(self.selectors["re_search_button"]).first
+                if re_search_input and re_search_button.is_visible(timeout=5000):
+                    re_search_input.fill(keyword2)
+                    # time.sleep(random.uniform(0.5, 1.0)) # 제거
+                    if self._click_locator(re_search_button):
+                         self._wait_for_load_state(page, 'networkidle') # 재검색 클릭 후 대기
+                         self.logger.info(f"Re-search submitted for '{keyword2}'.")
+                         # 재검색 후 상품 수 다시 확인 (선택적)
+                         try:
+                              count_locator = page.locator(self.selectors["product_count"]).first
+                              count_text = self._safe_get_text(count_locator, timeout=10000)
+                              if count_text:
+                                   product_count = int(count_text.replace(',', ''))
+                                   self.logger.info(f"Found {product_count} products after re-search.")
+                         except Exception as e:
+                              self.logger.warning(f"Could not determine product count after re-search: {e}")
+                    else:
+                         self.logger.warning("Failed to click re-search button.")
+                else:
+                     self.logger.warning("Re-search elements not found or visible.")
 
-            # 6. 외부 도메인 이미지들 (상세 설명용)
-            external_images = soup.find_all('img', src=re.compile(r'ain8949\.godohosting\.com'))
-            for img in external_images:
-                if img.get('src'):
-                    img_url = img['src']
-                    if img_url not in image_gallery:
-                        image_gallery.append(img_url)
 
-            # 7. UI 요소 이미지 필터링
-            filtered_gallery = [
-                img for img in image_gallery
-                if not any(ui_pattern in img.lower() for ui_pattern in [
-                    'btn_', 'icon_', 'dot_', 'bottom_', '/bbs/image/',
-                    'guide1.jpg', 's1.png'
-                ])
-            ]
+            # 4. 페이지네이션 및 상품 추출
+            page_num = 1
+            processed_links = set()
 
-            # 이미지 갤러리 업데이트
-            product_data["image_gallery"] = filtered_gallery
+            while True:
+                if max_items > 0 and len(products) >= max_items:
+                     self.logger.info(f"Reached max items ({max_items}). Stopping pagination.")
+                     break
 
-            # 메인 이미지가 없는 경우 첫 번째 이미지를 메인 이미지로 설정
-            if not product_data["main_image"] and filtered_gallery:
-                product_data["main_image"] = filtered_gallery[0]
+                self.logger.info(f"Scraping page {page_num} for search '{query}'")
+                # 현재 페이지 상품 목록 대기
+                list_selector = self.selectors["product_list"]["selector"]
+                list_container = self._wait_for_selector(page, list_selector, state='visible')
+                if not list_container:
+                     # 목록 컨테이너는 있지만 내용물이 없는 경우도 고려
+                     if page.locator(list_selector).count() == 0:
+                        self.logger.warning(f"Product list container found but no items inside on page {page_num}. Assuming end of results for '{query}'.")
+                        break
+                     else: # 컨테이너는 있는데 안보이는 경우 잠시 대기 후 재시도 또는 실패 처리
+                          self.logger.warning(f"Product list ({list_selector}) not visible on page {page_num}. Assuming end of results for '{query}'.")
+                          break
 
-            self.logger.debug(f"Found {len(filtered_gallery)} images for product {product_idx}")
+                item_locators = page.locator(list_selector).all()
+                if not item_locators and page_num == 1: # 첫 페이지에 결과가 아예 없는 경우
+                    self.logger.info(f"No product items found on the first page for query: '{query}'. Ending search.")
+                    break
+                elif not item_locators and page_num > 1:
+                    self.logger.info(f"No more product items found on page {page_num} for query: '{query}'. Ending pagination.")
+                    break
 
+                found_on_page = 0
+                items_to_fetch_details = [] # Collect items needing detail fetch
+
+                for item_locator in item_locators:
+                    if max_items > 0 and len(products) >= max_items:
+                         break
+                    try:
+                        product_data = self._extract_list_item(item_locator)
+                        if product_data and product_data.get("link") and product_data["link"] not in processed_links:
+                            # Don't create Product object yet, fetch details first
+                            items_to_fetch_details.append(product_data)
+                            processed_links.add(product_data["link"])
+                            found_on_page += 1
+                            self.logger.debug(f"Found list item: {product_data.get('title')} ({product_data.get('link')})")
+                        elif product_data and product_data.get("link") in processed_links:
+                             self.logger.debug(f"Skipping already processed link: {product_data['link']}")
+
+                    except Exception as e:
+                        self.logger.warning(f"Error extracting product data from list element on page {page_num}: {e}", exc_info=self.config.debug)
+
+                self.logger.info(f"Found {found_on_page} potential products on page {page_num}. Fetching details...")
+
+                # Fetch details for items found on this page
+                # NOTE: This fetches details sequentially. Consider parallel fetching for performance.
+                for item_data in items_to_fetch_details:
+                    if max_items > 0 and len(products) >= max_items:
+                         break
+                    # Detail fetching handles its own context and caching
+                    detailed_product = self._get_product_details_sync_playwright(item_data)
+                    if detailed_product:
+                         products.append(detailed_product)
+                         self.logger.debug(f"Successfully processed product: {detailed_product.name} (Status: {detailed_product.status})")
+                    else:
+                         # Log failure to get details, but continue search
+                         self.logger.warning(f"Failed to get details for product listed at: {item_data.get('link')}")
+
+                # If no new items were even found on the list page (before detail fetch), break.
+                if found_on_page == 0 and page_num > 1:
+                     self.logger.info(f"No new product links found on page {page_num} for query: '{query}'. Ending pagination.")
+                     break
+
+                # 다음 페이지 이동 로직 (JS 우선)
+                js_next_page_locator = page.locator(self.selectors["next_page_js"]["selector"]).last
+                href_next_page_locator = page.locator(self.selectors["next_page_href"]["selector"]).last
+
+                next_page_clicked = False
+                # JS 페이징 시도 (기존 로직 유지)
+                if js_next_page_locator.is_visible(timeout=3000):
+                    # ... (JS click logic) ...
+                    onclick_attr = self._safe_get_attribute(js_next_page_locator, "onclick")
+                    if onclick_attr:
+                         page_match = self.patterns["js_page_number"].search(onclick_attr)
+                         if page_match:
+                              next_page_num_in_js = int(page_match.group(1))
+                              if next_page_num_in_js > page_num:
+                                   self.logger.debug(f"Attempting to click JS next page (to page {next_page_num_in_js})")
+                                   if self._click_locator(js_next_page_locator):
+                                        self._wait_for_load_state(page, 'networkidle')
+                                        page_num = next_page_num_in_js
+                                        next_page_clicked = True
+                                        self.logger.info(f"Successfully navigated to page {page_num} via JS.")
+                                        time.sleep(self.config.request_delay)
+                                   else:
+                                       self.logger.warning("Failed to click JS next page.")
+                         else:
+                              self.logger.debug(f"Could not parse JS page number from onclick: {onclick_attr}")
+
+
+                # JS 페이징 실패 또는 없을 경우, href 페이징 시도
+                if not next_page_clicked and href_next_page_locator.is_visible(timeout=3000):
+                    # ... (href click logic) ...
+                    next_href = self._safe_get_attribute(href_next_page_locator, self.selectors["next_page_href"]["attribute"])
+                    if next_href and next_href != '#' and not next_href.startswith("javascript:"):
+                         next_url = urljoin(page.url, next_href)
+                         self.logger.debug(f"Attempting to navigate to next page via href: {next_url}")
+                         try:
+                              page.goto(next_url, wait_until='networkidle')
+                              page_num += 1 # Increment page number optimistically
+                              next_page_clicked = True
+                              self.logger.info(f"Successfully navigated to page {page_num} via href.")
+                              time.sleep(self.config.request_delay)
+                         except (PlaywrightTimeoutError, PlaywrightError) as nav_err:
+                              self.logger.warning(f"Error navigating to next page via href {next_url}: {nav_err}")
+                    else:
+                         self.logger.debug("Href next page link found but invalid or empty.")
+
+
+                # 다음 페이지 이동 실패 시 종료
+                if not next_page_clicked:
+                    self.logger.info(f"No more pages found or failed to navigate. Ending pagination for query: '{query}'.")
+                    break
+
+        except (PlaywrightTimeoutError, PlaywrightError) as e:
+            self.logger.error(f"Playwright error during search for '{query}': {e}", exc_info=self.config.debug)
+            # Return whatever products were found before the error
+            return products
         except Exception as e:
-            self.logger.error(f"Error extracting images for product {product_idx}: {str(e)}")
+            self.logger.error(f"Unexpected error during search for '{query}': {e}", exc_info=True)
+            # Return whatever products were found before the error
+            return products
+        finally:
+            # Always clean up the thread-local browser context
+            self._close_thread_context()
 
-        # ... (나머지 기존 코드는 유지) ...
+        if not products:
+            self.logger.warning(f"Search completed, but no products found matching query: '{query}'")
+        else:
+             self.logger.info(f"Search completed for '{query}'. Found {len(products)} products.")
 
-        return product_data
+        # Caching logic removed, add back if needed: self.cache_sparse_data(cache_key, products)
+        return products
+
+
+    def _get_product_details_sync_playwright(self, item: Dict) -> Optional[Product]:
+         """상품 상세 페이지로 이동하여 정보 추출 (Playwright) - Status 필드 처리 포함"""
+         # Use thread-local browser context for this operation
+         self._close_thread_context()  # Ensure clean state
+         browser, page = self._create_new_context()
+
+         if not browser or not page:
+             self.logger.error(f"Detail fetch failed for {item.get('link')}: Could not create browser context")
+             return None
+
+         product_link = item.get("link")
+         if not product_link:
+              self.logger.error("Invalid item data for detail fetching: Missing link.")
+              self._close_thread_context() # Clean up
+              return None
+
+         product_id = item.get("product_id") or hashlib.md5(product_link.encode()).hexdigest()
+         cache_key = f"koryo_detail|{product_id}"
+         product: Optional[Product] = None # Initialize product variable
+
+         cached_result = self.get_sparse_data(cache_key)
+         if cached_result:
+             self.logger.debug(f"Using cached detail for: {product_id}")
+             # Ensure cached result is a Product object or reconstruct
+             if isinstance(cached_result, Product):
+                  product = cached_result
+             elif isinstance(cached_result, dict):
+                 try:
+                     # Reconstruct Product from dict, ensuring all fields (including status) are handled
+                     # Note: If Product dataclass changes, this needs careful handling
+                     # Assuming Product(**cached_result) works if cache stores dict correctly
+                     product = Product(**cached_result)
+                     self.logger.debug(f"Reconstructed Product from cached dict for {product_id}")
+                 except TypeError as te:
+                     self.logger.warning(f"Cached data for {product_id} is dict but couldn't reconstruct Product: {te}. Refetching.")
+                     # Invalidate cache? For now, just refetch.
+                     product = None # Force refetch
+             else:
+                  self.logger.warning(f"Cached data for {product_id} is not a Product object or dict (type: {type(cached_result)}). Refetching.")
+                  product = None # Force refetch
+
+             if product: # If successfully loaded from cache
+                 self._close_thread_context() # Clean up resources
+                 return product
+             # If cache load failed, proceed to fetch
+
+         # If not cached or reconstruction failed, fetch live data
+         try:
+             self.logger.info(f"Fetching live details for: {product_link} (ID: {product_id})")
+             page.goto(product_link, wait_until='domcontentloaded')
+             self._wait_for_load_state(page, 'networkidle')
+
+             # 상세 정보 추출 (this now sets the status internally)
+             product = self._extract_product_details(page, item)
+
+             if product:
+                 self.logger.info(f"Successfully extracted live details for: {product_id} (Status: {product.status})")
+                 self.cache_sparse_data(cache_key, product) # Cache the Product object
+             else:
+                 # _extract_product_details already logged the specific error
+                 self.logger.warning(f"Failed to extract details from live page: {product_link}")
+                 # Return None to signify failure
+                 product = None
+
+             # Return the product (or None if extraction failed)
+             return product
+
+         except (PlaywrightTimeoutError, PlaywrightError) as e:
+             self.logger.error(f"Playwright error fetching detail page {product_link}: {e}")
+             return None # Indicate failure
+         except Exception as e:
+             self.logger.error(f"Unexpected error getting product details for {product_link}: {e}", exc_info=self.config.debug)
+             return None # Indicate failure
+         finally:
+             # Always clean up the thread-local browser context
+             self._close_thread_context()
+
+         self.cache_sparse_data(cache_key, product)
+         return product
+
+        

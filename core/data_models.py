@@ -17,6 +17,9 @@ class Product:
     url: Optional[str] = None
     image_url: Optional[str] = None
 
+    # Scraping status
+    status: Optional[str] = None  # e.g., "OK", "Not Found", "Image Not Found"
+
     # Source-specific data (from input file or scraping)
     brand: Optional[str] = None
     description: Optional[str] = None
@@ -59,6 +62,7 @@ class Product:
             "description": self.description,
             "source": self.source,
             "url": self.url,
+            "status": self.status,
             "is_promotional_site": self.is_promotional_site,
             "product_code": self.product_code,
             "category": self.category,

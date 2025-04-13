@@ -80,9 +80,6 @@ class Colors:
     SHADOW_LIGHT = "0px 2px 4px rgba(0, 0, 0, 0.1)"
     SHADOW_DARK = "0px 2px 4px rgba(0, 0, 0, 0.3)"
 
-    # Animations
-    ANIMATION_DURATION = "300ms"
-
 
 class Styles:
     """Style manager for the application"""
@@ -264,7 +261,32 @@ class Styles:
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                 width: 0px;
             }}
-        """
+            QMenu {{
+                background-color: {Colors.CARD_DARK};
+                color: {Colors.TEXT_DARK};
+                border: 1px solid {Colors.BORDER_DARK};
+                border-radius: 8px;
+            }}
+            QMenu::item {{
+                padding: 8px 16px;
+            }}
+            QMenu::item:selected {{
+                background-color: {Colors.PRIMARY_DARK};
+                color: white;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {Colors.BORDER_DARK};
+                margin: 4px 0;
+            }}
+            QToolTip {{
+                background-color: {Colors.CARD_DARK};
+                color: {Colors.TEXT_DARK};
+                border: 1px solid {Colors.BORDER_DARK};
+                border-radius: 8px;
+                padding: 8px;
+            }}
+            """
         )
 
     @staticmethod
@@ -634,24 +656,34 @@ class Styles:
         )
 
     @staticmethod
-    def apply_progress_bar_style(widget: QWidget) -> None:
+    def apply_progress_bar_style(progress_bar):
         """Apply style to progress bar"""
-        widget.setStyleSheet(
-            f"""
-            QProgressBar {{
-                border: 1px solid #E0E0E0;
-                border-radius: 4px;
+        progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                border-radius: 8px;
                 text-align: center;
-                background-color: #F5F5F5;
-                color: #333333;
                 font-weight: bold;
-            }}
-            QProgressBar::chunk {{
-                background-color: {Colors.PRIMARY};
-                border-radius: 3px;
-            }}
-        """
-        )
+                font-size: 12px;
+                color: #555555;
+                background-color: #F5F5F5;
+                height: 22px;
+                min-height: 22px;
+                max-height: 22px;
+                margin: 2px;
+                padding: 0px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                                         stop:0 #4285F4, stop:1 #5E97F6);
+                border-radius: 8px;
+            }
+        """)
+        
+        # 부드러운 업데이트를 위한 기본 설정
+        progress_bar.setTextVisible(True)
+        progress_bar.setFormat("%p% (%v/%m)")  # 기본 형식을 백분율과 값으로 설정
 
     @staticmethod
     def apply_status_label_style(widget: QWidget) -> None:

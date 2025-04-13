@@ -153,6 +153,9 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
             pool_maxsize=100
         ))
 
+        # ThreadPoolExecutor 초기화
+        self.executor = ThreadPoolExecutor(max_workers=10)  # 적절한 워커 수 설정
+
     def search_product(
         self, query: str, max_items: int = 50, reference_price: float = 0
     ) -> List[Product]:

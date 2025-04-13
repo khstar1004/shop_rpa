@@ -303,10 +303,14 @@ class TextMatcher:
         # 소문자 변환
         text = text.lower()
 
-        # 브랜드 변형 치환
+        # 브랜드 변형 치환 (최적화된 순서)
         for brand, aliases in self.brand_aliases.items():
-            for alias in aliases:
-                text = text.replace(alias, brand)
+            # 가장 긴 별칭부터 처리 (부분 매칭 방지)
+            sorted_aliases = sorted(aliases, key=len, reverse=True)
+            for alias in sorted_aliases:
+                if alias in text:
+                    text = text.replace(alias, brand)
+                    break  # 한 번만 치환하고 다음 브랜드로
 
         # 한국어 형태소 분석을 통한 정규화
         try:
@@ -319,7 +323,8 @@ class TextMatcher:
             # 불용어 제거 및 정규화된 텍스트 재구성
             if filtered_words:
                 text = " ".join(filtered_words)
-        except Exception:
+        except Exception as e:
+            self.logger.warning(f"형태소 분석 실패: {e}")
             # 형태소 분석 오류 시 기존 처리 방식 사용
             pass
 
