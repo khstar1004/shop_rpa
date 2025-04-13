@@ -148,3 +148,24 @@ Shop_RPA/
     └── cache/            # 캐시 데이터
 
 ├── logs/                 # 로그 파일 디렉토리
+```
+
+## Excel File Saving Fixes
+
+We identified and fixed several issues with Excel file saving:
+
+1. **@ Symbol Handling**: Excel has issues with at-sign (@) characters in URLs when used with IMAGE formulas. We added code to remove @ characters from URLs before saving.
+
+2. **Directory Creation**: Ensured proper creation of output directories before saving Excel files.
+
+3. **Post-processing**: Added a comprehensive post-processing workflow that:
+   - Removes @ characters from URLs
+   - Applies formatting
+   - Adds hyperlinks
+   - Handles Excel formatting issues
+
+4. **Error Handling**: Improved error handling in the Excel saving process to prevent crashes.
+
+5. **Testing**: Added comprehensive tests to verify Excel file saving works properly.
+
+These fixes should resolve issues with Excel files not saving properly or saving empty files.

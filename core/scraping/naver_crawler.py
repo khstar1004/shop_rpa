@@ -412,18 +412,21 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
             # 판매처 정보
             mall_name = item.get("mallName", "")
 
-            # 이미지 URL - 네이버 API 응답에서 image 필드는 항상 있어야 함
-            # 참고: 네이버 검색 API 문서에 따르면 모든 상품에는 이미지 URL이 포함됨
+            # 이미지 URL 처리
             image_url = item.get("image", "")
-
-            # 이미지가 없는 경우 로깅 (디버깅 목적)
-            if not image_url:
-                self.logger.warning(
-                    f"🖼️ 네이버 API에서 반환된 상품 '{title}'의 이미지 URL이 없습니다"
-                )
-                self.logger.debug(
-                    f"네이버 API 응답 아이템 구조: {json.dumps(item, indent=2, ensure_ascii=False)}"
-                )
+            
+            # 이미지 URL 정규화
+            if image_url:
+                # HTTP를 HTTPS로 변환
+                if image_url.startswith('http:'):
+                    image_url = 'https:' + image_url[5:]
+                # 프로토콜이 없는 경우 https: 추가
+                elif image_url.startswith('//'):
+                    image_url = 'https:' + image_url
+            else:
+                # 이미지가 없는 경우 기본 네이버 이미지 사용
+                image_url = "https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png"
+                self.logger.warning(f"상품 '{title}'의 이미지 URL이 없어 기본 이미지를 사용합니다.")
 
             # 홍보성 제품 여부 확인
             is_promotional = self._is_promotional_product(title, mall_name, category)
@@ -800,7 +803,7 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         self, query: str, max_items: int = 50, reference_price: float = 0
     ) -> List[Product]:
         """
-        네이버 쇼핑에서 제품 검색 - API를 통해 검색 수행
+        네이버 쇼핑 API를 사용하여 제품 검색
 
         Args:
             query: 검색어
@@ -811,48 +814,69 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
             List[Product]: 검색된 제품 목록
         """
         try:
-            self.logger.info(f"네이버 쇼핑 검색 시작: '{query}'")
+            self.logger.info(f"네이버 쇼핑 API 검색 시작: '{query}'")
 
-            # 가이드라인 반영: 상품명에서 '_'를 공백으로 치환
+            # 검색어 전처리: 언더스코어를 공백으로 변환
             processed_query = query.replace("_", " ")
             if processed_query != query:
                 self.logger.info(f"검색어 전처리: '{query}' -> '{processed_query}'")
 
-            # NaverShoppingAPI의 search_product 메서드 호출 (처리된 검색어 사용)
+            # NaverShoppingAPI를 통해 검색 수행
             products = self.api.search_product(
                 query=processed_query,
                 max_items=max_items,
                 reference_price=reference_price,
             )
 
+            # 검색 결과 검증
             if not products:
                 self.logger.warning(f"'{processed_query}'에 대한 검색 결과가 없습니다.")
-                # 결과가 없을 때 no_match 제품 생성
+                # 결과가 없을 때 기본 제품 생성
                 no_match_product = Product(
                     id="no_match",
                     name=f"동일상품 없음 - {processed_query}",
                     source="naver_shopping",
                     price=0,
                     url="",
-                    image_url="",
+                    image_url="https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png",
                 )
                 return [no_match_product]
-            else:
-                self.logger.info(
-                    f"'{processed_query}'에 대한 검색 결과 {len(products)}개 발견"
-                )
-                return products
+            
+            # 검색 결과 로그
+            self.logger.info(f"'{processed_query}'에 대한 검색 결과 {len(products)}개 발견")
+            
+            # 이미지 URL 유효성 확인 및 수정
+            valid_products = []
+            for product in products:
+                # 이미지 URL이 없는 경우 기본 이미지 설정
+                if not product.image_url:
+                    product.image_url = "https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png"
+                    self.logger.warning(f"상품 '{product.name}'의 이미지 URL이 없어 기본 이미지를 사용합니다.")
+                
+                # 이미지 URL 표준화
+                if product.image_url.startswith('http:'):
+                    product.image_url = 'https:' + product.image_url[5:]
+                elif product.image_url.startswith('//'):
+                    product.image_url = 'https:' + product.image_url
+                
+                # 타임스탬프 추가
+                product.fetched_at = datetime.now().isoformat()
+                
+                valid_products.append(product)
+                self.logger.debug(f"상품 추가: {product.name} (이미지: {product.image_url[:50]}...)")
+            
+            return valid_products
 
         except Exception as e:
-            self.logger.error(f"네이버 쇼핑 검색 중 오류 발생: {str(e)}", exc_info=True)
-            # 오류 발생 시에도 no_match 제품 반환
+            self.logger.error(f"네이버 쇼핑 API 검색 중 오류 발생: {str(e)}", exc_info=True)
+            # 오류 발생 시에도 기본 제품 반환
             no_match_product = Product(
                 id="no_match",
                 name=f"검색 오류 - {query}",
                 source="naver_shopping",
                 price=0,
                 url="",
-                image_url="",
+                image_url="https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png",
             )
             return [no_match_product]
 

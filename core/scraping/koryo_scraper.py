@@ -87,7 +87,12 @@ class KoryoScraper(BaseMultiLayerScraper):
             "h3.prd_title",
             ".view_title",
             "h1.product-title",
-            ".name" # main page best100 analysis
+            ".name", # main page best100 analysis
+            "h2.name",
+            ".goods_name",
+            "div.title",
+            "div.product-title",
+            "div.prd-name"
         ]
         self.price_selectors = [
             "#main_price", # product page analysis
@@ -95,7 +100,11 @@ class KoryoScraper(BaseMultiLayerScraper):
             ".price_num",
             ".product-price",
             ".price", # main page best100 analysis
-            ".product-price-num"
+            ".product-price-num",
+            "div.price",
+            "strong.price",
+            ".goods_price",
+            "p.price"
         ]
         self.code_selectors = [
             '//div[contains(text(), "상품코드")]', # product page analysis (XPath needed for text containment)
@@ -104,7 +113,10 @@ class KoryoScraper(BaseMultiLayerScraper):
             ".item-code",
             "span.code",
             'td:contains("상품코드") + td',
-            'li:contains("상품코드")'
+            'li:contains("상품코드")',
+            '.goods_code',
+            '//span[contains(text(), "상품코드")]',
+            '//td[contains(text(), "상품코드")]'
         ]
         self.image_selectors = [
             "#main_img", # product page analysis
@@ -116,26 +128,37 @@ class KoryoScraper(BaseMultiLayerScraper):
             # "#main_img", # Duplicate, covered above
             # ".product_picture .thumnails img", # Duplicate, covered above
             ".tbl_info img", # product page analysis (specs table images)
-            "div.prd_detail img"
+            "div.prd_detail img",
+            ".goods_image img",
+            ".prd-img img",
+            "div.thumb img",
+            ".carousel-inner img",
+            "div.pic img"
         ]
         self.selectors = {
+            "search_results_container": {  # 여러 선택자 추가
+                "selector": "ul.prd_list, div.prd_list_wrap, table.mall_list, div.product_list, .prd-list, .best100_tab, .goods-list, .product-grid"
+            },
+            "search_result_item": {  # 여러 선택자 추가
+                "selector": "li.prd, ul.prd_list li, table.mall_list td.prd, div.product_list .item, .prd-list .prd-item, .product, .best100_tab .product, .goods-item, .product-grid-item"
+            },
             "product_list": {
                 # Priority to more specific structures if known context (e.g., best100)
                 # General selectors first for broader compatibility
-                "selector": "div.prd_list_wrap li.prd, ul.prd_list li, table.mall_list td.prd, div.product_list .item, .prd-list .prd-item, .product, .best100_tab .product", # crowling_kogift.py .product 추가, main page best100 analysis 추가
+                "selector": "div.prd_list_wrap li.prd, ul.prd_list li, table.mall_list td.prd, div.product_list .item, .prd-list .prd-item, .product, .best100_tab .product, .goods-list li, .product-grid .item", # crowling_kogift.py .product 추가, main page best100 analysis 추가
             },
             "product_title_list": { # 목록용 제목
-                 "selector": ".name, p.name a, div.name a, td.name a, .prd_name a, a.product-title, div.name > a", # main page best100 analysis 추가, crowling_kogift.py div.name > a 추가
+                 "selector": ".name, p.name a, div.name a, td.name a, .prd_name a, a.product-title, div.name > a, .goods-name a, .product-name a, h3.name a", # main page best100 analysis 추가, crowling_kogift.py div.name > a 추가
             },
             "product_link_list": { # 목록용 링크
-                 "selector": "a, p.name a, div.name a, td.name a, .prd_name a, a.product-title, div.prd_list_wrap li.prd > a, div.pic > a", # Ensure 'a' itself is included for cases like '.product a', crowling_kogift.py div.pic > a 추가
+                 "selector": "a, p.name a, div.name a, td.name a, .prd_name a, a.product-title, div.prd_list_wrap li.prd > a, div.pic > a, .goods-item > a, .product-link", # Ensure 'a' itself is included for cases like '.product a', crowling_kogift.py div.pic > a 추가
                  "attribute": "href",
             },
             "price_list": { # 목록용 가격
-                "selector": ".price, p.price, div.price, td.price, .prd_price, span.price", # main page best100 analysis 추가, crowling_kogift.py div.price 추가
+                "selector": ".price, p.price, div.price, td.price, .prd_price, span.price, strong.price, .goods-price, .product-price", # main page best100 analysis 추가, crowling_kogift.py div.price 추가
             },
             "thumbnail_list": { # 목록용 썸네일
-                "selector": ".img img, .pic img, img.prd_img, td.img img, .thumb img, img.product-image, div.pic > a > img", # main page best100 analysis 추가, crowling_kogift.py div.pic > a > img 추가
+                "selector": ".img img, .pic img, img.prd_img, td.img img, .thumb img, img.product-image, div.pic > a > img, .goods-thumb img, .product-thumb img", # main page best100 analysis 추가, crowling_kogift.py div.pic > a > img 추가
                 "attribute": "src"
             },
             "next_page_js": { # JavaScript 기반 페이징 ('다음' 또는 페이지 번호)
@@ -198,11 +221,17 @@ class KoryoScraper(BaseMultiLayerScraper):
 
         # Set base URLs to try
         self.base_search_urls = [
+            "https://www.koreagift.com/ez/goods/goods_search.php",  # www 서브도메인을 첫번째로
             "https://koreagift.com/ez/goods/goods_search.php",
-            "https://adpanchok.co.kr/ez/goods/goods_search.php"
+            "https://www.adpanchok.co.kr/ez/goods/goods_search.php",  # www 서브도메인 추가
+            "https://adpanchok.co.kr/ez/goods/goods_search.php",
+            "https://www.koreagift.com/ez/index.php",  # www 서브도메인 추가
+            "https://koreagift.com/ez/index.php",  # 리다이렉션 URL
+            "https://www.koreagift.com",  # 루트 도메인 추가
+            "https://koreagift.com"  # 루트 도메인 추가
         ]
         # Keep the original search_url for compatibility if needed elsewhere, but prefer base_search_urls for searching
-        self.search_url = self.base_search_urls[0] 
+        self.search_url = self.base_search_urls[0]
 
     # --- Playwright 초기화 및 종료 --- 
 
@@ -213,14 +242,18 @@ class KoryoScraper(BaseMultiLayerScraper):
             return True
         try:
             self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(headless=self.config.headless)
+            self._browser = self._playwright.chromium.launch(
+                headless=self.config.headless,
+                args=['--disable-web-security', '--no-sandbox', '--disable-features=IsolateOrigins,site-per-process']
+            )
             context = self._browser.new_context(
                 user_agent=self.config.user_agent,
-                viewport={'width': 1920, 'height': 1080} # 필요시 뷰포트 설정
+                viewport={'width': 1920, 'height': 1080}, # 필요시 뷰포트 설정
+                ignore_https_errors=True  # SSL 인증서 오류 무시
             )
-            # 기본 타임아웃 설정
-            context.set_default_timeout(self.config.timeout)
-            context.set_default_navigation_timeout(self.config.navigation_timeout)
+            # 기본 타임아웃 설정 (늘림)
+            context.set_default_timeout(self.config.timeout * 2)
+            context.set_default_navigation_timeout(self.config.navigation_timeout * 2)
 
             self._page = context.new_page()
             self.logger.info("Playwright initialized successfully.")
@@ -235,13 +268,25 @@ class KoryoScraper(BaseMultiLayerScraper):
         try:
             # Start a fresh playwright instance
             playwright = sync_playwright().start()
-            browser = playwright.chromium.launch(headless=self.config.headless)
+            browser = playwright.chromium.launch(
+                headless=self.config.headless,
+                args=[
+                    '--disable-web-security', 
+                    '--no-sandbox', 
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--disable-dev-shm-usage'  # 메모리 관련 문제 방지
+                ]
+            )
             context = browser.new_context(
                 user_agent=self.config.user_agent,
-                viewport={'width': 1920, 'height': 1080}
+                viewport={'width': 1920, 'height': 1080},
+                ignore_https_errors=True,  # SSL 인증서 오류 무시
+                proxy={  # 프록시 설정 추가
+                    "server": "system",  # 시스템 프록시 사용
+                }
             )
             
-            # Set timeouts
+            # Set timeouts (더 짧게 조정)
             context.set_default_timeout(self.config.timeout)
             context.set_default_navigation_timeout(self.config.navigation_timeout)
             
@@ -838,259 +883,433 @@ class KoryoScraper(BaseMultiLayerScraper):
             return None
 
     def search_product(self, query: str, max_items: int = 50, keyword2: Optional[str] = None) -> List[Product]:
-        """상품 검색 (Playwright 사용, 다중 URL 시도)"""
-        self._close_thread_context() # Ensure clean state
-        browser, page = self._create_new_context()
-
-        if not browser or not page:
-            self.logger.error(f"Search failed for '{query}': Could not create browser context")
+        """
+        제품 검색 수행 및 결과 반환
+        
+        Args:
+            query: 검색어
+            max_items: 최대 결과 수
+            keyword2: 추가 검색어 (선택 사항)
+            
+        Returns:
+            List[Product]: 검색 결과 제품 목록
+        """
+        if not query:
+            self.logger.warning("빈 검색어로 검색할 수 없습니다.")
             return []
-
-        self.logger.info(f"Searching Koryo sites for: '{query}' (Secondary: '{keyword2}')")
-        products = []
-        navigation_successful = False
-        active_search_url = None # Store the URL that succeeded
-
-        try:
-            # --- Build Search Params --- #
-            search_params = {
-                "search_keyword": query,
-                "search_type": "all"
-            }
-            # --- End Build Search Params --- #
-
-            # === Navigation Loop: Try Base URLs === #
-            for base_url in self.base_search_urls:
-                current_search_url = f"{base_url}?{urllib.parse.urlencode(search_params)}"
-                self.logger.info(f"Attempting navigation to search URL: {current_search_url}")
-                page_response = None # Reset response for this attempt
-
-                try:
-                    nav_timeout = self.config.navigation_timeout
-                    page_response = page.goto(current_search_url, wait_until='networkidle', timeout=nav_timeout)
-
-                    # Check 1: Response OK?
-                    if page_response is None or not page_response.ok:
-                        status_code = page_response.status if page_response else "N/A"
-                        self.logger.warning(f"Navigation to {current_search_url} failed or returned non-OK status: {status_code}. Trying next URL.")
-                        continue # Try next base URL
-
-                    # Check 2: Content indicates "Not Found"?
-                    page_content = page.content().lower()
-                    page_title = page.title().lower()
-                    if "not found" in page_content or "not found" in page_title:
-                        self.logger.warning(f"Search page content indicates 'Not Found' for URL: {current_search_url} (Query: '{query}'). Title: '{page.title()}'. Trying next URL.")
-                        continue # Try next base URL
-
-                    # Success for this URL
-                    self.logger.info(f"Successfully navigated to and verified search page: {current_search_url}")
-                    navigation_successful = True
-                    active_search_url = current_search_url # Store the successful URL
-                    break # Exit the loop, proceed with scraping
-
-                # --- Handle Navigation Exceptions --- #
-                except Exception as e:
-                    error_str = str(e)
-                    if (
-                        "net::ERR_CONNECTION_RESET" in error_str or
-                        "net::ERR_EMPTY_RESPONSE" in error_str or
-                        isinstance(e, PlaywrightTimeoutError)
-                    ):
-                        self.logger.warning(f"Network/Timeout error navigating to {current_search_url}: {type(e).__name__}. Trying next URL.")
-                        continue # Try next URL
-                    elif "net::ERR_ABORTED" in error_str:
-                        self.logger.warning(f"Navigation aborted ('networkidle') for {current_search_url}. Retrying ('domcontentloaded').")
-                        try:
-                            page_response = page.goto(current_search_url, wait_until='domcontentloaded', timeout=nav_timeout)
-                            # Check response and content again after retry
-                            if page_response is None or not page_response.ok:
-                                status_code = page_response.status if page_response else "N/A"
-                                self.logger.warning(f"Retry navigation failed for {current_search_url}. Status: {status_code}. Trying next URL.")
-                                continue
-                            page_content = page.content().lower()
-                            page_title = page.title().lower()
-                            if "not found" in page_content or "not found" in page_title:
-                                self.logger.warning(f"Search page 'Not Found' after retry for {current_search_url}. Trying next URL.")
-                                continue
-                            # Retry successful
-                            self.logger.info(f"Successfully navigated (on retry) to: {current_search_url}")
-                            navigation_successful = True
-                            active_search_url = current_search_url
-                            break # Exit loop
-                        except Exception as inner_e:
-                            self.logger.error(f"Retry navigation failed definitively for {current_search_url}: {inner_e}. Trying next URL.")
-                            continue # Try next URL
-                    else:
-                        # Unexpected error during navigation attempt
-                        self.logger.error(f"Unexpected navigation error for {current_search_url}: {e}. Trying next URL.")
-                        continue # Try next URL
-                # --- End Handle Navigation Exceptions --- #
-            # === End Navigation Loop === #
-
-            # --- Check if Navigation Succeeded Overall --- #
-            if not navigation_successful:
-                self.logger.error(f"Failed to navigate successfully to ANY search URL for query: '{query}'.")
-                # No need to proceed further, cleanup will happen in finally
-                return [] # Return empty list immediately
-            # --- End Navigation Check --- #
-
-            # \"\"\" --- Start Scraping Logic (Only runs if navigation_successful is True) --- \"\"\"
-            self.logger.info(f"Starting scraping process on successfully loaded page: {active_search_url}")
-
-            # --- Step 2: Check product count (for potential re-search) --- #
-            product_count = 0
+            
+        # 캐시 키 생성 (추가 검색어 포함)
+        cache_key = f"search_{query}_{keyword2 or ''}"
+        if self.cache:
+            cached_results = self.cache.get(cache_key)
+            if cached_results:
+                self.logger.info(f"캐시에서 '{query}' 검색 결과 {len(cached_results)}개를 로드했습니다.")
+                return cached_results
+                
+        processed_query = query.strip()
+        if not processed_query:
+            self.logger.warning(f"검색어가 비어있습니다: '{query}'")
+            return []
+            
+        self.logger.info(f"Searching Koryo Gift for: {processed_query}")
+        
+        # 결과 변수 초기화
+        all_results = []
+        success = False
+        
+        # URL 인코딩
+        encoded_query = urllib.parse.quote(processed_query)
+        self.logger.info(f"Searching Koryo Gift for '{processed_query}' (Encoded: '{encoded_query}')")
+        
+        # 직접 접속할 대체 주소 - 사이트 홈페이지
+        fallback_urls = [
+            "https://www.koreagift.com",
+            "https://koreagift.com",
+            "https://www.adpanchok.co.kr", 
+            "https://adpanchok.co.kr"
+        ]
+        
+        # 재시도 횟수 설정
+        retry_count = 0
+        max_retries = 3
+        
+        # 각 기본 URL 시도
+        for base_url in self.base_search_urls:
+            # 최대 재시도 횟수 확인
+            if retry_count >= max_retries:
+                self.logger.warning(f"재시도 횟수 초과({max_retries}회): 검색 중단")
+                break
+                
+            retry_count += 1
+            
             try:
-                count_locator = page.locator(self.selectors["product_count"]).first
-                count_text = self._safe_get_text(count_locator, timeout=10000)
-                if count_text:
-                    count_match = re.search(r'\\d+', count_text.replace(',', ''))
-                    if count_match:
-                        product_count = int(count_match.group(0))
-                        self.logger.info(f"Found {product_count} products after initial search.")
-                    else:
-                        self.logger.warning(f"Could not parse product count from text: '{count_text}'")
-                else:
-                    self.logger.warning(f"Could not get text for product count locator.")
-            except Exception as e:
-                self.logger.warning(f"Could not determine product count after initial search: {e}")
-            # --- End Step 2 --- #
-
-            # --- Step 3: Perform re-search if necessary --- #
-            if keyword2 and keyword2.strip() and product_count >= 100:
-                self.logger.info(f"Product count ({product_count}) >= 100. Performing re-search with: '{keyword2}'")
-                re_search_input_loc = self.selectors["re_search_input"]
-                re_search_button_loc = self.selectors["re_search_button"]
-                re_search_input = self._wait_for_selector(page, re_search_input_loc)
-                re_search_button = page.locator(re_search_button_loc).first
-                if re_search_input and re_search_button.is_visible(timeout=5000):
-                    re_search_input.fill(keyword2)
-                    if self._click_locator(re_search_button):
-                        self._wait_for_load_state(page, 'networkidle')
-                        self.logger.info(f"Re-search submitted for '{keyword2}'.")
-                        # Re-check product count (optional)
-                        try:
-                            count_locator = page.locator(self.selectors["product_count"]).first
-                            count_text = self._safe_get_text(count_locator, timeout=10000)
-                            if count_text:
-                                count_match = re.search(r'\\d+', count_text.replace(',', ''))
-                                if count_match:
-                                    product_count = int(count_match.group(0))
-                                    self.logger.info(f"Found {product_count} products after re-search.")
-                                else:
-                                     self.logger.warning(f"Could not parse count after re-search: '{count_text}'")
-                            else:
-                                 self.logger.warning(f"Could not get count text after re-search.")
-                        except Exception as e:
-                            self.logger.warning(f"Could not determine count after re-search: {e}")
-                    else:
-                        self.logger.warning("Failed to click re-search button.")
-                else:
-                    self.logger.warning("Re-search elements not found or visible.")
-            # --- End Step 3 --- #
-
-            # --- Step 4: Paginate and extract product list items --- #
-            page_num = 1
-            processed_links = set()
-            while True:
-                if max_items > 0 and len(products) >= max_items:
-                    self.logger.info(f"Reached max items ({max_items}). Stopping pagination.")
-                    break
-
-                self.logger.info(f"Scraping page {page_num} for search '{query}' on {page.url}")
-                list_selector = self.selectors["product_list"]["selector"]
+                # 브라우저 상태 체크 및 초기화
+                browser, page = self._create_new_context()
+                if not browser or not page:
+                    self.logger.error("Failed to create browser context for search")
+                    continue
+                
                 try:
-                    page.wait_for_selector(list_selector, state='visible', timeout=15000)
-                except PlaywrightTimeoutError:
-                    self.logger.warning(f"Product list ({list_selector}) did not become visible on page {page_num}. Assuming end of results.")
-                    break
-
-                item_locators = page.locator(list_selector).all()
-                if not item_locators:
-                    if page_num == 1:
-                        self.logger.info("No product items found on the first page.")
-                    else:
-                        self.logger.info(f"No more product items found on page {page_num}.")
-                    break
-
-                found_on_page = 0
-                items_to_fetch_details = []
-                for item_locator in item_locators:
-                    if max_items > 0 and len(products) + len(items_to_fetch_details) >= max_items:
-                        break
+                    # 접속 안정성을 위해 먼저 메인 사이트 접속 시도
                     try:
-                        product_data = self._extract_list_item(item_locator)
-                        if product_data and product_data.get("link") and product_data["link"] not in processed_links:
-                            items_to_fetch_details.append(product_data)
-                            processed_links.add(product_data["link"])
-                            found_on_page += 1
-                    except Exception as e:
-                        self.logger.warning(f"Error extracting list item on page {page_num}: {e}", exc_info=self.config.debug)
-
-                self.logger.info(f"Found {found_on_page} new items on page {page_num}. Fetching details...")
-
-                # Fetch details (Consider parallelization for performance)
-                for item_data in items_to_fetch_details:
-                    if max_items > 0 and len(products) >= max_items:
-                        break
-                    detailed_product = self._get_product_details_sync_playwright(item_data)
-                    if detailed_product:
-                        products.append(detailed_product)
-                    else:
-                        self.logger.warning(f"Failed get details for: {item_data.get('link')}")
-
-                if found_on_page == 0 and page_num > 1:
-                    self.logger.info(f"No new links found on page {page_num}. Ending pagination.")
-                    break
-
-                # Next Page Logic
-                js_next_selector = self.selectors["next_page_js"]["selector"]
-                href_next_selector = self.selectors["next_page_href"]["selector"]
-                js_next_page_locator = page.locator(js_next_selector).last
-                href_next_page_locator = page.locator(href_next_selector).last
-                next_page_clicked = False
-                # Try JS paging
-                if js_next_page_locator.is_visible(timeout=2000):
-                    js_code_template = self.selectors["next_page_js"].get("js_code", "")
-                    if js_code_template:
-                        js_code = js_code_template.replace("{page_num + 1}", str(page_num + 1))
+                        # base_url에서 도메인 부분만 추출
+                        domain_parts = base_url.split('//')
+                        if len(domain_parts) > 1:
+                            domain = domain_parts[1].split('/')[0]
+                            main_url = f"https://{domain}"
+                            self.logger.info(f"먼저 메인 사이트 접속 시도: {main_url}")
+                            
+                            # 메인 사이트 접속
+                            page.goto(
+                                main_url,
+                                wait_until="domcontentloaded",
+                                timeout=20000  # 20초 타임아웃
+                            )
+                            # 짧은 대기 시간
+                            time.sleep(1)
+                    except Exception as main_error:
+                        self.logger.warning(f"메인 사이트 접속 실패: {main_error}")
+                        # 오류가 발생해도 계속 진행
+                    
+                    # 검색 URL 구성
+                    search_url = f"{base_url}?search_str={encoded_query}"
+                    if not base_url.endswith((".php", ".html", ".asp", ".aspx")):
+                        # 루트 도메인인 경우 다른 URL 형식 사용
+                        search_url = f"{base_url}/ez/goods/goods_search.php?search_str={encoded_query}"
+                    
+                    # 검색 로깅
+                    self.logger.info(f"Trying search URL: {search_url}")
+                    
+                    # 검색 페이지 로드 시도 (여러 번 재시도)
+                    goto_success = False
+                    goto_retries = 3
+                    
+                    for goto_attempt in range(goto_retries):
                         try:
-                            page.evaluate(js_code)
-                            self._wait_for_load_state(page)
-                            next_page_clicked = True
-                            self.logger.info(f"Moved to page {page_num + 1} (JS).")
-                        except Exception as js_e:
-                            self.logger.warning(f"JS paging failed: {js_e}. Trying href.")
-                    else:
-                        self.logger.warning("JS code template missing.")
-                # Try href paging
-                if not next_page_clicked and href_next_page_locator.is_visible(timeout=2000):
-                    if self._click_locator(href_next_page_locator):
-                        self._wait_for_load_state(page)
-                        next_page_clicked = True
-                        self.logger.info(f"Moved to page {page_num + 1} (href).")
-                    else:
-                        self.logger.warning(f"Failed to click href next link.")
-
-                if not next_page_clicked:
-                    self.logger.info(f"No more pages found after page {page_num}.")
+                            response = page.goto(
+                                search_url, 
+                                wait_until="domcontentloaded", 
+                                timeout=20000  # 20초로 감소
+                            )
+                            goto_success = True
+                            break
+                        except Exception as goto_error:
+                            self.logger.warning(f"Navigation error for {search_url} (attempt {goto_attempt+1}/{goto_retries}): {goto_error}")
+                            # 짧은 대기 후 재시도
+                            time.sleep(1)
+                    
+                    if not goto_success:
+                        self.logger.warning(f"Failed to navigate to {search_url} after {goto_retries} attempts")
+                        continue
+                    
+                    # 응답 확인
+                    if not response:
+                        self.logger.warning(f"No response for search URL: {search_url}")
+                        continue
+                        
+                    if not response.ok:
+                        self.logger.warning(f"HTTP error for search URL: {search_url} (Status: {response.status})")
+                        continue
+                    
+                    # 페이지 로드 대기 (더 짧은 타임아웃)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=10000)  # 10초로 감소
+                    except Exception as e:
+                        self.logger.info(f"Network idle timeout for {search_url}: {e}")
+                        # 계속 진행 (완전히 로드되지 않아도 결과가 있을 수 있음)
+                    
+                    # 짧은 대기 시간 추가 (페이지 안정화)
+                    time.sleep(0.5)
+                    
+                    # 검색 결과 추출
+                    try:
+                        # 검색 결과 컨테이너 확인 (다양한 선택자 시도)
+                        result_selectors = [
+                            "ul.prd_list",
+                            "div.prd_list_wrap",
+                            "table.mall_list",
+                            "div.product_list",
+                            ".prd-list",
+                            ".best100_tab",
+                            ".goods-list", 
+                            ".product-grid"
+                        ]
+                        
+                        found_container = False
+                        result_container = None
+                        
+                        for selector in result_selectors:
+                            try:
+                                result_container = page.locator(selector)
+                                if result_container.count() > 0:
+                                    self.logger.info(f"Found container with selector: {selector}")
+                                    found_container = True
+                                    break
+                            except Exception as container_error:
+                                self.logger.debug(f"Error checking container {selector}: {container_error}")
+                        
+                        # 컨테이너를 찾지 못하면 body 전체에서 item 탐색 시도
+                        if not found_container:
+                            self.logger.info(f"No specific container found, searching in entire body")
+                            result_container = page.locator("body")  # 전체 페이지에서 탐색
+                        
+                        # 검색 결과 아이템 확인 (다양한 선택자 시도)
+                        item_selectors = [
+                            "li.prd",
+                            "ul.prd_list li", 
+                            "table.mall_list td.prd", 
+                            "div.product_list .item", 
+                            ".prd-list .prd-item", 
+                            ".product",
+                            ".goods-item",
+                            ".product-grid-item"
+                        ]
+                        
+                        result_items = None
+                        count = 0
+                        
+                        for selector in item_selectors:
+                            try:
+                                # 컨테이너 내에서 검색
+                                if found_container:
+                                    result_items = result_container.locator(selector)
+                                # 전체 페이지에서 검색
+                                else:
+                                    result_items = page.locator(selector)
+                                
+                                count = result_items.count()
+                                if count > 0:
+                                    self.logger.info(f"Found {count} items with selector: {selector}")
+                                    break
+                            except Exception as item_selector_error:
+                                self.logger.debug(f"Error with item selector {selector}: {item_selector_error}")
+                        
+                        # 아이템을 찾지 못하면 마지막 대안으로 페이지 내 모든 a 태그 중 상품 이미지가 있는 것 찾기
+                        if not result_items or count == 0:
+                            try:
+                                self.logger.info("Trying to find product links with images as last resort")
+                                # 이미지가 포함된 링크 찾기
+                                image_links = page.locator("a:has(img)")
+                                count = image_links.count()
+                                if count > 0:
+                                    self.logger.info(f"Found {count} potential product links with images")
+                                    result_items = image_links
+                                else:
+                                    self.logger.info(f"No search results for '{processed_query}' on {base_url}")
+                                    continue
+                            except Exception as fallback_error:
+                                self.logger.warning(f"Error in fallback search: {fallback_error}")
+                                self.logger.info(f"No search results for '{processed_query}' on {base_url}")
+                                continue
+                        
+                        self.logger.info(f"Found {count} search results for '{processed_query}' on {base_url}")
+                        
+                        # 각 결과 항목 처리
+                        products = []
+                        for i in range(min(count, max_items)):
+                            try:
+                                item_locator = result_items.nth(i)
+                                
+                                # 직접 데이터 추출 시도
+                                try:
+                                    item_data = self._extract_list_item(item_locator)
+                                except Exception as extract_error:
+                                    self.logger.warning(f"Error extracting item #{i}: {extract_error}")
+                                    # 간단한 정보만 추출하는 대체 로직
+                                    item_data = self._extract_minimal_item_data(item_locator, i)
+                                
+                                if item_data:
+                                    # 제품 상세 정보 얻기
+                                    try:
+                                        product = self._get_product_details_sync_playwright(item_data)
+                                        if product and self._validate_and_normalize_product(product):
+                                            products.append(product)
+                                            self.logger.debug(f"Added product: {product.name}")
+                                    except Exception as product_error:
+                                        self.logger.warning(f"Error getting product details for item #{i}: {product_error}")
+                                        # 최소한의 제품 정보로 생성
+                                        if 'title' in item_data and item_data['title']:
+                                            minimal_product = Product(
+                                                id=item_data.get('product_id', f"item_{i}_{int(time.time())}"),
+                                                name=item_data['title'],
+                                                source="koryo",
+                                                price=item_data.get('price', 0),
+                                                url=item_data.get('link', ''),
+                                                image_url=item_data.get('image', '')
+                                            )
+                                            products.append(minimal_product)
+                                            self.logger.debug(f"Added minimal product: {minimal_product.name}")
+                            except Exception as item_ex:
+                                self.logger.warning(f"Error processing search result item #{i}: {item_ex}")
+                                continue
+                                
+                        if products:
+                            all_results.extend(products)
+                            success = True
+                            self.logger.info(f"Successfully extracted {len(products)} products from {base_url}")
+                            
+                            # 충분한 결과를 얻었으면 중단
+                            if len(all_results) >= max_items:
+                                self.logger.info(f"Reached maximum items limit ({max_items})")
+                                break
+                                
+                    except Exception as extract_ex:
+                        self.logger.error(f"Error extracting search results from {base_url}: {extract_ex}")
+                        continue
+                        
+                finally:
+                    # 페이지 및 컨텍스트 닫기
+                    try:
+                        if page:
+                            page.close()
+                        self._close_thread_context()
+                    except Exception as e:
+                        self.logger.warning(f"Error closing page/context: {e}")
+                
+                # 성공했고 충분한 결과가 있으면 다음 URL 시도하지 않음
+                if success and len(all_results) >= max_items:
                     break
-                page_num += 1
-            # --- End Pagination Loop --- #
-            # \"\"\" --- End Scraping Logic --- \"\"\"
+                    
+            except Exception as e:
+                self.logger.error(f"Error searching {base_url} for '{processed_query}': {e}", exc_info=True)
+                continue
 
-        # --- General Exception Handling --- #
-        except Exception as e:
-            self.logger.error(f"Major error during Koryo search process for '{query}': {e}", exc_info=True)
-            # products list will contain whatever was scraped before the error
-        # --- End General Exception Handling --- #
+        # 중복 결과 제거 (URL 기준)
+        unique_products = []
+        seen_urls = set()
+        
+        for product in all_results:
+            if product.url not in seen_urls:
+                seen_urls.add(product.url)
+                unique_products.append(product)
 
-        # --- Cleanup --- #
-        finally:
-            self._close_thread_context() # Ensure context is always closed
-        # --- End Cleanup --- #
+        # 결과 정렬 (가격 오름차순)
+        unique_products.sort(key=lambda p: p.price if p.price is not None else float('inf'))
+        
+        # 결과 캐싱
+        if self.cache and unique_products:
+            self.logger.info(f"Caching {len(unique_products)} search results for '{query}'")
+            self.cache.set(cache_key, unique_products, ttl=3600)  # 1시간 캐싱
+        
+        # 검색 결과가 없으면 "No match" 제품 반환
+        if not unique_products:
+            self.logger.warning(f"No products found for '{query}'")
+            no_match = self._create_no_match_product(query)
+            return [no_match]
+            
+        return unique_products[:max_items]
 
-        self.logger.info(f"Finished Koryo search for '{query}'. Found {len(products)} products.")
-        return products
+    def _create_no_match_product(self, query: str, is_error: bool = False) -> Product:
+        """검색 결과 없거나 오류 발생 시 기본 제품 생성"""
+        prefix = "검색 오류" if is_error else "동일상품 없음"
+        
+        # 현재 타임스탬프로 고유한 ID 생성
+        timestamp = int(datetime.now().timestamp())
+        product_id = f"no_match_{timestamp}"
+        
+        # 고유 ID 기반 가상 이미지 URL 생성
+        image_url = f"https://koreagift.com/ez/upload/mall/shop_{timestamp}_0.jpg"
+        
+        return Product(
+            id=product_id,
+            name=f"{prefix} - {query}",
+            source="koryo",
+            price=0,
+            url="",
+            image_url=image_url  # 타임스탬프 기반 이미지 URL 사용
+        )
+        
+    def _validate_and_normalize_product(self, product: Product) -> bool:
+        """
+        제품 데이터 유효성 검증 및 이미지 URL 표준화
+        
+        Args:
+            product: 검증할 제품 객체
+            
+        Returns:
+            bool: 유효한 제품인지 여부
+        """
+        if not product:
+            return False
+            
+        # 1. 필수 필드 검증
+        required_fields = {
+            'name': product.name,
+            'url': product.url,
+            'source': product.source
+        }
+        
+        for field, value in required_fields.items():
+            if not value:
+                self.logger.warning(f"Missing required field: {field}")
+                return False
+        
+        # 2. 이미지 URL 처리
+        if not product.image_url or product.image_url == "https://koreagift.com/img/ico_shop.gif":
+            # 기본 이미지를 사용하지 않고 상품 ID를 활용한 실제 이미지 URL 패턴 적용
+            if hasattr(product, 'id') and product.id:
+                # 상품 ID가 있는 경우 해당 ID를 활용한 예상 이미지 URL 생성
+                product_id = product.id
+                if "adpanchok.co.kr" in product.url:
+                    # 예: https://adpanchok.co.kr/ez/upload/mall/shop_상품ID_0.jpg
+                    product.image_url = f"https://adpanchok.co.kr/ez/upload/mall/shop_{product_id}_0.jpg"
+                else:
+                    # 예: https://koreagift.com/ez/upload/mall/shop_상품ID_0.jpg
+                    product.image_url = f"https://koreagift.com/ez/upload/mall/shop_{product_id}_0.jpg"
+                self.logger.info(f"상품 '{product.name}'의 이미지 URL 없음, ID 기반 URL 생성: {product.image_url}")
+            else:
+                # ID를 사용할 수 없는 경우 기본 이미지 사용
+                product.image_url = "https://koreagift.com/img/ico_shop.gif"  # 기본 이미지 설정
+                self.logger.warning(f"상품 '{product.name}'의 이미지 URL이 없어 기본 이미지를 사용합니다.")
+        else:
+            # 2.1 상대 경로를 절대 경로로 변환
+            if not product.image_url.startswith(('http://', 'https://', '//')):
+                if product.image_url.startswith('/'):
+                    # 루트 상대 경로
+                    if "adpanchok.co.kr" in product.url:
+                        product.image_url = f"https://adpanchok.co.kr{product.image_url}"
+                    else:
+                        product.image_url = f"https://koreagift.com{product.image_url}"
+                else:
+                    # 상대 경로
+                    product.image_url = urljoin(product.url, product.image_url)
+                    
+            # 2.2 프로토콜 표준화
+            if product.image_url.startswith('http:'):
+                product.image_url = 'https:' + product.image_url[5:]
+            elif product.image_url.startswith('//'):
+                product.image_url = 'https:' + product.image_url
+        
+        # 3. 이미지 갤러리 처리
+        if product.image_gallery:
+            normalized_gallery = []
+            for img_url in product.image_gallery:
+                if not img_url:
+                    continue
+                    
+                # 3.1 상대 경로를 절대 경로로 변환
+                if not img_url.startswith(('http://', 'https://', '//')):
+                    if img_url.startswith('/'):
+                        # 루트 상대 경로
+                        if "adpanchok.co.kr" in product.url:
+                            img_url = f"https://adpanchok.co.kr{img_url}"
+                        else:
+                            img_url = f"https://koreagift.com{img_url}"
+                    else:
+                        # 상대 경로
+                        img_url = urljoin(product.url, img_url)
+                        
+                # 3.2 프로토콜 표준화
+                if img_url.startswith('http:'):
+                    img_url = 'https:' + img_url[5:]
+                elif img_url.startswith('//'):
+                    img_url = 'https:' + img_url
+                    
+                normalized_gallery.append(img_url)
+                
+            product.image_gallery = normalized_gallery
+        
+        return True
 
     def _get_product_details_sync_playwright(self, item: Dict) -> Optional[Product]:
         """상품 상세 정보 추출 (Playwright 동기)"""
@@ -1165,5 +1384,106 @@ class KoryoScraper(BaseMultiLayerScraper):
             pass # Ensure cleanup
 
         return product
+
+    def _extract_minimal_item_data(self, item_locator: Locator, index: int) -> Optional[Dict]:
+        """최소한의 아이템 데이터 추출 시도 (오류 상황에서 사용)"""
+        minimal_data = {}
+        try:
+            # 제목 추출 시도
+            try:
+                # 1. 직접 텍스트 추출
+                title = item_locator.text_content()
+                
+                # 2. 내부 텍스트 노드 중 가장 긴 것 찾기
+                if not title or len(title.strip()) < 3:
+                    text_nodes = item_locator.locator("text")
+                    max_len = 0
+                    for i in range(text_nodes.count()):
+                        text = text_nodes.nth(i).text_content()
+                        if text and len(text.strip()) > max_len:
+                            title = text.strip()
+                            max_len = len(title)
+                
+                # 3. 내부 링크 텍스트 추출
+                if not title or len(title.strip()) < 3:
+                    a_tags = item_locator.locator("a")
+                    for i in range(a_tags.count()):
+                        a_text = a_tags.nth(i).text_content()
+                        if a_text and len(a_text.strip()) > 3:
+                            title = a_text.strip()
+                            break
+                
+                minimal_data["title"] = title.strip() if title else f"상품 {index+1}"
+            except:
+                minimal_data["title"] = f"상품 {index+1}"
+            
+            # 링크 추출 시도
+            try:
+                # 1. 아이템 자체가 링크인 경우
+                href = item_locator.get_attribute("href")
+                
+                # 2. 내부 첫 번째 링크 사용
+                if not href:
+                    a_tag = item_locator.locator("a").first
+                    href = a_tag.get_attribute("href")
+                
+                if href:
+                    minimal_data["link"] = urljoin(self.base_url, href.strip())
+                    minimal_data["product_id"] = hashlib.md5(minimal_data["link"].encode()).hexdigest()
+            except:
+                # 링크를 찾지 못하면 임시 ID 생성
+                minimal_data["link"] = ""
+                minimal_data["product_id"] = f"temp_id_{index}_{int(time.time())}"
+            
+            # 이미지 추출 시도
+            try:
+                img_tag = item_locator.locator("img").first
+                if img_tag:
+                    img_src = img_tag.get_attribute("src")
+                    if img_src:
+                        minimal_data["image"] = urljoin(self.base_url, img_src.strip())
+            except:
+                minimal_data["image"] = ""
+            
+            # 가격 추출 시도
+            try:
+                # 1. 가격 관련 클래스 확인
+                price_text = None
+                price_selectors = [".price", "span.price", "div.price", "p.price", "strong.price"]
+                
+                for selector in price_selectors:
+                    try:
+                        price_elem = item_locator.locator(selector).first
+                        if price_elem:
+                            price_text = price_elem.text_content()
+                            if price_text:
+                                break
+                    except:
+                        continue
+                
+                # 2. 가격 텍스트에서 숫자 추출
+                if price_text:
+                    price_match = re.search(r"[\d,]+", price_text)
+                    if price_match:
+                        price_str = price_match.group().replace(",", "")
+                        minimal_data["price"] = float(price_str)
+                    else:
+                        minimal_data["price"] = 0
+                else:
+                    minimal_data["price"] = 0
+            except:
+                minimal_data["price"] = 0
+            
+            return minimal_data
+        except Exception as e:
+            self.logger.warning(f"Error extracting minimal item data: {e}")
+            # 절대 최소한의 데이터
+            return {
+                "title": f"상품 {index+1}",
+                "link": "",
+                "product_id": f"temp_id_{index}_{int(time.time())}",
+                "image": "",
+                "price": 0
+            }
 
         

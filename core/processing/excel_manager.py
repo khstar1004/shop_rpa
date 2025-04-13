@@ -57,6 +57,14 @@ class ExcelManager:
             top=Side(style="thin"),
             bottom=Side(style="thin"),
         )
+        
+        # Add border_style property for worksheet creation
+        self.border_style = Border(
+            left=Side(style="thin"),
+            right=Side(style="thin"),
+            top=Side(style="thin"),
+            bottom=Side(style="thin"),
+        )
 
         # Alignment
         self.center_align = Alignment(horizontal="center", vertical="center")
@@ -660,6 +668,11 @@ class ExcelManager:
                     # 빈 필드에 기본값 설정
                     self._set_default_values(row)
 
+                    # URL에서 @ 기호를 제거하여 Excel 저장 오류 방지 (모든 필드에 적용)
+                    for key, value in row.items():
+                        if isinstance(value, str) and '@' in value:
+                            row[key] = value.replace('@', '')
+                    
                     report_data.append(row)
                     
                     # <<< Logging >>> Check the row added to report_data
@@ -698,18 +711,38 @@ class ExcelManager:
             base_name = os.path.splitext(input_file)[0]
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
+            # 출력 디렉토리 처리: 지정된 디렉토리가 없으면 'output' 디렉토리 사용
             # output_dir이 지정된 경우 해당 디렉토리 사용
             if output_dir:
+                # 출력 디렉토리가 존재하는지 확인하고 없으면 생성
                 os.makedirs(output_dir, exist_ok=True)
                 output_file = os.path.join(output_dir, f'{os.path.basename(base_name)}-result_result_{timestamp}_upload_{timestamp}.xlsx')
             else:
-                output_file = os.path.join('output', f'{base_name}-result_result_{timestamp}_upload_{timestamp}.xlsx')
+                # 기본 output 디렉토리 생성 확인
+                os.makedirs('output', exist_ok=True)
+                output_file = os.path.join('output', f'{os.path.basename(base_name)}-result_result_{timestamp}_upload_{timestamp}.xlsx')
+
+            # 엑셀로 저장 전 데이터 클리닝 최종 확인
+            # IMAGE 함수에서 URL에 @ 기호가 포함되면 오류가 발생할 수 있으므로 제거
+            for col in result_df.columns:
+                if col in ['본사 이미지', '고려기프트 이미지', '네이버 이미지']:
+                    result_df[col] = result_df[col].apply(lambda x: str(x).replace('@', '') if isinstance(x, str) else x)
 
             # 엑셀로 저장
+            self.logger.info(f"Saving Excel file to: {output_file}")
             result_df.to_excel(output_file, index=False)
+            self.logger.info(f"Excel file saved successfully")
 
-            # 포맷팅 적용
-            self.apply_formatting_to_excel(output_file)
+            # 후처리 적용 (@ 기호 제거, 포맷팅, 하이퍼링크 등)
+            try:
+                output_file = self.post_process_excel_file(output_file)
+            except Exception as post_err:
+                self.logger.error(f"Error in post-processing: {str(post_err)}")
+                # 포맷팅 직접 적용 시도
+                try:
+                    self.apply_formatting_to_excel(output_file)
+                except Exception as format_err:
+                    self.logger.error(f"Formatting also failed: {str(format_err)}")
 
             self.logger.info(
                 f"결과 파일 생성 완료: {output_file} (총 {len(report_data)}행)"
@@ -734,12 +767,15 @@ class ExcelManager:
                 error_df = pd.DataFrame(error_data)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 
-                # output_dir이 지정된 경우 해당 디렉토리 사용
+                # output_dir이 지정된 경우 해당 디렉토리 사용, 없으면 생성
                 if output_dir:
-                    error_output_file = os.path.join(output_dir, f'{os.path.basename(base_name)}-error-result_result_{timestamp}_upload_{timestamp}.xlsx')
+                    os.makedirs(output_dir, exist_ok=True)
+                    error_output_file = os.path.join(output_dir, f'error-result_{timestamp}.xlsx')
                 else:
-                    error_output_file = os.path.join('output', f'{os.path.splitext(input_file)[0]}-error-result_result_{timestamp}_upload_{timestamp}.xlsx')
+                    os.makedirs('output', exist_ok=True)
+                    error_output_file = os.path.join('output', f'error-result_{timestamp}.xlsx')
                 
+                # 에러 파일 저장
                 error_df.to_excel(error_output_file, index=False)
 
                 self.logger.warning(
@@ -924,6 +960,10 @@ class ExcelManager:
             if not url:
                 return ""
             try:
+                # @ 기호 제거 (Excel IMAGE 함수에서 문제 발생)
+                if '@' in url:
+                    url = url.replace('@', '')
+                
                 # HTTP를 HTTPS로 변환
                 if url.startswith('http:'):
                     url = 'https:' + url[5:]
@@ -1679,111 +1719,185 @@ class ExcelManager:
         try:
             # 기본 데이터 쓰기
             worksheet.cell(row=row_idx, column=1, value=product.name or "제품명 없음")
-            worksheet.cell(row=row_idx, column=2, value=product.product_code or "코드 없음")
+            worksheet.cell(row=row_idx, column=2, value=product.product_code or product.id or "코드 없음")
             worksheet.cell(row=row_idx, column=3, value=product.price or 0)
             
             # 이미지 URL 처리
             main_image = product.image_url or "이미지 없음"
-            if isinstance(main_image, str) and main_image.startswith(("http://", "https://")):
-                worksheet.cell(row=row_idx, column=4, value=main_image)
+            
+            # 이미지 URL 정규화 및 처리
+            if isinstance(main_image, str) and (main_image.startswith(("http://", "https://")) or main_image.startswith("//")):
+                # 프로토콜 처리
+                if main_image.startswith("http:"):
+                    main_image = "https:" + main_image[5:]
+                elif main_image.startswith("//"):
+                    main_image = "https:" + main_image
+                
+                # @ 기호 제거 (Excel 저장 오류 방지)
+                if '@' in main_image:
+                    main_image = main_image.replace('@', '')
+                
+                # 특수 문자 처리
+                main_image = main_image.replace('\\', '/')
+                main_image = main_image.replace('"', '%22')
+                main_image = main_image.replace(' ', '%20')
+                
+                # 이미지 URL이 있으면 Excel IMAGE 함수 사용
+                # 두 번째 매개변수 2 = 셀에 맞게 크기 조정
+                image_formula = f'=IMAGE("{main_image}", 2)'
+                worksheet.cell(row=row_idx, column=4, value=image_formula)
+                
+                # 이미지 URL도 별도 열에 저장 (디버깅용)
+                worksheet.cell(row=row_idx, column=13, value=main_image)
             else:
-                worksheet.cell(row=row_idx, column=4, value="이미지 URL 없음")
+                # 이미지 URL이 없거나 유효하지 않은 경우 기본 네이버 이미지 사용
+                default_image = "https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png"
+                image_formula = f'=IMAGE("{default_image}", 2)'
+                worksheet.cell(row=row_idx, column=4, value=image_formula)
+                worksheet.cell(row=row_idx, column=13, value="기본 이미지 사용: " + default_image)
                 self.logger.warning(f"Invalid image URL for product {product.name}: {main_image}")
             
             # 이미지 갤러리 처리
             gallery_urls = product.image_gallery or []
             if gallery_urls and isinstance(gallery_urls, list):
-                # 갤러리 이미지 URL들을 쉼표로 구분하여 저장
-                gallery_str = " | ".join(str(url) for url in gallery_urls if isinstance(url, str) and url.startswith(("http://", "https://")))
-                worksheet.cell(row=row_idx, column=5, value=gallery_str or "추가 이미지 없음")
+                # URL 정규화 및 @ 기호 제거 후 갤러리 이미지 URL들을 쉼표로 구분하여 저장
+                normalized_urls = []
+                for url in gallery_urls:
+                    if isinstance(url, str) and (url.startswith(("http://", "https://")) or url.startswith("//")):
+                        # 프로토콜 처리
+                        if url.startswith("http:"):
+                            url = "https:" + url[5:]
+                        elif url.startswith("//"):
+                            url = "https:" + url
+                        
+                        # @ 기호 및 특수문자 처리
+                        url = url.replace('@', '')
+                        url = url.replace('\\', '/')
+                        url = url.replace('"', '%22')
+                        url = url.replace(' ', '%20')
+                        
+                        normalized_urls.append(url)
+                
+                gallery_str = " | ".join(normalized_urls) if normalized_urls else "추가 이미지 없음"
+                worksheet.cell(row=row_idx, column=5, value=gallery_str)
             else:
                 worksheet.cell(row=row_idx, column=5, value="추가 이미지 없음")
             
             # 제품 URL
-            worksheet.cell(row=row_idx, column=6, value=product.url or "URL 없음")
+            product_url = product.url or "URL 없음"
+            # URL에서 @ 기호 제거
+            if isinstance(product_url, str) and '@' in product_url:
+                product_url = product_url.replace('@', '')
+            worksheet.cell(row=row_idx, column=6, value=product_url)
             
             # 소스 정보
             source = product.source or "알 수 없음"
             worksheet.cell(row=row_idx, column=7, value=source)
             
+            # 브랜드 정보 
+            brand = product.brand or "알 수 없음"
+            worksheet.cell(row=row_idx, column=8, value=brand)
+            
+            # 카테고리 정보
+            category = product.category or "알 수 없음"
+            worksheet.cell(row=row_idx, column=9, value=category)
+            
             # 스크래핑 시간
             fetched_at = product.fetched_at or datetime.now().isoformat()
-            worksheet.cell(row=row_idx, column=8, value=fetched_at)
+            worksheet.cell(row=row_idx, column=10, value=fetched_at)
             
-            # 상태 정보
-            if hasattr(product, 'status') and product.status:
-                # product.status 필드가 존재하고 값이 있으면 우선 사용
-                status_msg = product.status
-                # ProductStatus 열거형인 경우 값을 추출
-                if hasattr(status_msg, 'value'):
-                    status_msg = status_msg.value
-                self.logger.debug(f"Using product status field: {status_msg}")
-            else:
-                # 기존 로직 - status 필드가 없는 경우 현재 상태 판단
-                status_msg = "성공"
-                if not product.image_url and not product.image_gallery:
-                    status_msg = "이미지 추출 실패"
-                elif not product.price:
-                    status_msg = "가격 정보 없음"
-            worksheet.cell(row=row_idx, column=9, value=status_msg)
-
-            # 셀 스타일 적용
-            for col in range(1, 10):
-                cell = worksheet.cell(row=row_idx, column=col)
-                cell.border = self.default_border
-                
-                # URL이 있는 셀에 하이퍼링크 스타일 적용
-                if col in [4, 5, 6] and cell.value and cell.value.startswith('http'):
-                    cell.font = self.url_font
-                    cell.hyperlink = cell.value
+            # 추가 제품 정보 (설명, 상세정보 등)
+            description = product.description or ""
+            worksheet.cell(row=row_idx, column=11, value=description)
             
+            # 원본 데이터 (JSON으로 변환하여 저장)
+            if hasattr(product, 'original_input_data') and product.original_input_data:
+                try:
+                    import json
+                    original_data = json.dumps(product.original_input_data, ensure_ascii=False)
+                    worksheet.cell(row=row_idx, column=12, value=str(original_data)[:32000])  # Excel 셀 최대 크기 제한
+                except Exception as json_err:
+                    self.logger.warning(f"Error converting original data to JSON: {str(json_err)}")
+            
+            # 행 높이 조정 (이미지가 잘 표시되도록)
+            worksheet.row_dimensions[row_idx].height = 120
+            
+            # 다음 행 인덱스 반환
             return row_idx + 1
-            
+        
         except Exception as e:
-            self.logger.error(f"Error writing product data: {str(e)}")
-            # 에러 발생 시에도 빈 셀 없이 에러 정보 기록
-            for col in range(1, 10):
-                cell = worksheet.cell(row=row_idx, column=col)
-                cell.value = "데이터 처리 오류"
-                cell.border = self.default_border
-                cell.fill = self.error_fill
+            self.logger.error(f"Error writing product data to Excel: {str(e)}", exc_info=True)
+            # 오류가 발생해도 다음 행으로 진행
             return row_idx + 1
 
     def create_worksheet(self, workbook, sheet_name: str) -> Worksheet:
-        """Create a new worksheet with headers"""
-        worksheet = workbook.create_sheet(title=sheet_name)
-        
-        # 헤더 정의
-        headers = [
-            "제품명",
-            "제품코드",
-            "가격",
-            "메인이미지",
-            "추가이미지",
-            "제품URL",
-            "소스",
-            "수집시간",
-            "상태"
-        ]
-        
-        # 헤더 쓰기
-        for col, header in enumerate(headers, 1):
-            cell = worksheet.cell(row=1, column=col)
-            cell.value = header
-            cell.font = self.header_font
-            cell.fill = self.header_fill
-            cell.border = self.default_border
+        """Create a new worksheet with headers and styling"""
+        try:
+            worksheet = workbook.create_sheet(title=sheet_name)
             
-        # 열 너비 자동 조정
-        for col in range(1, len(headers) + 1):
-            worksheet.column_dimensions[get_column_letter(col)].width = 20
+            # 기본 헤더 설정
+            headers = [
+                "제품명", 
+                "상품코드", 
+                "가격", 
+                "메인 이미지", 
+                "추가 이미지", 
+                "상품 URL", 
+                "소스", 
+                "브랜드", 
+                "카테고리", 
+                "스크래핑 시간", 
+                "상세 설명",
+                "원본 데이터",
+                "이미지 URL"  # 디버깅용 이미지 URL 열 추가
+            ]
             
-        # URL 열은 더 넓게 설정
-        worksheet.column_dimensions[get_column_letter(4)].width = 40  # 메인이미지
-        worksheet.column_dimensions[get_column_letter(5)].width = 50  # 추가이미지
-        worksheet.column_dimensions[get_column_letter(6)].width = 30  # 제품URL
-        
-        return worksheet
+            # 헤더 쓰기
+            for col_idx, header in enumerate(headers, 1):
+                cell = worksheet.cell(row=1, column=col_idx, value=header)
+                # 헤더 스타일 적용
+                if hasattr(self, 'header_fill') and hasattr(self, 'border_style'):
+                    cell.fill = self.header_fill
+                    cell.border = self.border_style
+                    cell.font = Font(bold=True)
+                    cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            
+            # 열 너비 초기 설정
+            column_widths = {
+                1: 40,  # 제품명
+                2: 15,  # 상품코드
+                3: 15,  # 가격
+                4: 25,  # 메인 이미지
+                5: 25,  # 추가 이미지
+                6: 30,  # 상품 URL
+                7: 15,  # 소스
+                8: 20,  # 브랜드
+                9: 20,  # 카테고리
+                10: 20, # 스크래핑 시간
+                11: 40, # 상세 설명
+                12: 50, # 원본 데이터
+                13: 50, # 이미지 URL
+            }
+            
+            # 열 너비 설정
+            for col_idx, width in column_widths.items():
+                column_letter = get_column_letter(col_idx)
+                worksheet.column_dimensions[column_letter].width = width
+            
+            # 필터 추가
+            worksheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
+            
+            # 첫 행 고정
+            worksheet.freeze_panes = "A2"
+            
+            return worksheet
+            
+        except Exception as e:
+            self.logger.error(f"Error creating worksheet: {str(e)}", exc_info=True)
+            # 에러 시 기본 워크시트 반환
+            worksheet = workbook.create_sheet(title=sheet_name)
+            worksheet.cell(row=1, column=1, value="워크시트 생성 중 오류 발생")
+            return worksheet
 
     def save_products(self, products: List[Product], output_path: str, sheet_name: str = None, naver_results: List[Product] = None):
         """Save products to Excel file with proper formatting and error handling"""
@@ -1811,7 +1925,7 @@ class ExcelManager:
             if products:
                 self.logger.info(f"Writing {len(products)} products to Excel")
                 for product in products:
-                    if product.source == 'koryo':  # 고려기프트 제품 확인
+                    if hasattr(product, 'source') and product.source == 'koryo':  # 고려기프트 제품 확인
                         self.logger.debug(f"Processing Koryo product: {product.name}")
                     current_row = self._write_product_data(worksheet, current_row, product)
             
@@ -1819,19 +1933,32 @@ class ExcelManager:
             if naver_results:
                 self.logger.info(f"Writing {len(naver_results)} Naver results to Excel")
                 for product in naver_results:
-                    if product.id != "no_match": # no_match 제품은 건너뜁니다
+                    if hasattr(product, 'id') and product.id != "no_match": # no_match 제품은 건너뜁니다
                         self.logger.debug(f"Processing Naver product: {product.name}")
                         current_row = self._write_product_data(worksheet, current_row, product)
             
             # 결과 요약 추가
-            total_products = (len(products) if products else 0) + (len([p for p in naver_results if p.id != "no_match"]) if naver_results else 0)
+            total_products = (len(products) if products else 0) + (len([p for p in naver_results if hasattr(p, 'id') and p.id != "no_match"]) if naver_results else 0)
             summary_row = current_row + 1
             worksheet.cell(row=summary_row, column=1, value=f"총 제품 수: {total_products}")
             worksheet.cell(row=summary_row, column=2, value=f"처리 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             
             # 파일 저장
-            workbook.save(output_path)
-            self.logger.info(f"Successfully saved {total_products} products to {output_path}")
+            try:
+                self.logger.info(f"Saving Excel file to: {output_path}")
+                workbook.save(output_path)
+                self.logger.info(f"Successfully saved {total_products} products to {output_path}")
+                
+                # 파일 후처리 (포맷팅, @ 기호 제거 등)
+                processed_path = self.post_process_excel_file(output_path)
+                if processed_path != output_path:
+                    self.logger.info(f"Post-processed Excel file: {processed_path}")
+                    return processed_path
+                
+                return output_path
+            except Exception as save_err:
+                self.logger.error(f"Error saving Excel file: {str(save_err)}")
+                raise
             
         except Exception as e:
             self.logger.error(f"Error saving products to Excel: {str(e)}", exc_info=True)
@@ -1852,14 +1979,16 @@ class ExcelManager:
 
             # 파일이 존재하는지 확인
             if not os.path.exists(file_path):
-                raise FileNotFoundError(f"File not found: {file_path}")
+                self.logger.error(f"File not found: {file_path}")
+                return file_path
 
             # 파일이 열려있는지 확인
             try:
                 with open(file_path, 'a'):
                     pass
             except PermissionError:
-                raise PermissionError(f"File is currently in use: {file_path}")
+                self.logger.error(f"File is currently in use: {file_path}")
+                return file_path
 
             # 임시 파일 경로 생성
             temp_dir = os.path.dirname(file_path)
@@ -1873,18 +2002,30 @@ class ExcelManager:
                 if df[column].dtype == 'object':  # 문자열 타입 컬럼만 처리
                     df[column] = df[column].astype(str).str.replace('@', '', regex=False)
 
+            # 특별히 IMAGE 함수가 포함된 셀 처리 
+            image_columns = ['본사 이미지', '고려기프트 이미지', '네이버 이미지']
+            for col in image_columns:
+                if col in df.columns:
+                    # IMAGE 함수 내의 URL에서도 @ 제거
+                    df[col] = df[col].apply(
+                        lambda x: x.replace('@', '') if isinstance(x, str) else x
+                    )
+
             # 임시 파일에 저장
+            self.logger.info(f"Saving cleaned Excel file to: {temp_file}")
             df.to_excel(temp_file, index=False)
 
             # 원본 파일 삭제 및 임시 파일 이동
             try:
                 os.remove(file_path)
                 os.rename(temp_file, file_path)
+                self.logger.info(f"Successfully replaced original file with cleaned version")
             except Exception as e:
                 # 실패 시 임시 파일 삭제
+                self.logger.error(f"Error replacing original file: {str(e)}")
                 if os.path.exists(temp_file):
                     os.remove(temp_file)
-                raise e
+                return file_path
 
             self.logger.info(f"Successfully removed @ symbols from: {file_path}")
             return file_path
@@ -1892,3 +2033,165 @@ class ExcelManager:
         except Exception as e:
             self.logger.error(f"Error removing @ symbols from Excel: {str(e)}", exc_info=True)
             return file_path
+
+    def post_process_excel_file(self, file_path: str) -> str:
+        """
+        엑셀 파일에 대한 후처리를 수행합니다.
+        1. @ 기호 제거
+        2. 이미지 수식 개선
+        3. 포맷팅 적용
+        4. 하이퍼링크 추가
+        
+        Args:
+            file_path: 처리할 엑셀 파일 경로
+            
+        Returns:
+            str: 처리된 파일 경로
+        """
+        try:
+            if not os.path.exists(file_path):
+                self.logger.error(f"File not found for post-processing: {file_path}")
+                return file_path
+                
+            self.logger.info(f"Post-processing Excel file: {file_path}")
+            
+            # 1. @ 기호 제거
+            cleaned_file = self.remove_at_symbol(file_path)
+            
+            # 2. 이미지 수식 개선
+            try:
+                self._fix_image_formulas(cleaned_file)
+                self.logger.info(f"Fixed image formulas in: {cleaned_file}")
+            except Exception as img_err:
+                self.logger.error(f"Error fixing image formulas: {str(img_err)}")
+            
+            # 3. 포맷팅 적용
+            try:
+                self.apply_formatting_to_excel(cleaned_file)
+                self.logger.info(f"Applied formatting to: {cleaned_file}")
+            except Exception as format_err:
+                self.logger.error(f"Error applying formatting: {str(format_err)}")
+                
+            # 4. 하이퍼링크 추가
+            try:
+                linked_file = self.add_hyperlinks_to_excel(cleaned_file)
+                if linked_file != cleaned_file:
+                    self.logger.info(f"Added hyperlinks, new file: {linked_file}")
+                    return linked_file
+            except Exception as link_err:
+                self.logger.error(f"Error adding hyperlinks: {str(link_err)}")
+            
+            return cleaned_file
+        except Exception as e:
+            self.logger.error(f"Error in post-processing Excel file: {str(e)}")
+            return file_path
+            
+    def _fix_image_formulas(self, file_path: str) -> None:
+        """이미지 표시 관련 수식을 수정합니다."""
+        try:
+            # openpyxl을 사용하여 엑셀 파일 로드
+            wb = load_workbook(file_path)
+            made_changes = False
+            
+            # 모든 시트 검사
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                
+                # 이미지 URL이 있는 열 찾기 (보통 13번 열)
+                image_url_col = None
+                for i, cell in enumerate(ws[1], 1):
+                    if cell.value == "이미지 URL":
+                        image_url_col = i
+                        break
+                
+                # 모든 셀을 검사하여 이미지 수식 찾기
+                for row_idx, row in enumerate(ws.iter_rows(min_row=2), 2):  # 헤더 제외
+                    # 1. IMAGE 수식이 있는 셀 확인 (4번째 열)
+                    image_cell = row[3]  # 4번째 열 (0-based index)
+                    
+                    # 2. 원본 이미지 URL 가져오기 (이미지 URL 열이 있는 경우)
+                    original_url = None
+                    if image_url_col and image_url_col <= len(row):
+                        url_cell = row[image_url_col-1]  # 0-based index
+                        if url_cell.value and isinstance(url_cell.value, str) and (
+                            url_cell.value.startswith("http") or
+                            url_cell.value.startswith("기본 이미지 사용:")
+                        ):
+                            # URL 추출
+                            if url_cell.value.startswith("기본 이미지 사용:"):
+                                parts = url_cell.value.split(":", 1)
+                                if len(parts) > 1:
+                                    original_url = parts[1].strip()
+                            else:
+                                original_url = url_cell.value
+                    
+                    # 3. 이미지 수식 처리
+                    if isinstance(image_cell.value, str) and image_cell.value.startswith('=IMAGE('):
+                        # 원래 수식 저장
+                        original_formula = image_cell.value
+                        
+                        # 수식에서 URL 추출
+                        url_match = re.search(r'=IMAGE\("([^"]+)"', original_formula)
+                        url = None
+                        
+                        if url_match:
+                            url = url_match.group(1)
+                        elif original_url:  # 수식에서 URL을 추출할 수 없지만 원본 URL이 있는 경우
+                            url = original_url
+                        
+                        if url:
+                            # URL 정상화
+                            if url.startswith('http:'):
+                                url = 'https:' + url[5:]
+                            elif url.startswith('//'):
+                                url = 'https:' + url
+                            
+                            # @ 기호 제거
+                            if '@' in url:
+                                url = url.replace('@', '')
+                            
+                            # 특수 문자 처리
+                            url = url.replace('\\', '/')
+                            url = url.replace('"', '%22')
+                            url = url.replace(' ', '%20')
+                            
+                            # 수정된 수식 적용 (2 = 셀에 맞게 크기 조정)
+                            new_formula = f'=IMAGE("{url}", 2)'
+                            if new_formula != original_formula:
+                                image_cell.value = new_formula
+                                made_changes = True
+                                self.logger.debug(f"이미지 수식 수정: {sheet_name} 시트 {row_idx}행")
+                    
+                    # 4. 이미지 수식이 없지만 원본 URL이 있는 경우 수식 생성
+                    elif original_url and (
+                        not image_cell.value or 
+                        not isinstance(image_cell.value, str) or 
+                        not image_cell.value.startswith('=IMAGE(')
+                    ):
+                        # URL 정상화
+                        if original_url.startswith('http:'):
+                            original_url = 'https:' + original_url[5:]
+                        elif original_url.startswith('//'):
+                            original_url = 'https:' + original_url
+                        
+                        # @ 기호 제거
+                        if '@' in original_url:
+                            original_url = original_url.replace('@', '')
+                        
+                        # 특수 문자 처리
+                        original_url = original_url.replace('\\', '/')
+                        original_url = original_url.replace('"', '%22')
+                        original_url = original_url.replace(' ', '%20')
+                        
+                        # 새 수식 생성
+                        new_formula = f'=IMAGE("{original_url}", 2)'
+                        image_cell.value = new_formula
+                        made_changes = True
+                        self.logger.debug(f"이미지 수식 새로 추가: {sheet_name} 시트 {row_idx}행")
+            
+            # 변경 사항이 있으면 저장
+            if made_changes:
+                wb.save(file_path)
+                self.logger.info(f"이미지 수식 수정 완료: {file_path}")
+        except Exception as e:
+            self.logger.error(f"이미지 수식 수정 중 오류: {str(e)}", exc_info=True)

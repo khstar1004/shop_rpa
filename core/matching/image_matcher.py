@@ -1,4 +1,6 @@
 import concurrent.futures
+import hashlib
+import io
 import logging
 import os
 from collections import Counter
@@ -372,33 +374,117 @@ class ImageMatcher:
             return False
 
     def _get_processed_image(
-        self, url: str, max_dimension: int = None
+        self, url: str, max_dimension: Optional[int] = None
     ) -> Optional[Image.Image]:
-        """Downloads, preprocesses (removes bg), and caches the image."""
-        # 캐시 키에 해상도 정보 포함
-        resolution_suffix = f"_res{max_dimension}" if max_dimension else ""
-        cache_key = f"processed_image{resolution_suffix}|{url}"
-
-        if self.cache:
-            cached_image = self.cache.get(cache_key)
-            if cached_image is not None:
-                return cached_image
-
+        """Download and preprocess an image from a URL"""
         try:
-            img = self._download_and_preprocess(url, max_dimension)
-            if img:
-                # 이미지 크기 제한 (메모리 최적화)
-                if img.size[0] * img.size[1] > 1000000:  # 1메가픽셀 이상
-                    img = img.resize((int(img.size[0] * 0.7), int(img.size[1] * 0.7)), Image.LANCZOS)
+            # URL 유효성 검사 추가
+            if not url or not isinstance(url, str) or len(url) < 10:
+                self.logger.warning(f"Invalid image URL: {url}")
+                return None
                 
+            # URL 프로토콜 확인 및 표준화
+            if not url.startswith(('http://', 'https://')):
+                if url.startswith('//'):
+                    url = 'https:' + url
+                else:
+                    self.logger.warning(f"URL missing protocol: {url}")
+                    # 로컬 파일인지 확인
+                    if os.path.exists(url):
+                        self.logger.info(f"Loading local image file: {url}")
+                    else:
+                        self.logger.error(f"Cannot process URL without protocol: {url}")
+                        return None
+            
+            # 캐시에서 이미지 조회
+            cache_key = f"image_data_{hashlib.md5(url.encode()).hexdigest()}"
+            if self.cache:
+                cached_img = self.cache.get(cache_key)
+                if cached_img and isinstance(cached_img, bytes):
+                    try:
+                        img = Image.open(io.BytesIO(cached_img))
+                        # 메모리에서 이미지 로드 확인
+                        img.load()
+                        self.logger.debug(f"Retrieved image from cache: {url}")
+                        return self._resize_image(img, max_dimension)
+                    except Exception as e:
+                        self.logger.warning(f"Error loading cached image for {url}: {e}")
+                        # 캐시에서 로드 실패 시 다시 다운로드 시도
+            
+            # User-Agent 설정
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+            
+            # 로컬 파일인지 URL인지 확인
+            if os.path.exists(url):
+                try:
+                    img = Image.open(url)
+                    img.load()  # 메모리에 로드
+                    return self._resize_image(img, max_dimension)
+                except Exception as e:
+                    self.logger.error(f"Error loading local image from {url}: {e}")
+                    return None
+                    
+            # URL에서 이미지 다운로드
+            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            
+            if response.status_code != 200:
+                self.logger.warning(f"Failed to download image from {url}: HTTP {response.status_code}")
+                return None
+                
+            # 이미지 데이터 검증
+            content_type = response.headers.get('Content-Type', '')
+            if not content_type.startswith('image/'):
+                self.logger.warning(f"URL does not return an image: {url} (Content-Type: {content_type})")
+                # 이미지가 아닌 경우 진행 시도 (일부 서버는 Content-Type을 잘못 설정하기도 함)
+            
+            try:
+                img = Image.open(io.BytesIO(response.content))
+                img.load()  # 메모리에 로드하여 이미지 검증
+                
+                # 캐시에 저장
                 if self.cache:
-                    # 캐시 TTL을 이미지 크기에 따라 조정 (큰 이미지는 짧은 TTL)
-                    ttl = 3600 if img.size[0] * img.size[1] > 500000 else 86400
-                    self.cache.set(cache_key, img, ttl=ttl)
-                return img
-        except Exception as e:
-            self.logger.error(f"Failed to process image: {e}")
+                    self.cache.set(cache_key, response.content, ttl=86400*7)  # 7일 캐싱
+                
+                return self._resize_image(img, max_dimension)
+            except Exception as e:
+                self.logger.error(f"Error processing image from {url}: {e}")
+                return None
+                
+        except requests.RequestException as e:
+            self.logger.warning(f"Error downloading image from {url}: {e}")
             return None
+        except Exception as e:
+            self.logger.error(f"Unexpected error processing image from {url}: {e}", exc_info=True)
+            return None
+
+    def _resize_image(self, img: Image.Image, max_dimension: Optional[int] = None) -> Image.Image:
+        """이미지 크기 조정 (메모리 사용량과 계산 시간 최적화)"""
+        try:
+            if not max_dimension:
+                return img
+                
+            # 원본 크기
+            width, height = img.size
+            
+            # 이미 충분히 작은 이미지면 그대로 반환
+            if width <= max_dimension and height <= max_dimension:
+                return img
+                
+            # 비율 유지하며 크기 조정
+            if width > height:
+                new_width = max_dimension
+                new_height = int(height * (max_dimension / width))
+            else:
+                new_height = max_dimension
+                new_width = int(width * (max_dimension / height))
+                
+            # 크기 조정 시 안티앨리어싱 적용
+            return img.resize((new_width, new_height), Image.LANCZOS)
+        except Exception as e:
+            self.logger.error(f"Error resizing image: {e}")
+            return img  # 오류 시 원본 반환
 
     def _get_hash_similarity(self, img1: Image.Image, img2: Image.Image) -> float:
         """Calculates hash similarity, potentially using cached hashes."""

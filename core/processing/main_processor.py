@@ -328,8 +328,11 @@ class ProductProcessor:
             str: 최종 출력 파일 경로
         """
         try:
+            # 0. 기본 엑셀 후처리 (@ 기호 제거, 이미지 수식 개선 등)
+            processed_file = self.excel_manager.post_process_excel_file(output_file)
+            
             # 1. 하이퍼링크 추가
-            linked_file = self.excel_manager.add_hyperlinks_to_excel(output_file)
+            linked_file = self.excel_manager.add_hyperlinks_to_excel(processed_file)
 
             # 2. 가격 차이가 있는 항목만 필터링
             filtered_file = self.excel_manager.filter_excel_by_price_diff(linked_file)
@@ -1069,7 +1072,7 @@ class ProductProcessor:
 
         # 임계값을 통과한 매칭이 있으면 그 중에서 최저가 선택
         if valid_matches:
-            # 이미지 있는 매칭과 없는 매칭 중 선택 우선순위 결정
+            # 이미지가 있는 매칭과 없는 매칭 중 선택 우선순위 결정
             valid_with_image = [
                 m for m in valid_matches if m.image_similarity >= image_threshold
             ]
@@ -1369,7 +1372,14 @@ class ProductProcessor:
                 koryo_products = self.koryo_scraper.search_product(search_query, max_items=max_items)
                 if koryo_products:
                     self.logger.info(f"Found {len(koryo_products)} products from Koryo Gift")
-                    all_products.extend(koryo_products)
+                    # 타임스탬프 추가
+                    for product in koryo_products:
+                        product.fetched_at = datetime.now().isoformat()
+                        # 유효성 검증
+                        if self.validate_product_data(product):
+                            all_products.append(product)
+                        else:
+                            self.logger.warning(f"Invalid product data: {product.name}")
                 else:
                     self.logger.warning("No products found from Koryo Gift")
             except Exception as e:
@@ -1380,13 +1390,24 @@ class ProductProcessor:
                 naver_products = self.naver_crawler.search_product(search_query, max_items=max_items)
                 if naver_products:
                     self.logger.info(f"Found {len(naver_products)} products from Naver")
-                    all_products.extend(naver_products)
+                    # 타임스탬프 추가
+                    for product in naver_products:
+                        product.fetched_at = datetime.now().isoformat()
+                        # 유효성 검증
+                        if self.validate_product_data(product):
+                            all_products.append(product)
+                        else:
+                            self.logger.warning(f"Invalid product data: {product.name}")
                     
                     # 네이버 검색 결과만 별도로 저장
                     naver_sheet_name = f"naver_{datetime.now().strftime('%Y%m%d_%H%M')}"
                     naver_output_path = output_path.replace('.xlsx', '_naver.xlsx')
                     self.excel_manager.save_products(naver_products, naver_output_path, naver_sheet_name)
-                    self.logger.info(f"Successfully saved Naver products to: {naver_output_path}")
+                    
+                    # 네이버 결과 엑셀 파일 후처리
+                    processed_naver_path = self.excel_manager.post_process_excel_file(naver_output_path)
+                    
+                    self.logger.info(f"Successfully saved Naver products to: {processed_naver_path}")
                 else:
                     self.logger.warning("No products found from Naver")
             except Exception as e:
@@ -1402,9 +1423,12 @@ class ProductProcessor:
             
             # 모든 검색 결과를 엑셀로 저장
             sheet_name = f"search_{datetime.now().strftime('%Y%m%d_%H%M')}"
-            self.excel_manager.save_products(all_products, output_path, sheet_name)
+            output_file = self.excel_manager.save_products(all_products, output_path, sheet_name)
             
-            self.logger.info(f"Successfully saved all search results to: {output_path}")
+            # 후처리 수행
+            processed_output_file = self.excel_manager.post_process_excel_file(output_file)
+            
+            self.logger.info(f"Successfully saved all search results to: {processed_output_file}")
             
         except Exception as e:
             self.logger.error(f"Error processing search results: {str(e)}", exc_info=True)
