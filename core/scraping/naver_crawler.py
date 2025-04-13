@@ -753,55 +753,49 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
 
     def _load_api_keys(self) -> Dict[str, str]:
         """
-        .env 파일이나 환경 변수에서 네이버 API 키 로드
-        config.ini 파일에서도 대체 값을 찾음
+        config.ini 파일에서 네이버 API 키 로드
+        config.ini에 없으면 .env 파일에서 찾음
         """
         import os
-
         from dotenv import load_dotenv
 
-        # .env 파일 로드
-        load_dotenv()
+        # config.ini 파일에서 먼저 찾기
+        try:
+            config = configparser.ConfigParser()
+            config_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                "config.ini",
+            )
 
-        # API 키 로드 시도
+            if os.path.exists(config_path):
+                config.read(config_path, encoding="utf-8")
+
+                if (
+                    "API" in config
+                    and "NAVER_CLIENT_ID" in config["API"]
+                    and "NAVER_CLIENT_SECRET" in config["API"]
+                ):
+                    client_id = config["API"]["NAVER_CLIENT_ID"]
+                    client_secret = config["API"]["NAVER_CLIENT_SECRET"]
+                    self.logger.info("API 키를 config.ini 파일에서 로드했습니다.")
+                    return {"client_id": client_id, "client_secret": client_secret}
+        except Exception as e:
+            self.logger.warning(
+                f"config.ini 파일에서 API 키를 로드하는 중 오류 발생: {e}"
+            )
+
+        # config.ini에서 찾지 못하면 .env 파일에서 찾기
+        load_dotenv()
         client_id = os.getenv("NAVER_CLIENT_ID")
         client_secret = os.getenv("NAVER_CLIENT_SECRET")
 
-        # .env에서 찾지 못하면 config.ini 파일에서 찾기 시도
-        if not client_id or not client_secret:
-            try:
-                config = configparser.ConfigParser()
-                config_path = os.path.join(
-                    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                    "config.ini",
-                )
-
-                if os.path.exists(config_path):
-                    config.read(config_path, encoding="utf-8")
-
-                    if (
-                        "API" in config
-                        and "NAVER_CLIENT_ID" in config["API"]
-                        and "NAVER_CLIENT_SECRET" in config["API"]
-                    ):
-                        client_id = config["API"]["NAVER_CLIENT_ID"]
-                        client_secret = config["API"]["NAVER_CLIENT_SECRET"]
-                        self.logger.info("API 키를 config.ini 파일에서 로드했습니다.")
-            except Exception as e:
-                self.logger.warning(
-                    f"config.ini 파일에서 API 키를 로드하는 중 오류 발생: {e}"
-                )
-
-        # 키가 없는 경우 로그에 오류 기록
         if not client_id or not client_secret:
             self.logger.error(
-                "네이버 API 키를 찾을 수 없습니다. .env 파일이나 config.ini에 NAVER_CLIENT_ID와 NAVER_CLIENT_SECRET이 설정되어 있는지 확인하세요."
+                "네이버 API 키를 찾을 수 없습니다. config.ini나 .env 파일에 NAVER_CLIENT_ID와 NAVER_CLIENT_SECRET이 설정되어 있는지 확인하세요."
             )
             raise ValueError("네이버 API 키를 찾을 수 없습니다.")
 
-        # 인증 성공 시 간단한 로깅
-        self.logger.info(f"네이버 API 키 로드 성공 (client_id: {client_id[:4]}...)")
-
+        self.logger.info(f"API 키를 .env 파일에서 로드했습니다. (client_id: {client_id[:4]}...)")
         return {"client_id": client_id, "client_secret": client_secret}
 
     def search_product(
