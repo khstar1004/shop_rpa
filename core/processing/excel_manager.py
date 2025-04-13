@@ -605,7 +605,7 @@ class ExcelManager:
                 f"Error applying enhanced formatting: {str(e)}", exc_info=True
             )
 
-    def generate_enhanced_output(self, results: List, input_file: str) -> str:
+    def generate_enhanced_output(self, results: List, input_file: str, output_dir: Optional[str] = None) -> str:
         """처리 결과를 엑셀로 저장하고 포맷팅을 적용합니다."""
         try:
             # 결과 데이터 준비
@@ -679,7 +679,13 @@ class ExcelManager:
             # 파일명 생성
             base_name = os.path.splitext(input_file)[0]
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_file = os.path.join('output', f'{base_name}-result_result_{timestamp}_upload_{timestamp}.xlsx')
+            
+            # output_dir이 지정된 경우 해당 디렉토리 사용
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+                output_file = os.path.join(output_dir, f'{os.path.basename(base_name)}-result_result_{timestamp}_upload_{timestamp}.xlsx')
+            else:
+                output_file = os.path.join('output', f'{base_name}-result_result_{timestamp}_upload_{timestamp}.xlsx')
 
             # 엑셀로 저장
             result_df.to_excel(output_file, index=False)
@@ -709,13 +715,19 @@ class ExcelManager:
 
                 error_df = pd.DataFrame(error_data)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_file = os.path.join('output', f'{os.path.splitext(input_file)[0]}-error-result_result_{timestamp}_upload_{timestamp}.xlsx')
-                error_df.to_excel(output_file, index=False)
+                
+                # output_dir이 지정된 경우 해당 디렉토리 사용
+                if output_dir:
+                    error_output_file = os.path.join(output_dir, f'{os.path.basename(base_name)}-error-result_result_{timestamp}_upload_{timestamp}.xlsx')
+                else:
+                    error_output_file = os.path.join('output', f'{os.path.splitext(input_file)[0]}-error-result_result_{timestamp}_upload_{timestamp}.xlsx')
+                
+                error_df.to_excel(error_output_file, index=False)
 
                 self.logger.warning(
-                    f"오류 정보가 포함된 파일을 생성했습니다: {output_file}"
+                    f"오류 정보가 포함된 파일을 생성했습니다: {error_output_file}"
                 )
-                return output_file
+                return error_output_file
 
             except Exception as inner_e:
                 self.logger.critical(
