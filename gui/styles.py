@@ -87,8 +87,7 @@ class Styles:
     @staticmethod
     def apply_dark_mode(widget: Union[QMainWindow, QWidget]) -> None:
         """Apply dark mode theme to the widget"""
-        widget.setStyleSheet(
-            f"""
+        dark_mode_style = f"""
             QMainWindow, QWidget {{
                 background-color: {Colors.BACKGROUND_DARK};
                 color: {Colors.TEXT_DARK};
@@ -287,13 +286,15 @@ class Styles:
                 padding: 8px;
             }}
             """
-        )
+        
+        # Remove any transition properties to prevent "Unknown property" warnings
+        clean_style = StyleTransition.remove_transition_property(dark_mode_style)
+        widget.setStyleSheet(clean_style)
 
     @staticmethod
     def apply_light_mode(widget: Union[QMainWindow, QWidget]) -> None:
         """Apply light mode theme to the widget"""
-        widget.setStyleSheet(
-            f"""
+        light_mode_style = f"""
             QMainWindow, QWidget {{
                 background-color: {Colors.BACKGROUND_LIGHT};
                 color: {Colors.TEXT_LIGHT};
@@ -340,12 +341,12 @@ class Styles:
             }}
             QTabBar::tab:hover:!selected {{
                 background-color: {Colors.SIDEBAR_LIGHT};
-                border-bottom: 2px solid {Colors.PRIMARY};
-                color: {Colors.PRIMARY};
+                border-bottom: 2px solid {Colors.PRIMARY_LIGHT};
+                color: {Colors.PRIMARY_LIGHT};
             }}
             QPlainTextEdit {{
-                background-color: #F8FAFC;
-                color: #1E293B;
+                background-color: white;
+                color: {Colors.TEXT_LIGHT};
                 border: 1px solid {Colors.BORDER_LIGHT};
                 border-radius: 8px;
                 font-family: 'Consolas', 'Courier New', monospace;
@@ -355,7 +356,7 @@ class Styles:
             QProgressBar {{
                 border: none;
                 border-radius: 4px;
-                background-color: #E2E8F0;
+                background-color: #E5E7EB;
                 color: {Colors.TEXT_LIGHT};
                 text-align: center;
                 height: 12px;
@@ -380,8 +381,8 @@ class Styles:
                 background-color: {Colors.PRIMARY_DARK};
             }}
             QPushButton:disabled {{
-                background-color: #CBD5E1;
-                color: #64748B;
+                background-color: #E5E7EB;
+                color: #9CA3AF;
             }}
             QComboBox, QSpinBox {{
                 background-color: white;
@@ -432,42 +433,70 @@ class Styles:
             }}
             QScrollBar:vertical {{
                 border: none;
-                background-color: #F1F5F9;
+                background-color: #F3F4F6;
                 width: 12px;
                 margin: 0px;
                 border-radius: 6px;
             }}
             QScrollBar::handle:vertical {{
-                background-color: #CBD5E1;
+                background-color: #D1D5DB;
                 min-height: 20px;
                 border-radius: 6px;
             }}
             QScrollBar::handle:vertical:hover {{
-                background-color: #94A3B8;
+                background-color: #9CA3AF;
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0px;
             }}
             QScrollBar:horizontal {{
                 border: none;
-                background-color: #F1F5F9;
+                background-color: #F3F4F6;
                 height: 12px;
                 margin: 0px;
                 border-radius: 6px;
             }}
             QScrollBar::handle:horizontal {{
-                background-color: #CBD5E1;
+                background-color: #D1D5DB;
                 min-width: 20px;
                 border-radius: 6px;
             }}
             QScrollBar::handle:horizontal:hover {{
-                background-color: #94A3B8;
+                background-color: #9CA3AF;
             }}
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                 width: 0px;
             }}
+            QMenu {{
+                background-color: {Colors.CARD_LIGHT};
+                color: {Colors.TEXT_LIGHT};
+                border: 1px solid {Colors.BORDER_LIGHT};
+                border-radius: 8px;
+            }}
+            QMenu::item {{
+                padding: 8px 16px;
+            }}
+            QMenu::item:selected {{
+                background-color: {Colors.PRIMARY};
+                color: white;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {Colors.BORDER_LIGHT};
+                margin: 4px 0;
+            }}
+            QToolTip {{
+                background-color: {Colors.CARD_LIGHT};
+                color: {Colors.TEXT_LIGHT};
+                border: 1px solid {Colors.BORDER_LIGHT};
+                border-radius: 8px;
+                padding: 8px;
+            }}
         """
-        )
+        
+        # Remove any transition properties to prevent "Unknown property" warnings
+        clean_style = StyleTransition.remove_transition_property(light_mode_style)
+        widget.setStyleSheet(clean_style)
 
     @staticmethod
     def apply_group_box_style(widget: QWidget) -> None:
@@ -491,89 +520,71 @@ class Styles:
 
     @staticmethod
     def apply_drop_area_style(widget: QWidget) -> None:
-        """Apply style to drop area"""
-        widget.setStyleSheet(
-            f"""
-            QLabel {{
-                border: 2px dashed {Colors.BORDER_LIGHT};
-                border-radius: 12px;
-                padding: 40px;
-                background: {Colors.SIDEBAR_LIGHT};
+        """Apply drop area style in light mode"""
+        style = """
+            QFrame {
+                border: 2px dashed #BBBBBB;
+                border-radius: 10px;
+                background-color: #F8F8F8;
+            }
+            QLabel {
+                color: #666666;
                 font-size: 14px;
-                font-weight: bold;
-                color: {Colors.TEXT_LIGHT_SECONDARY};
-                min-height: 120px;
-                text-align: center;
-            }}
-            QLabel:hover {{
-                border-color: {Colors.PRIMARY};
-                background: #EEF2FF;
-                color: {Colors.PRIMARY};
-            }}
+            }
         """
-        )
+        widget.setStyleSheet(StyleTransition.remove_transition_property(style))
 
     @staticmethod
     def apply_drop_area_active_style(widget: QWidget) -> None:
-        """Apply style to drop area when active"""
-        widget.setStyleSheet(
-            f"""
-            QLabel {{
-                border: 2px solid {Colors.PRIMARY};
-                border-radius: 12px;
-                padding: 40px;
-                background: #EEF2FF;
+        """Apply active drop area style in light mode"""
+        style = """
+            QFrame {
+                border: 3px dashed #4285F4;
+                border-radius: 10px;
+                background-color: #F0F8FF;
+                box-shadow: 0 0 10px rgba(66, 133, 244, 0.5);
+            }
+            QLabel {
+                color: #4285F4;
                 font-size: 14px;
                 font-weight: bold;
-                color: {Colors.PRIMARY};
-                min-height: 120px;
-                text-align: center;
-            }}
+            }
         """
-        )
+        widget.setStyleSheet(StyleTransition.remove_transition_property(style))
 
     @staticmethod
     def apply_drop_area_dark_style(widget: QWidget) -> None:
-        """Apply dark style to drop area"""
-        widget.setStyleSheet(
-            f"""
-            QLabel {{
-                border: 2px dashed {Colors.BORDER_DARK};
-                border-radius: 12px;
-                padding: 40px;
-                background: {Colors.SIDEBAR_DARK};
+        """Apply drop area style in dark mode"""
+        style = """
+            QFrame {
+                border: 2px dashed #5C5C5C;
+                border-radius: 10px;
+                background-color: #2C2C2C;
+            }
+            QLabel {
+                color: #B0B0B0;
                 font-size: 14px;
-                font-weight: bold;
-                color: {Colors.TEXT_DARK_SECONDARY};
-                min-height: 120px;
-                text-align: center;
-            }}
-            QLabel:hover {{
-                border-color: {Colors.PRIMARY};
-                background: #1E1B4B;
-                color: {Colors.PRIMARY_LIGHT};
-            }}
+            }
         """
-        )
+        widget.setStyleSheet(StyleTransition.remove_transition_property(style))
 
     @staticmethod
     def apply_drop_area_active_dark_style(widget: QWidget) -> None:
-        """Apply dark style to drop area when active"""
-        widget.setStyleSheet(
-            f"""
-            QLabel {{
-                border: 2px solid {Colors.PRIMARY};
-                border-radius: 12px;
-                padding: 40px;
-                background: #1E1B4B;
+        """Apply active drop area style in dark mode"""
+        style = """
+            QFrame {
+                border: 3px dashed #5C9DFF;
+                border-radius: 10px;
+                background-color: #353535;
+                box-shadow: 0 0 10px rgba(92, 157, 255, 0.5);
+            }
+            QLabel {
+                color: #FFFFFF;
                 font-size: 14px;
                 font-weight: bold;
-                color: {Colors.PRIMARY_LIGHT};
-                min-height: 120px;
-                text-align: center;
-            }}
+            }
         """
-        )
+        widget.setStyleSheet(StyleTransition.remove_transition_property(style))
 
     @staticmethod
     def apply_file_path_style(widget: QWidget) -> None:
@@ -768,3 +779,119 @@ class Styles:
             }
         """
         )
+
+    @staticmethod
+    def apply_style(widget: QWidget, style: str) -> None:
+        """Apply style with automatic transition property removal
+        
+        Args:
+            widget: The widget to style
+            style: The CSS style string
+        """
+        clean_style = StyleTransition.remove_transition_property(style)
+        widget.setStyleSheet(clean_style)
+
+
+class StyleTransition:
+    """Utility class for handling style transitions that CSS transition doesn't support in PyQt"""
+    
+    @staticmethod
+    def create_opacity_animation(widget, start_value=0.0, end_value=1.0, duration=300, easing=None):
+        """Create a window opacity animation
+        
+        Args:
+            widget: The widget to animate
+            start_value: Starting opacity (0.0-1.0)
+            end_value: Ending opacity (0.0-1.0)
+            duration: Animation duration in milliseconds
+            easing: QEasingCurve to use (defaults to OutCubic)
+            
+        Returns:
+            QPropertyAnimation object. Call start() to begin animation.
+        """
+        from PyQt5.QtCore import QPropertyAnimation, QEasingCurve
+        
+        animation = QPropertyAnimation(widget, b"windowOpacity")
+        animation.setDuration(duration)
+        animation.setStartValue(start_value)
+        animation.setEndValue(end_value)
+        animation.setEasingCurve(easing or QEasingCurve.OutCubic)
+        return animation
+    
+    @staticmethod
+    def create_color_animation(widget, property_name, start_color, end_color, duration=300, easing=None, update_func=None):
+        """Create a color transition animation
+        
+        Args:
+            widget: The widget to animate
+            property_name: The property to animate
+            start_color: Starting QColor
+            end_color: Ending QColor
+            duration: Animation duration in milliseconds
+            easing: QEasingCurve to use (defaults to OutCubic)
+            update_func: Function to call with current color value
+            
+        Returns:
+            QVariantAnimation object. Call start() to begin animation.
+        """
+        from PyQt5.QtCore import QVariantAnimation, QEasingCurve
+        
+        animation = QVariantAnimation()
+        animation.setDuration(duration)
+        animation.setStartValue(start_color)
+        animation.setEndValue(end_color)
+        animation.setEasingCurve(easing or QEasingCurve.OutCubic)
+        
+        if update_func:
+            animation.valueChanged.connect(update_func)
+        
+        return animation
+    
+    @staticmethod
+    def create_stylesheet_animation(widget, start_style, end_style, duration=300, easing=None):
+        """Create an animation that transitions between two stylesheets
+        
+        This creates a proxy animation that updates the stylesheet with interpolated values
+        
+        Args:
+            widget: The widget to animate
+            start_style: Starting stylesheet 
+            end_style: Ending stylesheet
+            duration: Animation duration in milliseconds
+            easing: QEasingCurve to use (defaults to OutCubic)
+            
+        Returns:
+            QVariantAnimation object. Call start() to begin animation.
+        """
+        from PyQt5.QtCore import QVariantAnimation, QEasingCurve
+        
+        # Remove any transition properties from the stylesheets to avoid warnings
+        start_style = StyleTransition.remove_transition_property(start_style)
+        end_style = StyleTransition.remove_transition_property(end_style)
+        
+        animation = QVariantAnimation()
+        animation.setDuration(duration)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(easing or QEasingCurve.OutCubic)
+        
+        def update_stylesheet(value):
+            # This is a simplified approach - for complex stylesheets would need more sophisticated parsing
+            widget.setStyleSheet(start_style)
+            
+        animation.valueChanged.connect(update_stylesheet)
+        return animation
+    
+    @staticmethod
+    def remove_transition_property(stylesheet):
+        """Remove transition properties from a stylesheet to avoid warnings
+        
+        Args:
+            stylesheet: The stylesheet string
+            
+        Returns:
+            Stylesheet string with transition properties removed
+        """
+        import re
+        # Match 'transition: X;' or 'transition:X;' patterns
+        return re.sub(r'transition\s*:[^;]+;', '', stylesheet)

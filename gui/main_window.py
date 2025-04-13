@@ -42,7 +42,7 @@ from .i18n import translator as tr
 from .log_handler import GUILogHandler
 from .processing_thread import ProcessingThread
 from .settings import Settings
-from .styles import Colors, Styles
+from .styles import Colors, Styles, StyleTransition
 from .widgets import WidgetFactory
 
 
@@ -105,15 +105,23 @@ class MainWindow(QMainWindow):
 
         # Set application icon
         try:
-            # Try SVG icon first
-            icon_path = os.path.join(os.path.dirname(__file__), "assets", "app_icon.svg")
+            # Try PNG icon first (better Windows compatibility)
+            icon_path = os.path.join(os.path.dirname(__file__), "assets", "app_icon.png")
             if os.path.exists(icon_path):
-                self.setWindowIcon(QIcon(icon_path))
+                app_icon = QIcon(icon_path)
+                self.setWindowIcon(app_icon)
+                # Ensure the icon is also set for the application
+                from PyQt5.QtWidgets import QApplication
+                QApplication.instance().setWindowIcon(app_icon)
             else:
-                # Try PNG icon as fallback
-                icon_path = os.path.join(os.path.dirname(__file__), "assets", "app_icon.png")
+                # Try SVG icon as fallback
+                icon_path = os.path.join(os.path.dirname(__file__), "assets", "app_icon.svg")
                 if os.path.exists(icon_path):
-                    self.setWindowIcon(QIcon(icon_path))
+                    app_icon = QIcon(icon_path)
+                    self.setWindowIcon(app_icon)
+                    # Ensure the icon is also set for the application
+                    from PyQt5.QtWidgets import QApplication
+                    QApplication.instance().setWindowIcon(app_icon)
                 else:
                     # Use default icon if no custom icon found
                     self.setWindowIcon(self.style().standardIcon(self.style().SP_ComputerIcon))
@@ -555,18 +563,28 @@ class MainWindow(QMainWindow):
         is_dark = self.config.get("GUI", {}).get("ENABLE_DARK_MODE", False)
         if isinstance(is_dark, str):
             is_dark = is_dark.lower() == "true"
+            
+        # Apply the right theme
         if is_dark:
             Styles.apply_dark_mode(self)
             # Update all child widgets
             for widget in self.findChildren(QWidget):
                 if isinstance(widget, QGroupBox):
                     Styles.apply_group_box_style(widget)
+                # Clean any custom stylesheets on other widgets
+                elif widget.styleSheet():
+                    clean_style = StyleTransition.remove_transition_property(widget.styleSheet())
+                    widget.setStyleSheet(clean_style)
         else:
             Styles.apply_light_mode(self)
             # Update all child widgets
             for widget in self.findChildren(QWidget):
                 if isinstance(widget, QGroupBox):
                     Styles.apply_group_box_style(widget)
+                # Clean any custom stylesheets on other widgets
+                elif widget.styleSheet():
+                    clean_style = StyleTransition.remove_transition_property(widget.styleSheet())
+                    widget.setStyleSheet(clean_style)
 
         # Update drop area style
         if hasattr(self, "drop_area"):
@@ -918,7 +936,7 @@ class MainWindow(QMainWindow):
                 "success"
             )
         except Exception as e:
-            logger.error(f"Error handling processing completion: {str(e)}")
+            self.logger.error(f"Error handling processing completion: {str(e)}")
             self._show_error_message(str(e))
 
     def on_processing_error(self, error_message):
@@ -934,7 +952,7 @@ class MainWindow(QMainWindow):
                 "error"
             )
         except Exception as e:
-            logger.error(f"Error handling processing error: {str(e)}")
+            self.logger.error(f"Error handling processing error: {str(e)}")
             self._show_error_message(str(e))
 
     def _show_error_message(self, error_message):
@@ -948,10 +966,10 @@ class MainWindow(QMainWindow):
             )
             
             # Log the error
-            logger.error(error_message)
+            self.logger.error(error_message)
             self.append_log(error_message)
         except Exception as e:
-            logger.error(f"Error showing error message: {str(e)}")
+            self.logger.error(f"Error showing error message: {str(e)}")
             # Fallback to basic error display
             self.status_label.setText(f"Error: {str(e)}")
 
@@ -970,7 +988,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText(tr.get_text("status_completed", "Completed"))
             self.append_log(message)
         except Exception as e:
-            logger.error(f"Error showing completion message: {str(e)}")
+            self.logger.error(f"Error showing completion message: {str(e)}")
             self._show_error_message(str(e))
 
     def open_results_folder(self):
@@ -1027,11 +1045,19 @@ class MainWindow(QMainWindow):
             self.config['GUI'] = {}
         self.config['GUI']['ENABLE_DARK_MODE'] = str(enabled).lower()
         self.settings.set("dark_mode", enabled)
+        
+        # Apply theme update with CSS transition cleanup
         self.apply_theme()
         
         # Save config to file using configparser
         config_parser = configparser.ConfigParser()
-        config_parser.read_dict(self.config)
+        # 먼저 기존 config 파일을 읽습니다
+        config_parser.read("config.ini", encoding="utf-8")
+        # 새로운 설정을 업데이트합니다
+        if 'GUI' not in config_parser:
+            config_parser['GUI'] = {}
+        config_parser['GUI']['ENABLE_DARK_MODE'] = str(enabled).lower()
+        # 변경된 설정을 파일에 저장합니다
         with open("config.ini", "w", encoding="utf-8") as f:
             config_parser.write(f)
 

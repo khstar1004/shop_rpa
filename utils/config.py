@@ -174,50 +174,42 @@ def load_config() -> Dict[str, Any]:
         # EXCEL section
         if "EXCEL" in config:
             processed_config["EXCEL"] = {
-                "SHEET_NAME": config["EXCEL"]["SHEET_NAME"],
-                "START_ROW": int(config["EXCEL"]["START_ROW"]),
+                "SHEET_NAME": config["EXCEL"].get("DEFAULT_SHEET_NAME", "Sheet1"),
+                "START_ROW": int(config["EXCEL"].get("START_ROW", "2")),
                 "REQUIRED_COLUMNS": [
-                    x.strip() for x in config["EXCEL"]["REQUIRED_COLUMNS"].split(",")
+                    x.strip() for x in config["EXCEL"].get("REQUIRED_COLUMNS", "").split(",")
+                    if x.strip()
                 ],
                 "OPTIONAL_COLUMNS": [
-                    x.strip() for x in config["EXCEL"]["OPTIONAL_COLUMNS"].split(",")
+                    x.strip() for x in config["EXCEL"].get("OPTIONAL_COLUMNS", "").split(",")
+                    if x.strip()
                 ],
-                "MAX_ROWS": int(config["EXCEL"]["MAX_ROWS"]),
-                "ENABLE_FORMATTING": config["EXCEL"]["ENABLE_FORMATTING"].lower()
-                == "true",
-                "DATE_FORMAT": config["EXCEL"]["DATE_FORMAT"],
-                "NUMBER_FORMAT": config["EXCEL"]["NUMBER_FORMAT"],
-                "MAX_FILE_SIZE_MB": int(config["EXCEL"]["MAX_FILE_SIZE_MB"]),
-                "VALIDATION_RULES": config["EXCEL"]["VALIDATION_RULES"].lower()
-                == "true",
-                "PRICE_MIN": int(config["EXCEL"]["PRICE_MIN"]),
-                "PRICE_MAX": int(config["EXCEL"]["PRICE_MAX"]),
-                "PRODUCT_CODE_PATTERN": config["EXCEL"]["PRODUCT_CODE_PATTERN"],
-                "URL_PATTERN": config["EXCEL"]["URL_PATTERN"],
-                "ENABLE_DATA_QUALITY_METRICS": config["EXCEL"][
-                    "ENABLE_DATA_QUALITY_METRICS"
-                ].lower()
-                == "true",
-                "ENABLE_DUPLICATE_DETECTION": config["EXCEL"][
-                    "ENABLE_DUPLICATE_DETECTION"
-                ].lower()
-                == "true",
-                "ENABLE_AUTO_CORRECTION": config["EXCEL"][
-                    "ENABLE_AUTO_CORRECTION"
-                ].lower()
-                == "true",
+                "MAX_ROWS": int(config["EXCEL"].get("MAX_ROWS", "10000")),
+                "ENABLE_FORMATTING": config["EXCEL"].get("ENABLE_FORMATTING", "true").lower() == "true",
+                "DATE_FORMAT": config["EXCEL"].get("DATE_FORMAT", "YYYY-MM-DD"),
+                "NUMBER_FORMAT": config["EXCEL"].get("NUMBER_FORMAT", "#,##0"),
+                "MAX_FILE_SIZE_MB": int(config["EXCEL"].get("MAX_FILE_SIZE_MB", "200")),
+                "VALIDATION_RULES": config["EXCEL"].get("VALIDATION_RULES", "true").lower() == "true",
+                "PRICE_MIN": int(config["EXCEL"].get("PRICE_MIN", "0")),
+                "PRICE_MAX": int(config["EXCEL"].get("PRICE_MAX", "10000000000")),
+                "PRODUCT_CODE_PATTERN": config["EXCEL"].get("PRODUCT_CODE_PATTERN", r"^[A-Za-z0-9-_]+$"),
+                "URL_PATTERN": config["EXCEL"].get("URL_PATTERN", r"^(?:https?://)?(?:[\w-]+\.)+[a-z]{2,}(?:/[^/]*)*$"),
+                "ENABLE_DATA_QUALITY_METRICS": config["EXCEL"].get("ENABLE_DATA_QUALITY_METRICS", "true").lower() == "true",
+                "ENABLE_DUPLICATE_DETECTION": config["EXCEL"].get("ENABLE_DUPLICATE_DETECTION", "true").lower() == "true",
+                "ENABLE_AUTO_CORRECTION": config["EXCEL"].get("ENABLE_AUTO_CORRECTION", "true").lower() == "true",
                 "AUTO_CORRECTION_RULES": [
-                    x.strip()
-                    for x in config["EXCEL"]["AUTO_CORRECTION_RULES"].split(",")
+                    x.strip() for x in config["EXCEL"].get("AUTO_CORRECTION_RULES", "").split(",")
+                    if x.strip()
                 ],
-                "REPORT_FORMATTING": config["EXCEL"]["REPORT_FORMATTING"].lower()
-                == "true",
-                "REPORT_STYLES": config["EXCEL"]["REPORT_STYLES"].lower() == "true",
-                "REPORT_FILTERS": config["EXCEL"]["REPORT_FILTERS"].lower() == "true",
-                "REPORT_SORTING": config["EXCEL"]["REPORT_SORTING"].lower() == "true",
-                "REPORT_FREEZE_PANES": config["EXCEL"]["REPORT_FREEZE_PANES"].lower()
-                == "true",
-                "REPORT_AUTO_FIT": config["EXCEL"]["REPORT_AUTO_FIT"].lower() == "true",
+                "REPORT_FORMATTING": config["EXCEL"].get("REPORT_FORMATTING", "true").lower() == "true",
+                "REPORT_STYLES": config["EXCEL"].get("REPORT_STYLES", "true").lower() == "true",
+                "REPORT_FILTERS": config["EXCEL"].get("REPORT_FILTERS", "true").lower() == "true",
+                "REPORT_SORTING": config["EXCEL"].get("REPORT_SORTING", "true").lower() == "true",
+                "REPORT_FREEZE_PANES": config["EXCEL"].get("REPORT_FREEZE_PANES", "true").lower() == "true",
+                "REPORT_AUTO_FIT": config["EXCEL"].get("REPORT_AUTO_FIT", "true").lower() == "true",
+                "ATTEMPT_ALL_SHEETS": config["EXCEL"].get("ATTEMPT_ALL_SHEETS", "true").lower() == "true",
+                "FLEXIBLE_COLUMN_MAPPING": config["EXCEL"].get("FLEXIBLE_COLUMN_MAPPING", "true").lower() == "true",
+                "CREATE_MISSING_COLUMNS": config["EXCEL"].get("CREATE_MISSING_COLUMNS", "true").lower() == "true"
             }
 
         # PATHS section

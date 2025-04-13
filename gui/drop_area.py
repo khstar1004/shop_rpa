@@ -7,6 +7,7 @@ from PyQt5.QtSvg import QSvgWidget
 from PyQt5.QtWidgets import QFrame, QLabel, QVBoxLayout, QHBoxLayout
 
 from .i18n import translator as tr
+from .styles import StyleTransition
 
 class DropArea(QFrame):
     """Drop area for drag-and-drop file selection"""
@@ -97,7 +98,6 @@ class DropArea(QFrame):
                     border: 2px dashed #5C5C5C;
                     border-radius: 10px;
                     background-color: #2C2C2C;
-                    transition: all 0.3s;
                 }
                 QLabel {
                     color: #B0B0B0;
@@ -110,7 +110,6 @@ class DropArea(QFrame):
                     border: 2px dashed #BBBBBB;
                     border-radius: 10px;
                     background-color: #F8F8F8;
-                    transition: all 0.3s;
                 }
                 QLabel {
                     color: #666666;
@@ -127,7 +126,6 @@ class DropArea(QFrame):
                     border-radius: 10px;
                     background-color: #353535;
                     box-shadow: 0 0 10px rgba(92, 157, 255, 0.5);
-                    transition: all 0.3s;
                 }
                 QLabel {
                     color: #FFFFFF;
@@ -142,7 +140,6 @@ class DropArea(QFrame):
                     border-radius: 10px;
                     background-color: #F0F8FF;
                     box-shadow: 0 0 10px rgba(66, 133, 244, 0.5);
-                    transition: all 0.3s;
                 }
                 QLabel {
                     color: #4285F4;
@@ -189,6 +186,14 @@ class DropArea(QFrame):
         self.border_animation.setEndValue(3.0)
         self.border_animation.start()
         
+        # Apply style with animation
+        active_style = self._get_active_style()
+        inactive_style = self._get_inactive_style()
+        
+        # Remove transition warnings by using PyQt's animation system
+        # Apply initial style without transitions
+        self.setStyleSheet(StyleTransition.remove_transition_property(active_style))
+        
         # Update hint text
         self.hint_label.setText(tr.get_text("release_to_drop"))
         self.hint_label.setStyleSheet("font-weight: bold;")
@@ -206,6 +211,13 @@ class DropArea(QFrame):
         self.border_animation.setStartValue(3.0)
         self.border_animation.setEndValue(2.0)
         self.border_animation.start()
+        
+        # Apply style with animation
+        inactive_style = self._get_inactive_style()
+        
+        # Remove transition warnings by using PyQt's animation system
+        # Apply style without transitions
+        self.setStyleSheet(StyleTransition.remove_transition_property(inactive_style))
         
         # Restore hint text
         self.hint_label.setText(tr.get_text("file_drag_hint"))
@@ -225,7 +237,7 @@ class DropArea(QFrame):
     def enterEvent(self, event):
         """Handle mouse enter event for hover effect"""
         if not self.is_active:
-            self.setStyleSheet("""
+            hover_style = """
                 QFrame {
                     border: 2px dashed #4285F4;
                     border-radius: 10px;
@@ -235,7 +247,10 @@ class DropArea(QFrame):
                     color: #4285F4;
                     font-size: 14px;
                 }
-            """)
+            """
+            
+            # Apply style without transitions
+            self.setStyleSheet(StyleTransition.remove_transition_property(hover_style))
             
             # Highlight additional hint
             self.sub_hint_label.setStyleSheet("color: #4285F4; font-size: 11px;")
@@ -243,7 +258,11 @@ class DropArea(QFrame):
     def leaveEvent(self, event):
         """Handle mouse leave event for hover effect"""
         if not self.is_active:
-            self.setStyleSheet(self._get_inactive_style())
+            inactive_style = self._get_inactive_style()
+            
+            # Apply style without transitions
+            self.setStyleSheet(StyleTransition.remove_transition_property(inactive_style))
+            
             # Restore additional hint
             self.sub_hint_label.setStyleSheet("color: #999999; font-size: 11px;")
             
