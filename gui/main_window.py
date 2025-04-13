@@ -106,28 +106,31 @@ class MainWindow(QMainWindow):
         # Set application icon
         try:
             # Try PNG icon first (better Windows compatibility)
-            icon_path = os.path.join(os.path.dirname(__file__), "assets", "app_icon.png")
+            icon_path = os.path.join(self.program_root, "gui", "assets", "app_icon.png")
             if os.path.exists(icon_path):
                 app_icon = QIcon(icon_path)
                 self.setWindowIcon(app_icon)
                 # Ensure the icon is also set for the application
                 from PyQt5.QtWidgets import QApplication
-                QApplication.instance().setWindowIcon(app_icon)
+                app = QApplication.instance()
+                if app:
+                    app.setWindowIcon(app_icon)
             else:
                 # Try SVG icon as fallback
-                icon_path = os.path.join(os.path.dirname(__file__), "assets", "app_icon.svg")
+                icon_path = os.path.join(self.program_root, "gui", "assets", "app_icon.svg")
                 if os.path.exists(icon_path):
                     app_icon = QIcon(icon_path)
                     self.setWindowIcon(app_icon)
                     # Ensure the icon is also set for the application
                     from PyQt5.QtWidgets import QApplication
-                    QApplication.instance().setWindowIcon(app_icon)
+                    app = QApplication.instance()
+                    if app:
+                        app.setWindowIcon(app_icon)
                 else:
-                    # Use default icon if no custom icon found
+                    self.logger.warning("No application icon found at expected paths")
                     self.setWindowIcon(self.style().standardIcon(self.style().SP_ComputerIcon))
         except Exception as e:
             self.logger.warning(f"Failed to set application icon: {str(e)}")
-            # Use default icon in case of error
             self.setWindowIcon(self.style().standardIcon(self.style().SP_ComputerIcon))
 
         # Enable drag & drop
