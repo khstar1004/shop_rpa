@@ -69,7 +69,8 @@ class FileManager(QWidget):
         recent_files = self.settings.get("recent_files", [])
         
         for file_path in recent_files:
-            if os.path.exists(file_path):
+            # Check for existence and read permission
+            if os.path.exists(file_path) and os.access(file_path, os.R_OK):
                 item = QListWidgetItem(os.path.basename(file_path))
                 item.setData(Qt.UserRole, file_path)
                 item.setToolTip(file_path)
@@ -81,7 +82,8 @@ class FileManager(QWidget):
         favorite_files = self.settings.get("favorite_files", [])
         
         for file_path in favorite_files:
-            if os.path.exists(file_path):
+            # Check for existence and read permission
+            if os.path.exists(file_path) and os.access(file_path, os.R_OK):
                 item = QListWidgetItem(os.path.basename(file_path))
                 item.setData(Qt.UserRole, file_path)
                 item.setToolTip(file_path)
@@ -90,10 +92,12 @@ class FileManager(QWidget):
     def on_file_selected(self, item):
         """Handle file selection"""
         file_path = item.data(Qt.UserRole)
-        if os.path.exists(file_path):
+        # Check for existence and read permission before emitting signal
+        if os.path.exists(file_path) and os.access(file_path, os.R_OK):
             self.file_selected.emit(file_path)
         else:
-            QMessageBox.warning(self, "Error", "File not found.")
+            QMessageBox.warning(self, "Error", "File not found or not accessible.")
+            # Refresh lists to remove invalid entries
             self.update_recent_files()
             self.update_favorite_files()
     

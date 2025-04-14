@@ -215,13 +215,9 @@ class PerformanceMonitorWidget(QWidget):
         self.stop_button.clicked.connect(self.monitor.stop)
         self.stop_button.setEnabled(False)
         
-        self.optimize_button = QPushButton("Optimize")
-        self.optimize_button.clicked.connect(self.optimize_performance)
-        
         button_layout.addWidget(self.start_button)
         button_layout.addWidget(self.stop_button)
         button_layout.addStretch()
-        button_layout.addWidget(self.optimize_button)
         
         layout.addLayout(button_layout)
         
@@ -250,26 +246,6 @@ class PerformanceMonitorWidget(QWidget):
         """Show performance warning"""
         warning_text = f"[{warning_type.upper()}] {message}"
         self.log_area.append(f"<span style='color: red;'>{warning_text}</span>")
-    
-    def optimize_performance(self):
-        """Optimize system performance"""
-        # Clear log
-        self.log_area.clear()
-        self.log_area.append("Optimizing system performance...")
-        
-        # Add optimization steps here
-        # For example:
-        # - Clear temporary files
-        # - Defragment disk
-        # - Adjust process priorities
-        # etc.
-        
-        self.log_area.append("Optimization complete.")
-    
-    def apply_log_filter(self):
-        """Apply log filter"""
-        # Implement log filtering if needed
-        pass
     
     def closeEvent(self, event):
         """Handle close event"""

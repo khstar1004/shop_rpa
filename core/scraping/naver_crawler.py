@@ -7,6 +7,7 @@ import os
 import random
 import re
 import urllib.parse
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from time import sleep
@@ -15,6 +16,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+import urllib3
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Initialize absl logging
 try:
@@ -156,11 +161,28 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
         # ThreadPoolExecutor 초기화
         self.executor = ThreadPoolExecutor(max_workers=10)  # 적절한 워커 수 설정
 
+    def __del__(self):
+        """소멸자: 자원 정리"""
+        try:
+            # 스레드풀 정리
+            if hasattr(self, 'executor') and self.executor:
+                self.executor.shutdown(wait=False)
+                
+            # 세션 정리
+            if hasattr(self, 'session') and self.session:
+                self.session.close()
+                
+            self.logger.debug("NaverShoppingAPI 자원 정리 완료")
+        except Exception as e:
+            # 소멸자에서는 예외를 로그만 남기고 전파하지 않음
+            if hasattr(self, 'logger'):
+                self.logger.error(f"자원 정리 중 오류 발생: {e}")
+        
     def search_product(
         self, query: str, max_items: int = 50, reference_price: float = 0
     ) -> List[Product]:
         """
-        네이버 쇼핑에서 제품 검색
+        네이버 쇼핑 API를 사용하여 제품 검색
 
         Args:
             query: 검색어
@@ -344,18 +366,30 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
                 data = response.json()
 
                 # 검색 결과가 없는 경우
-                if data.get("total", 0) == 0 or not data.get("items"):
+                total_results = data.get("total", 0)
+                current_items = data.get("items", [])
+                
+                if total_results == 0 or not current_items:
                     self.logger.info(f"No results found for '{query}' on page {page}")
                     return []
 
                 # 결과 요약 로깅
+                current_start = params.get("start", 1)
+                current_display = params.get("display", 10)
+                current_end = current_start + len(current_items) - 1
+                
                 self.logger.info(
-                    f"총 검색 결과: {data.get('total', 0)}개, 현재 페이지 아이템: {len(data.get('items', []))}개"
+                    f"총 검색 결과: {total_results}개, 현재 페이지 아이템: {len(current_items)}개 (총 {current_start}-{current_end})"
                 )
-
+                
+                # 마지막 페이지인지 확인
+                has_more = total_results > current_end
+                if not has_more:
+                    self.logger.info(f"현재 페이지 {page}가 마지막 페이지입니다 (총 {total_results}개 중 {current_end}개까지 조회)")
+                
                 # 제품 데이터 변환
                 products = []
-                for item in data.get("items", []):
+                for item in current_items:
                     product = await self._convert_api_item_to_product(item)
                     if product:
                         products.append(product)
@@ -363,7 +397,7 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
                 # 캐시에 저장
                 if products:
                     if self.cache:
-                        self.cache_sparse_data(f"naver_api_{query}_{page}", products)
+                        self.cache_sparse_data(cache_key, products)
 
                 return products
 
@@ -477,8 +511,144 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
 
     def process_file(self, input_file: str) -> Tuple[Optional[str], Optional[str]]:
         """Process input Excel file and generate reports."""
-        self.logger.error("This method is not fully implemented")
-        return None, None
+        try:
+            # 입력 파일 확인
+            if not os.path.exists(input_file):
+                self.logger.error(f"Input file not found: {input_file}")
+                return None, None
+                
+            # 엑셀 파일 로드
+            import pandas as pd
+            
+            df = pd.read_excel(input_file)
+            if df.empty:
+                self.logger.warning(f"Input file is empty: {input_file}")
+                return None, None
+                
+            # 필수 열 확인
+            required_columns = ['상품명', '상품코드', '가격']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                self.logger.error(f"Required columns are missing: {', '.join(missing_columns)}")
+                return None, None
+                
+            # 결과 데이터프레임 초기화
+            results_df = pd.DataFrame()
+            
+            # 각 행 처리
+            total_items = len(df)
+            for idx, row in df.iterrows():
+                try:
+                    # 진행 상황 로깅
+                    if idx % 10 == 0:
+                        self.logger.info(f"Processing item {idx+1}/{total_items}")
+                        
+                    # 상품 검색
+                    product_name = str(row['상품명'])
+                    reference_price = float(row['가격']) if not pd.isna(row['가격']) else 0
+                    
+                    search_results = self.search_product(
+                        query=product_name,
+                        max_items=5,  # 상위 5개만 검색
+                        reference_price=reference_price
+                    )
+                    
+                    # 결과가 없으면 다음 항목으로
+                    if not search_results:
+                        self.logger.warning(f"No results found for: {product_name}")
+                        continue
+                        
+                    # 최저가 상품 (첫 번째 결과)
+                    best_match = search_results[0]
+                    
+                    # 행 데이터 생성
+                    result_row = {
+                        '상품명': row['상품명'],
+                        '상품코드': row['상품코드'],
+                        '원가격': row['가격'],
+                        '검색결과_상품명': best_match.name,
+                        '검색결과_가격': best_match.price,
+                        '검색결과_URL': best_match.url,
+                        '가격차이': best_match.price - reference_price if reference_price > 0 else 0,
+                        '가격차이율': ((best_match.price - reference_price) / reference_price * 100) if reference_price > 0 else 0
+                    }
+                    
+                    # 결과 데이터프레임에 추가
+                    results_df = pd.concat([results_df, pd.DataFrame([result_row])], ignore_index=True)
+                    
+                except Exception as e:
+                    self.logger.error(f"Error processing item {idx+1} ({row['상품명']}): {str(e)}")
+                    continue
+            
+            # 결과 저장
+            if results_df.empty:
+                self.logger.warning("No results to save")
+                return None, None
+                
+            # 출력 디렉토리 설정
+            output_dir = os.path.dirname(input_file)
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 파일명 생성
+            base_name = os.path.splitext(os.path.basename(input_file))[0]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # 기본 결과 파일
+            primary_output = os.path.join(output_dir, f"{base_name}_results_{timestamp}.xlsx")
+            results_df.to_excel(primary_output, index=False)
+            
+            # 요약 결과 파일 (평균 가격 차이, 최대/최소 등)
+            summary_df = pd.DataFrame([{
+                '총 항목 수': len(df),
+                '매칭된 항목 수': len(results_df),
+                '평균 가격차이': results_df['가격차이'].mean() if '가격차이' in results_df.columns else 0,
+                '평균 가격차이율(%)': results_df['가격차이율'].mean() if '가격차이율' in results_df.columns else 0,
+                '최대 가격차이': results_df['가격차이'].max() if '가격차이' in results_df.columns else 0,
+                '최소 가격차이': results_df['가격차이'].min() if '가격차이' in results_df.columns else 0
+            }])
+            
+            secondary_output = os.path.join(output_dir, f"{base_name}_summary_{timestamp}.xlsx")
+            summary_df.to_excel(secondary_output, index=False)
+            
+            self.logger.info(f"Results saved to {primary_output} and {secondary_output}")
+            return primary_output, secondary_output
+            
+        except Exception as e:
+            self.logger.error(f"Error processing file: {str(e)}", exc_info=True)
+            return None, None
+
+    # BaseMultiLayerScraper 추상 메서드 구현
+    def _get_search_url(self, query: str) -> str:
+        """검색 URL을 생성합니다."""
+        # 네이버 API는 URL을 통한 직접 요청이 아닌 API 호출을 사용하므로
+        # 이 메서드는 실제 사용되지 않지만 인터페이스 준수를 위해 구현
+        params = {
+            "query": query,
+            "display": self.display,
+            "start": 1,
+            "sort": "asc",
+        }
+        return f"{self.api_url}?{urllib.parse.urlencode(params)}"
+        
+    def _extract_search_items(self, soup: BeautifulSoup, max_items: int) -> List[Any]:
+        """검색 결과에서 상품 항목을 추출합니다."""
+        # 네이버 API는 BeautifulSoup 파싱이 아닌 JSON 응답을 사용하므로
+        # 이 메서드는 실제 사용되지 않지만 인터페이스 준수를 위해 구현
+        return []
+        
+    def _extract_product_id(self, item: Any) -> Optional[str]:
+        """상품 항목에서 상품 ID를 추출합니다."""
+        # 네이버 API 응답에서 상품 ID 추출
+        if isinstance(item, dict) and "productId" in item:
+            return item["productId"]
+        return None
+        
+    def _get_product_impl(self, product_id: str) -> Optional[Dict[str, Any]]:
+        """실제 상품 정보를 가져옵니다."""
+        # 네이버 API는 개별 상품 조회 API가 없으므로 검색 결과에서 추출한 데이터를 사용
+        # 여기서는 캐시된 상품 정보만 반환
+        cache_key = f"naver_product_{product_id}"
+        return self.get_sparse_data(cache_key)
 
 
 class NaverPriceTableCrawler:
@@ -728,11 +898,13 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         max_retries: int = 5,
         timeout: int = 30,
         cache: Optional[FileCache] = None,
+        headless: bool = True,  # 기본값을 True로 변경하여 프로덕션 환경에 적합하게 설정
     ):
         super().__init__(max_retries, timeout, cache)
         self.logger = logging.getLogger(__name__)
         self.max_retries = max_retries
         self.timeout = timeout
+        self.headless = headless  # headless 모드 설정 저장
 
         # API 키 로드
         self.api_keys = self._load_api_keys()
@@ -749,8 +921,25 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         # 단가표 크롤러 생성
         self.price_table_crawler = NaverPriceTableCrawler(
             output_dir="output",
-            headless=False,  # 개발/디버깅 시 False, 배포 시 True로 변경
+            headless=self.headless,  # 외부에서 받은 headless 값 사용
         )
+        
+    def __del__(self):
+        """소멸자: 자원 정리"""
+        try:
+            # API 인스턴스 정리
+            if hasattr(self, 'api'):
+                del self.api
+                
+            # 가격표 크롤러 정리
+            if hasattr(self, 'price_table_crawler'):
+                del self.price_table_crawler
+                
+            self.logger.debug("NaverShoppingCrawler 자원 정리 완료")
+        except Exception as e:
+            # 소멸자에서는 예외를 로그만 남기고 전파하지 않음
+            if hasattr(self, 'logger'):
+                self.logger.error(f"자원 정리 중 오류 발생: {e}")
 
     def _load_api_keys(self) -> Dict[str, str]:
         """
@@ -859,8 +1048,8 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
                 elif product.image_url.startswith('//'):
                     product.image_url = 'https:' + product.image_url
                 
-                # 타임스탬프 추가
-                product.fetched_at = datetime.now().isoformat()
+                # 타임스탬프 업데이트
+                product.updated_at = datetime.now().timestamp()
                 
                 valid_products.append(product)
                 self.logger.debug(f"상품 추가: {product.name} (이미지: {product.image_url[:50]}...)")
@@ -890,14 +1079,25 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         Returns:
             Tuple[Optional[str], Optional[str]]: 생성된 보고서 파일 경로 및 로그 파일 경로
         """
-        # 이 함수는 추후 구현이 필요함
-        self.logger.error("process_file 메서드는 아직 구현되지 않았습니다.")
-        return None, None
+        # API 인스턴스의 process_file 메서드 호출
+        try:
+            return self.api.process_file(input_file)
+        except Exception as e:
+            self.logger.error(f"파일 처리 중 오류 발생: {str(e)}", exc_info=True)
+            return None, None
 
     def get_price_table(self, url: str) -> Tuple[Optional[pd.DataFrame], bool, str]:
         """상품 URL에서 단가표 가져오기"""
-        return self.price_table_crawler.get_price_table(url)
+        try:
+            return self.price_table_crawler.get_price_table(url)
+        except Exception as e:
+            self.logger.error(f"단가표 가져오기 중 오류 발생: {str(e)}", exc_info=True)
+            return None, False, f"오류: {str(e)}"
 
     def check_stock_status(self, url: str) -> Tuple[bool, str]:
         """상품 URL에서 재고 상태 확인"""
-        return self.price_table_crawler.check_stock_status(url)
+        try:
+            return self.price_table_crawler.check_stock_status(url)
+        except Exception as e:
+            self.logger.error(f"재고 상태 확인 중 오류 발생: {str(e)}", exc_info=True)
+            return False, f"오류: {str(e)}"

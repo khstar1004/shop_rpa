@@ -61,6 +61,8 @@ class KoryoScraper(BaseMultiLayerScraper):
         max_retries: Optional[int] = None,
         timeout: Optional[int] = None,
         connect_timeout: Optional[int] = None,
+        read_timeout: Optional[int] = None,
+        cache_ttl: Optional[int] = None,
         debug: bool = False
     ):
         # 설정 초기화
@@ -70,6 +72,16 @@ class KoryoScraper(BaseMultiLayerScraper):
         if debug:
             self.config.debug = debug
         
+        # 타임아웃 설정 적용
+        if read_timeout is not None:
+            self.config.timeout = read_timeout
+            
+        if connect_timeout is not None:
+            self.config.navigation_timeout = connect_timeout
+            
+        # 캐시 TTL 설정
+        self.cache_ttl = cache_ttl or 3600  # 기본값 1시간
+            
         # BaseScraper 초기화
         super().__init__(max_retries=max_retries or self.config.max_retries, 
                         timeout=timeout or self.config.timeout, 

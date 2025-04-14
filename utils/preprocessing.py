@@ -21,9 +21,6 @@ from email.mime.application import MIMEApplication
 import re
 
 import pandas as pd
-# Unused imports removed
-# from openpyxl import load_workbook
-# from openpyxl.styles import PatternFill
 
 logger = logging.getLogger(__name__)
 

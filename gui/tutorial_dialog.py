@@ -126,29 +126,6 @@ class TutorialDialog(QDialog):
         if step.callback:
             step.callback()
     
-    def highlight_widget(self, widget):
-        """Highlight target widget"""
-        if widget:
-            # Create highlight effect
-            highlight = QFrame(widget.parent())
-            highlight.setStyleSheet("""
-                QFrame {
-                    background-color: rgba(33, 150, 243, 0.1);
-                    border: 2px solid #2196F3;
-                    border-radius: 4px;
-                }
-            """)
-            highlight.setGeometry(widget.geometry())
-            highlight.show()
-            
-            # Animate highlight
-            animation = QPropertyAnimation(highlight, b"windowOpacity")
-            animation.setDuration(500)
-            animation.setStartValue(0)
-            animation.setEndValue(1)
-            animation.setEasingCurve(QEasingCurve.OutCubic)
-            animation.start()
-    
     def next_step(self):
         """Move to next step"""
         if self.current_step < len(self.steps) - 1:

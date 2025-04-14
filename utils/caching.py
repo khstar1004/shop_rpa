@@ -6,6 +6,7 @@ import pickle
 import random
 import time
 import zlib
+import shutil
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -159,19 +160,22 @@ class FileCache:
                     pass
 
     def clear(self) -> None:
-        """Clear the entire cache."""
+        """Clear the entire cache directory including subdirectories."""
         logger.info("Clearing cache directory: %s", self.cache_dir)
-        for filename in os.listdir(self.cache_dir):
-            filepath = os.path.join(self.cache_dir, filename)
-            try:
-                if os.path.isfile(filepath) or os.path.islink(filepath):
-                    os.unlink(filepath)
-                elif os.path.isdir(filepath):
-                    # Optionally clear subdirectories if needed
-                    pass
-            except OSError as e:
-                logger.error("Failed to delete %s. Reason: %s", filepath, e)
-        logger.info("Cache cleared.")
+        try:
+            if os.path.exists(self.cache_dir):
+                shutil.rmtree(self.cache_dir)
+                logger.info("Cache directory removed.")
+            else:
+                logger.warning("Cache directory does not exist: %s", self.cache_dir)
+            
+            # Recreate the cache directory after clearing
+            os.makedirs(self.cache_dir, exist_ok=True)
+            logger.info("Cache directory recreated.")
+
+        except OSError as e:
+            logger.error("Failed to clear cache directory %s. Reason: %s", self.cache_dir, e)
+        logger.info("Cache clear operation finished.")
 
     def _get_cache_size(self) -> int:
         """Get the current size of the cache in bytes."""

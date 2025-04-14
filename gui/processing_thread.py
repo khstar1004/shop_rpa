@@ -23,7 +23,7 @@ class ProcessingThread(QThread):
     processing_stopped = pyqtSignal()  # Emits when processing is stopped prematurely
     log_message = pyqtSignal(str)  # Emits log messages
     processing_complete = pyqtSignal(str, str)  # Emits primary_path, secondary_path
-    processing_error = pyqtSignal(str)  # Emits error message
+    processing_error = pyqtSignal(str)  # Add processing_error signal
 
     def __init__(
         self,
@@ -97,6 +97,7 @@ class ProcessingThread(QThread):
                         else:
                             error_message = f"Processor missing '_process_limited_file' method for file {file_name}"
                             self.logger.error(error_message)
+                            self.processing_error.emit(error_message)
                     else:
                         self.logger.info(f"Processing full file: {file_name}")
                         if hasattr(self.processor, "_process_single_file"):
@@ -105,11 +106,14 @@ class ProcessingThread(QThread):
                             )
                             if isinstance(process_output, tuple) and len(process_output) == 2:
                                 result_file, error_message = process_output
+                                if error_message:
+                                    self.processing_error.emit(error_message)
                             elif isinstance(process_output, str):
                                 result_file = process_output
                         else:
                             error_message = f"Processor missing '_process_single_file' method for file {file_name}"
                             self.logger.error(error_message)
+                            self.processing_error.emit(error_message)
 
                     if result_file:
                         self.logger.info(f"Successfully processed '{file_name}' -> '{result_file}'")

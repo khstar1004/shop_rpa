@@ -8,6 +8,7 @@ import traceback
 from typing import List, Optional
 from pathlib import Path
 import configparser
+import json
 
 import psutil
 from PyQt5.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
@@ -816,6 +817,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText(tr.get_text("error_occurred"))
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
+            self.on_processing_error(str(e))
 
     @pyqtSlot()
     def on_stop_clicked(self):
@@ -942,6 +944,7 @@ class MainWindow(QMainWindow):
             self.logger.error(f"Error handling processing completion: {str(e)}")
             self._show_error_message(str(e))
 
+    @pyqtSlot(str)
     def on_processing_error(self, error_message):
         """Handle processing error"""
         try:
@@ -954,6 +957,15 @@ class MainWindow(QMainWindow):
                 tr.get_text("processing_error", f"Error: {error_message}"),
                 "error"
             )
+            
+            # Enable start button and disable stop button
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            
+            # Clear processing thread
+            if self.processing_thread:
+                self.processing_thread = None
+                
         except Exception as e:
             self.logger.error(f"Error handling processing error: {str(e)}")
             self._show_error_message(str(e))
@@ -1081,8 +1093,38 @@ class MainWindow(QMainWindow):
 
     def save_progress(self):
         """Save current processing progress"""
-        # Implement progress saving logic here
-        pass
+        if not self.input_file or not self.processing_thread:
+            return
+            
+        try:
+            # Get current progress
+            current_item = self.processing_thread.current_item
+            total_items = self.processing_thread.total_items
+            processed_items = self.processing_thread.processed_items
+            
+            # Create progress data
+            progress_data = {
+                'input_file': self.input_file,
+                'current_item': current_item,
+                'total_items': total_items,
+                'processed_items': processed_items,
+                'timestamp': time.time()
+            }
+            
+            # Save to progress file
+            progress_file = os.path.join(
+                os.path.dirname(self.input_file),
+                f'.{os.path.basename(self.input_file)}.progress'
+            )
+            
+            with open(progress_file, 'w', encoding='utf-8') as f:
+                json.dump(progress_data, f, ensure_ascii=False, indent=2)
+                
+            self.logger.info(f"Progress saved to {progress_file}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save progress: {str(e)}")
+            raise
 
     def closeEvent(self, event):
         """Handle window close event"""

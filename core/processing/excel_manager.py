@@ -127,6 +127,55 @@ class ExcelManager:
                             if item_key not in self.excel_settings[key][sub_key]:
                                 self.excel_settings[key][sub_key][item_key] = item_value
 
+    def _clean_url(self, url: str) -> str:
+        """Normalize and clean a URL string."""
+        if not url or not isinstance(url, str):
+            return ""
+        
+        cleaned_url = url.strip()
+        
+        # Remove potential problematic characters like '@'
+        cleaned_url = cleaned_url.replace('@', '')
+
+        # Ensure https protocol
+        if cleaned_url.startswith("http:"):
+            cleaned_url = "https:" + cleaned_url[5:]
+        elif cleaned_url.startswith("//"):
+             cleaned_url = "https:" + cleaned_url
+        elif not cleaned_url.startswith("https:"):
+             # If no protocol, attempt to prepend https://, assuming it's a web URL
+             # More robust validation might be needed depending on expected URL types
+             if '.' in cleaned_url: # Basic check for domain-like structure
+                 cleaned_url = "https://" + cleaned_url
+             else:
+                 # If it doesn't look like a URL, return original cleaned string or empty
+                 return cleaned_url # Or return "" if invalid urls should be blanked
+
+        # Handle backslashes and encode problematic characters for URLs
+        cleaned_url = cleaned_url.replace('\\\\', '/') # Corrected backslash replacement
+        cleaned_url = cleaned_url.replace('"', '%22')
+        cleaned_url = cleaned_url.replace(' ', '%20')
+
+        return cleaned_url
+
+    def _normalize_url(self, url: str) -> str:
+        """Normalize and clean URLs for Excel processing. (Deprecated: Use _clean_url)"""
+        # Deprecated: Use _clean_url instead
+        return self._clean_url(url)
+
+    def _compute_price_metrics(self, base_price, compare_price):
+        """Compute price difference and percentage if valid, else return (None, None)."""
+        try:
+            base_price = float(base_price)
+            compare_price = float(compare_price)
+        except (ValueError, TypeError):
+            return (None, None)
+        if base_price > 0 and compare_price > 0 and abs(compare_price - base_price) < base_price * 5:
+            diff = compare_price - base_price
+            percent = round((diff / base_price) * 100, 2)
+            return (diff, percent)
+        return (None, None)
+
     def read_excel_file(self, file_path: str) -> pd.DataFrame:
         """Excel 파일을 읽고 검증하여 DataFrame을 반환합니다."""
         try:
@@ -801,39 +850,8 @@ class ExcelManager:
                     del df["가격차이(2)(%)"]
 
                 # 가격 차이 계산 (고려기프트 가격 - 본사 가격)
-                df["가격차이(2)"] = df.apply(
-                    lambda row: (
-                        row["판매단가(V포함)(2)"] - row["판매단가(V포함)"]
-                        if pd.notna(row.get("판매단가(V포함)(2)"))
-                        and pd.notna(row.get("판매단가(V포함)"))
-                        and row["판매단가(V포함)"] > 0  # 본사 가격이 0보다 큰 경우만 계산
-                        and row["판매단가(V포함)(2)"] > 0  # 고려기프트 가격이 0보다 큰 경우만 계산
-                        and abs(row["판매단가(V포함)(2)"] - row["판매단가(V포함)"]) < row["판매단가(V포함)"] * 5  # 가격차이가 본사 가격의 5배를 넘지 않도록 제한
-                        else None
-                    ),
-                    axis=1,
-                )
-
-                # 가격 차이 백분율 계산 (절대값 사용)
-                df["가격차이(2)(%)"] = df.apply(
-                    lambda row: (
-                        round(
-                            (
-                                (row["판매단가(V포함)(2)"] - row["판매단가(V포함)"])
-                                / row["판매단가(V포함)"]
-                            )
-                            * 100,
-                            2,  # 소수점 2자리까지만 표시
-                        )
-                        if pd.notna(row.get("판매단가(V포함)(2)"))
-                        and pd.notna(row.get("판매단가(V포함)"))
-                        and row["판매단가(V포함)"] > 0  # 본사 가격이 0보다 큰 경우만 계산
-                        and row["판매단가(V포함)(2)"] > 0  # 고려기프트 가격이 0보다 큰 경우만 계산
-                        and abs(row["판매단가(V포함)(2)"] - row["판매단가(V포함)"]) < row["판매단가(V포함)"] * 5  # 가격차이가 본사 가격의 5배를 넘지 않도록 제한
-                        else None
-                    ),
-                    axis=1,
-                )
+                df["가격차이(2)"], df["가격차이(2)(%)"] = zip(*df.apply(
+                    lambda row: self._compute_price_metrics(row.get("판매단가(V포함)"), row.get("판매단가(V포함)(2)")), axis=1))
 
             # 2. 네이버 가격 차이 계산
             if "판매단가(V포함)" in df.columns and "판매단가(V포함)(3)" in df.columns:
@@ -844,39 +862,8 @@ class ExcelManager:
                     del df["가격차이(3)(%)"]
 
                 # 가격 차이 계산 (네이버 가격 - 본사 가격)
-                df["가격차이(3)"] = df.apply(
-                    lambda row: (
-                        row["판매단가(V포함)(3)"] - row["판매단가(V포함)"]
-                        if pd.notna(row.get("판매단가(V포함)(3)"))
-                        and pd.notna(row.get("판매단가(V포함)"))
-                        and row["판매단가(V포함)"] > 0  # 본사 가격이 0보다 큰 경우만 계산
-                        and row["판매단가(V포함)(3)"] > 0  # 네이버 가격이 0보다 큰 경우만 계산
-                        and abs(row["판매단가(V포함)(3)"] - row["판매단가(V포함)"]) < row["판매단가(V포함)"] * 5  # 가격차이가 본사 가격의 5배를 넘지 않도록 제한
-                        else None
-                    ),
-                    axis=1,
-                )
-
-                # 가격 차이 백분율 계산 (절대값 사용)
-                df["가격차이(3)(%)"] = df.apply(
-                    lambda row: (
-                        round(
-                            (
-                                (row["판매단가(V포함)(3)"] - row["판매단가(V포함)"])
-                                / row["판매단가(V포함)"]
-                            )
-                            * 100,
-                            2,  # 소수점 2자리까지만 표시
-                        )
-                        if pd.notna(row.get("판매단가(V포함)(3)"))
-                        and pd.notna(row.get("판매단가(V포함)"))
-                        and row["판매단가(V포함)"] > 0  # 본사 가격이 0보다 큰 경우만 계산
-                        and row["판매단가(V포함)(3)"] > 0  # 네이버 가격이 0보다 큰 경우만 계산
-                        and abs(row["판매단가(V포함)(3)"] - row["판매단가(V포함)"]) < row["판매단가(V포함)"] * 5  # 가격차이가 본사 가격의 5배를 넘지 않도록 제한
-                        else None
-                    ),
-                    axis=1,
-                )
+                df["가격차이(3)"], df["가격차이(3)(%)"] = zip(*df.apply(
+                    lambda row: self._compute_price_metrics(row.get("판매단가(V포함)"), row.get("판매단가(V포함)(3)")), axis=1))
         except Exception as e:
             self.logger.error(f"가격 차이 계산 중 오류 발생: {str(e)}", exc_info=True)
 
@@ -957,34 +944,37 @@ class ExcelManager:
 
         # 이미지 URL 처리 함수
         def process_image_url(url):
-            if not url:
+            cleaned_url = self._clean_url(url) # Use centralized cleaner
+            if not cleaned_url:
                 return ""
             try:
-                # @ 기호 제거 (Excel IMAGE 함수에서 문제 발생)
-                if '@' in url:
-                    url = url.replace('@', '')
-                
-                # HTTP를 HTTPS로 변환
-                if url.startswith('http:'):
-                    url = 'https:' + url[5:]
                 # HTTPS로 시작하는 경우에만 IMAGE 함수 적용
-                if url.startswith('https:'):
+                if cleaned_url.startswith('https:'):
                     # 이미지 크기 제한을 위한 파라미터 추가
-                    return f'=IMAGE("{url}", 2)'
-                return url
+                    return f'=IMAGE("{cleaned_url}", 2)'
+                return cleaned_url # Return cleaned URL if not https (might be local path etc.)
             except Exception as e:
                 self.logger.warning(f"이미지 URL 처리 중 오류 발생: {str(e)}")
-                return ""
+                return "" # Return empty on error
 
         # 기본 이미지 URL 설정
         if "본사 이미지" not in row and hasattr(result.source_product, "image_url") and result.source_product.image_url:
             row["본사 이미지"] = process_image_url(result.source_product.image_url)
         elif "본사 이미지" in row and isinstance(row["본사 이미지"], str) and row["본사 이미지"].startswith('http'):
             row["본사 이미지"] = process_image_url(row["본사 이미지"])
+        # Make sure existing image urls are also cleaned if they are just strings
+        elif "본사 이미지" in row and isinstance(row["본사 이미지"], str):
+             cleaned_existing_url = self._clean_url(row["본사 이미지"])
+             if cleaned_existing_url.startswith('https:'):
+                 row["본사 이미지"] = f'=IMAGE("{cleaned_existing_url}", 2)'
+             else:
+                 row["본사 이미지"] = cleaned_existing_url
 
         # 기본 URL 설정
         if "본사상품링크" not in row and hasattr(result.source_product, "url"):
-            row["본사상품링크"] = result.source_product.url
+            row["본사상품링크"] = self._clean_url(result.source_product.url) # Use cleaner
+        elif "본사상품링크" in row and isinstance(row["본사상품링크"], str):
+             row["본사상품링크"] = self._clean_url(row["본사상품링크"]) # Clean existing links too
 
     def _validate_critical_fields(self, row: Dict, result: object) -> None:
         """중요 필드 검증 및 수정"""
@@ -1039,7 +1029,7 @@ class ExcelManager:
                     row["가격차이(2)"] = koryo_match.price_difference
 
                 if hasattr(koryo_match, "price_difference_percent"):
-                    row["가격차이(2)%"] = koryo_match.price_difference_percent
+                    row["가격차이(2)(%)"] = koryo_match.price_difference_percent
 
                 # 텍스트 유사도
                 if hasattr(koryo_match, "text_similarity"):
@@ -1047,9 +1037,7 @@ class ExcelManager:
 
                 # 이미지 및 링크
                 if hasattr(match_product, "image_url") and match_product.image_url:
-                    image_url = match_product.image_url
-                    if image_url.startswith('http:'):
-                        image_url = 'https:' + image_url[5:]
+                    image_url = self._clean_url(match_product.image_url) # Use cleaner
                     if image_url.startswith('https:'):
                         # 이미지 크기 제한을 위한 파라미터 추가
                         row["고려기프트 이미지"] = f'=IMAGE("{image_url}", 2)'
@@ -1060,7 +1048,7 @@ class ExcelManager:
                     row["고려기프트 이미지"] = "이미지를 찾을 수 없음"
 
                 if hasattr(match_product, "url") and match_product.url:
-                    row["고려기프트 상품링크"] = match_product.url
+                    row["고려기프트 상품링크"] = self._clean_url(match_product.url) # Use cleaner
                 else:
                     # 링크가 없는 경우 메시지 설정
                     row["고려기프트 상품링크"] = "상품 링크를 찾을 수 없음"
@@ -1088,7 +1076,7 @@ class ExcelManager:
                 row["매칭_상황(2)"] = "고려기프트에서 상품을 찾지 못했습니다"
                 row["판매단가(V포함)(2)"] = 0
                 row["가격차이(2)"] = 0
-                row["가격차이(2)%"] = 0
+                row["가격차이(2)(%)"] = 0
                 row["고려기프트 이미지"] = "상품을 찾을 수 없음"
                 row["고려기프트 상품링크"] = "상품을 찾을 수 없음"
         except Exception as e:
@@ -1136,7 +1124,7 @@ class ExcelManager:
                     row["가격차이(3)"] = naver_match.price_difference
 
                 if hasattr(naver_match, "price_difference_percent"):
-                    row["가격차이(3)%"] = naver_match.price_difference_percent
+                    row["가격차이(3)(%)"] = naver_match.price_difference_percent
 
                 # 텍스트 유사도
                 if hasattr(naver_match, "text_similarity"):
@@ -1144,9 +1132,7 @@ class ExcelManager:
 
                 # 이미지 및 링크
                 if hasattr(match_product, "image_url") and match_product.image_url:
-                    image_url = match_product.image_url
-                    if image_url.startswith('http:'):
-                        image_url = 'https:' + image_url[5:]
+                    image_url = self._clean_url(match_product.image_url) # Use cleaner
                     if image_url.startswith('https:'):
                         # 이미지 크기 제한을 위한 파라미터 추가
                         row["네이버 이미지"] = f'=IMAGE("{image_url}", 2)'
@@ -1157,8 +1143,8 @@ class ExcelManager:
                     row["네이버 이미지"] = "이미지를 찾을 수 없음"
 
                 if hasattr(match_product, "url") and match_product.url:
-                    row["네이버 쇼핑 링크"] = match_product.url
-                    row["공급사 상품링크"] = match_product.url
+                    row["네이버 쇼핑 링크"] = self._clean_url(match_product.url) # Use cleaner
+                    row["공급사 상품링크"] = self._clean_url(match_product.url) # Use cleaner
                 else:
                     # 링크가 없는 경우 메시지 설정
                     row["네이버 쇼핑 링크"] = "상품 링크를 찾을 수 없음"
@@ -1187,7 +1173,7 @@ class ExcelManager:
                 row["매칭_상황(3)"] = "네이버에서 상품을 찾지 못했습니다"
                 row["판매단가(V포함)(3)"] = 0
                 row["가격차이(3)"] = 0
-                row["가격차이(3)%"] = 0
+                row["가격차이(3)(%)"] = 0
                 row["공급사명"] = "상품을 찾을 수 없음"
                 row["네이버 이미지"] = "상품을 찾을 수 없음"
                 row["네이버 쇼핑 링크"] = "상품을 찾을 수 없음"
@@ -1373,20 +1359,25 @@ class ExcelManager:
         try:
             self.logger.info(f"Adding hyperlinks to Excel file: {file_path}")
 
-            # 출력 파일명 생성
-            now = datetime.now()
-            timestamp = now.strftime("%Y%m%d_%H%M%S")
-            output_directory = os.path.dirname(file_path)
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
-            output_filename = f"{base_name}_result_{timestamp}.xlsx"
-            output_file_path = os.path.join(output_directory, output_filename)
+            # 출력 파일명 생성 제거 (기존 파일 수정)
+            # now = datetime.now()
+            # timestamp = now.strftime("%Y%m%d_%H%M%S")
+            # output_directory = os.path.dirname(file_path)
+            # base_name = os.path.splitext(os.path.basename(file_path))[0]
+            # output_filename = f"{base_name}_result_{timestamp}.xlsx"
+            # output_file_path = os.path.join(output_directory, output_filename)
 
-            # DataFrame 로드
-            df = pd.read_excel(file_path)
-
-            # 워크북 로드
-            wb = load_workbook(file_path)
-            ws = wb.active
+            # 워크북 로드 (기존 파일 사용)
+            try:
+                df = pd.read_excel(file_path)
+                wb = load_workbook(file_path)
+                ws = wb.active
+            except FileNotFoundError:
+                self.logger.error(f"File not found for adding hyperlinks: {file_path}")
+                return file_path
+            except Exception as load_err:
+                 self.logger.error(f"Error loading workbook for hyperlinks: {str(load_err)}")
+                 return file_path
 
             # 테두리 스타일 정의
             thin_border = Border(
@@ -1401,9 +1392,9 @@ class ExcelManager:
             for col in columns:
                 ws.column_dimensions[col].width = 16
 
-                for row in range(1, df.shape[0] + 2):  # 첫 번째 행은 헤더
+                for row in range(1, ws.max_row + 1): # 헤더 포함 모든 행
                     cell = ws[f"{col}{row}"]
-                    cell.alignment = Alignment(wrap_text=True)
+                    cell.alignment = Alignment(wrap_text=True, vertical="center") # 중앙 정렬 추가
                     cell.border = thin_border
 
             # 링크 컬럼 처리
@@ -1415,19 +1406,22 @@ class ExcelManager:
             ]
             for link_column in link_columns:
                 if link_column in df.columns:
+                    col_idx = df.columns.get_loc(link_column) + 1
                     for row_idx, link in enumerate(
                         df[link_column], start=2
                     ):  # 첫 번째 행은 헤더
                         if (
                             pd.notna(link)
                             and isinstance(link, str)
-                            and (link.startswith("http") or link.startswith("https"))
                         ):
-                            cell = ws.cell(
-                                row=row_idx, column=df.columns.get_loc(link_column) + 1
-                            )
-                            cell.value = link
-                            cell.hyperlink = link
+                            cell = ws.cell(row=row_idx, column=col_idx)
+                            cleaned_link = self._clean_url(link)
+                            cell.value = cleaned_link # Display cleaned link text
+                            if cleaned_link.startswith("https"):
+                                cell.hyperlink = cleaned_link
+                                cell.font = Font(color="0000FF", underline="single") # Style as hyperlink
+                            else:
+                                cell.hyperlink = None
 
             # 헤더 색상 적용
             gray_fill = PatternFill(
@@ -1460,11 +1454,11 @@ class ExcelManager:
                         except (ValueError, TypeError):
                             continue
 
-            # 결과 저장
-            wb.save(output_file_path)
-            self.logger.info(f"Excel file with hyperlinks saved to: {output_file_path}")
+            # 결과 저장 (기존 파일 덮어쓰기)
+            wb.save(file_path)
+            self.logger.info(f"Excel file with hyperlinks updated: {file_path}")
 
-            return output_file_path
+            return file_path
 
         except Exception as e:
             self.logger.error(
@@ -1724,38 +1718,24 @@ class ExcelManager:
             
             # 이미지 URL 처리
             main_image = product.image_url or "이미지 없음"
+            cleaned_main_image = self._clean_url(main_image) # Use cleaner
             
-            # 이미지 URL 정규화 및 처리
-            if isinstance(main_image, str) and (main_image.startswith(("http://", "https://")) or main_image.startswith("//")):
-                # 프로토콜 처리
-                if main_image.startswith("http:"):
-                    main_image = "https:" + main_image[5:]
-                elif main_image.startswith("//"):
-                    main_image = "https:" + main_image
-                
-                # @ 기호 제거 (Excel 저장 오류 방지)
-                if '@' in main_image:
-                    main_image = main_image.replace('@', '')
-                
-                # 특수 문자 처리
-                main_image = main_image.replace('\\', '/')
-                main_image = main_image.replace('"', '%22')
-                main_image = main_image.replace(' ', '%20')
-                
+            if cleaned_main_image.startswith('https:'):
                 # 이미지 URL이 있으면 Excel IMAGE 함수 사용
                 # 두 번째 매개변수 2 = 셀에 맞게 크기 조정
-                image_formula = f'=IMAGE("{main_image}", 2)'
+                image_formula = f'=IMAGE("{cleaned_main_image}", 2)'
                 worksheet.cell(row=row_idx, column=4, value=image_formula)
                 
                 # 이미지 URL도 별도 열에 저장 (디버깅용)
-                worksheet.cell(row=row_idx, column=13, value=main_image)
+                worksheet.cell(row=row_idx, column=13, value=cleaned_main_image)
             else:
                 # 이미지 URL이 없거나 유효하지 않은 경우 기본 네이버 이미지 사용
                 default_image = "https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png"
                 image_formula = f'=IMAGE("{default_image}", 2)'
                 worksheet.cell(row=row_idx, column=4, value=image_formula)
                 worksheet.cell(row=row_idx, column=13, value="기본 이미지 사용: " + default_image)
-                self.logger.warning(f"Invalid image URL for product {product.name}: {main_image}")
+                if main_image != "이미지 없음": # Log only if there was an attempt at a URL
+                    self.logger.warning(f"Invalid or non-HTTPS image URL for product {product.name}: {main_image}. Using default.")
             
             # 이미지 갤러리 처리
             gallery_urls = product.image_gallery or []
@@ -1763,20 +1743,9 @@ class ExcelManager:
                 # URL 정규화 및 @ 기호 제거 후 갤러리 이미지 URL들을 쉼표로 구분하여 저장
                 normalized_urls = []
                 for url in gallery_urls:
-                    if isinstance(url, str) and (url.startswith(("http://", "https://")) or url.startswith("//")):
-                        # 프로토콜 처리
-                        if url.startswith("http:"):
-                            url = "https:" + url[5:]
-                        elif url.startswith("//"):
-                            url = "https:" + url
-                        
-                        # @ 기호 및 특수문자 처리
-                        url = url.replace('@', '')
-                        url = url.replace('\\', '/')
-                        url = url.replace('"', '%22')
-                        url = url.replace(' ', '%20')
-                        
-                        normalized_urls.append(url)
+                    cleaned_gallery_url = self._clean_url(url) # Use cleaner
+                    if cleaned_gallery_url.startswith('https:'): # Only include valid https urls
+                        normalized_urls.append(cleaned_gallery_url)
                 
                 gallery_str = " | ".join(normalized_urls) if normalized_urls else "추가 이미지 없음"
                 worksheet.cell(row=row_idx, column=5, value=gallery_str)
@@ -1785,10 +1754,8 @@ class ExcelManager:
             
             # 제품 URL
             product_url = product.url or "URL 없음"
-            # URL에서 @ 기호 제거
-            if isinstance(product_url, str) and '@' in product_url:
-                product_url = product_url.replace('@', '')
-            worksheet.cell(row=row_idx, column=6, value=product_url)
+            cleaned_product_url = self._clean_url(product_url) # Use cleaner
+            worksheet.cell(row=row_idx, column=6, value=cleaned_product_url)
             
             # 소스 정보
             source = product.source or "알 수 없음"
@@ -1949,12 +1916,47 @@ class ExcelManager:
                 workbook.save(output_path)
                 self.logger.info(f"Successfully saved {total_products} products to {output_path}")
                 
-                # 파일 후처리 (포맷팅, @ 기호 제거 등)
-                processed_path = self.post_process_excel_file(output_path)
-                if processed_path != output_path:
-                    self.logger.info(f"Post-processed Excel file: {processed_path}")
-                    return processed_path
+                # 파일 후처리 (포맷팅, @ 기호 제거 등) - 직접 호출
+                self.logger.info(f"Starting post-processing for {output_path}")
                 
+                # 1. @ 기호 제거 (remove_at_symbol은 파일을 직접 수정)
+                try:
+                    self.remove_at_symbol(output_path)
+                    self.logger.info(f"Removed @ symbols from {output_path}")
+                except Exception as remove_err:
+                     self.logger.error(f"Error removing @ symbols during save: {str(remove_err)}")
+                     # Continue processing even if @ removal fails
+                
+                # 2. 이미지 수식 개선 (_fix_image_formulas는 파일을 직접 수정)
+                try:
+                    self._fix_image_formulas(output_path)
+                    self.logger.info(f"Fixed image formulas in {output_path}")
+                except Exception as img_err:
+                    self.logger.error(f"Error fixing image formulas during save: {str(img_err)}")
+                    # Continue processing even if image fixing fails
+                
+                # 3. 포맷팅 적용 (apply_formatting_to_excel은 파일을 직접 수정)
+                try:
+                    self.apply_formatting_to_excel(output_path)
+                    self.logger.info(f"Applied formatting to {output_path}")
+                except Exception as format_err:
+                    self.logger.error(f"Error applying formatting during save: {str(format_err)}")
+                    # Continue processing even if formatting fails
+                    
+                # 4. 하이퍼링크 추가 (add_hyperlinks_to_excel은 파일을 직접 수정)
+                try:
+                    self.add_hyperlinks_to_excel(output_path)
+                    self.logger.info(f"Added hyperlinks to {output_path}")
+                except Exception as link_err:
+                    self.logger.error(f"Error adding hyperlinks during save: {str(link_err)}")
+                    # Continue processing even if linking fails
+
+                # processed_path = self.post_process_excel_file(output_path)
+                # if processed_path != output_path:
+                #     self.logger.info(f"Post-processed Excel file: {processed_path}")
+                #     return processed_path
+                
+                self.logger.info(f"Post-processing completed for {output_path}")
                 return output_path
             except Exception as save_err:
                 self.logger.error(f"Error saving Excel file: {str(save_err)}")
@@ -2098,21 +2100,33 @@ class ExcelManager:
                 ws = wb[sheet_name]
                 
                 # 이미지 URL이 있는 열 찾기 (보통 13번 열)
-                image_url_col = None
-                for i, cell in enumerate(ws[1], 1):
+                image_url_col_idx = None # Use index (1-based)
+                image_formula_col_idx = None # Main image formula column (usually 4)
+                header_row = ws[1]
+
+                for i, cell in enumerate(header_row, 1):
                     if cell.value == "이미지 URL":
-                        image_url_col = i
-                        break
+                        image_url_col_idx = i
+                    elif cell.value == "메인 이미지": # Assuming the formula is in "메인 이미지"
+                         image_formula_col_idx = i
+                
+                # Ensure both columns were found
+                if image_url_col_idx is None:
+                    self.logger.warning(f"'이미지 URL' column not found in sheet '{sheet_name}'. Skipping formula fix for this sheet.")
+                    continue
+                if image_formula_col_idx is None:
+                     self.logger.warning(f"'메인 이미지' column not found in sheet '{sheet_name}'. Skipping formula fix for this sheet.")
+                     continue
                 
                 # 모든 셀을 검사하여 이미지 수식 찾기
                 for row_idx, row in enumerate(ws.iter_rows(min_row=2), 2):  # 헤더 제외
-                    # 1. IMAGE 수식이 있는 셀 확인 (4번째 열)
-                    image_cell = row[3]  # 4번째 열 (0-based index)
+                    # 1. IMAGE 수식이 있는 셀 확인 ("메인 이미지" 열)
+                    image_cell = row[image_formula_col_idx - 1]  # 0-based index
                     
-                    # 2. 원본 이미지 URL 가져오기 (이미지 URL 열이 있는 경우)
+                    # 2. 원본 이미지 URL 가져오기 ("이미지 URL" 열)
                     original_url = None
-                    if image_url_col and image_url_col <= len(row):
-                        url_cell = row[image_url_col-1]  # 0-based index
+                    if image_url_col_idx <= len(row):
+                        url_cell = row[image_url_col_idx - 1]  # 0-based index
                         if url_cell.value and isinstance(url_cell.value, str) and (
                             url_cell.value.startswith("http") or
                             url_cell.value.startswith("기본 이미지 사용:")
@@ -2195,3 +2209,19 @@ class ExcelManager:
                 self.logger.info(f"이미지 수식 수정 완료: {file_path}")
         except Exception as e:
             self.logger.error(f"이미지 수식 수정 중 오류: {str(e)}", exc_info=True)
+
+    def save_excel_file(self, df: pd.DataFrame, file_path: str) -> None:
+        """Saves a DataFrame to an Excel file."""
+        try:
+            self.logger.info(f"Saving DataFrame to Excel file: {file_path}")
+            # Ensure output directory exists
+            output_dir = os.path.dirname(file_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+                self.logger.info(f"Created output directory: {output_dir}")
+
+            df.to_excel(file_path, index=False)
+            self.logger.info(f"Successfully saved DataFrame to {file_path}")
+        except Exception as e:
+            self.logger.error(f"Error saving DataFrame to Excel: {str(e)}", exc_info=True)
+            raise # Re-raise the exception to be handled by the caller

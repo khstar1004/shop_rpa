@@ -91,7 +91,6 @@ class ProductProcessor:
             "timeout": min(15, self.config["PROCESSING"].get("REQUEST_TIMEOUT", 15)),  # 최대 15초로 제한
             "connect_timeout": 5,  # 연결 타임아웃 추가
             "read_timeout": 10,  # 읽기 타임아웃 추가
-            "cache_ttl": 3600,  # 캐시 TTL 1시간
         }
 
         # 해오름 스크래퍼
@@ -101,7 +100,11 @@ class ProductProcessor:
         self.koryo_scraper = KoryoScraper(**scraper_config)
 
         # 네이버 크롤러
-        naver_config = scraper_config.copy()
+        naver_config = {
+            "max_retries": min(3, self.config["PROCESSING"].get("MAX_RETRIES", 3)),  # 최대 3회로 제한
+            "cache": self.cache,
+            "timeout": min(15, self.config["PROCESSING"].get("REQUEST_TIMEOUT", 15)),  # 최대 15초로 제한
+        }
         
         # 프록시 사용 여부 확인
         use_proxies = False
@@ -392,14 +395,39 @@ class ProductProcessor:
                 'step': 'started'
             })
             
-            # 기존 처리 로직...
+            # 출력 디렉토리 설정
+            if not output_dir:
+                output_dir = self.config["PATHS"]["OUTPUT_DIR"]
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 중간 파일 경로 설정
+            intermediate_dir = os.path.join(output_dir, "intermediate")
+            os.makedirs(intermediate_dir, exist_ok=True)
+            intermediate_file = os.path.join(intermediate_dir, f"{base_name}_intermediate.xlsx")
+            
+            # 최종 파일 경로 설정
+            final_dir = os.path.join(output_dir, "final")
+            os.makedirs(final_dir, exist_ok=True)
+            output_file = os.path.join(final_dir, f"{base_name}_final.xlsx")
+            
+            # 파일 처리 로직
+            # 1. 엑셀 전처리
+            processed_file = self.process_excel_functionality(input_file)
+            
+            # 2. 중간 파일 생성
+            self.excel_manager.save_products([], intermediate_file)
+            
+            # 3. 후처리 및 최종 파일 생성
+            final_file = self.post_process_output_file(intermediate_file)
+            if final_file != intermediate_file:
+                os.rename(final_file, output_file)
             
             # 체크포인트 업데이트 - 처리 완료
             self._update_checkpoint(checkpoint_file, {
                 'status': 'complete',
                 'input_file': input_file,
-                'intermediate_file': intermediate_file,  # 처리 결과물 경로
-                'output_file': output_file,  # 처리 결과물 경로
+                'intermediate_file': intermediate_file,
+                'output_file': output_file,
                 'end_time': datetime.now().isoformat()
             })
             
@@ -415,7 +443,7 @@ class ProductProcessor:
             })
             self.logger.error(f"파일 처리 중 오류 발생: {input_file}, {str(e)}")
             raise
-            
+
     def _load_checkpoint(self, checkpoint_file: str) -> Optional[Dict]:
         """체크포인트 파일 로드"""
         if not os.path.exists(checkpoint_file):
