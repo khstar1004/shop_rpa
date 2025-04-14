@@ -112,5 +112,13 @@
     "failed_to_open_file": "파일 열기 실패",
     "release_to_drop": "파일을 여기에 놓으세요",
     "processing": "처리 중",
-    "processing_progress": "{current}/{total} 항목 처리 중"
+    "processing_progress": "{current}/{total} 항목 처리 중",
+    "cache_settings": "캐시 설정",
+    "clear_cache": "캐시 비우기",
+    "clear_cache_confirm_title": "캐시 비우기",
+    "clear_cache_confirm_message": "캐시를 비우시겠습니까? 이 작업은 되돌릴 수 없습니다.",
+    "clear_cache_success_title": "캐시 비우기 완료",
+    "clear_cache_success_message": "캐시가 성공적으로 비워졌습니다.",
+    "clear_cache_error_title": "캐시 비우기 오류",
+    "clear_cache_error_message": "캐시를 비우는 중 오류가 발생했습니다."
 }

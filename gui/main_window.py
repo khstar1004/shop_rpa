@@ -322,6 +322,7 @@ class MainWindow(QMainWindow):
     def create_settings_tab(self):
         """Create settings tab"""
         tab = QWidget()
+        tab_layout = QVBoxLayout(tab)
         layout = QVBoxLayout(tab)
         layout.setSpacing(20)
 
@@ -419,6 +420,17 @@ class MainWindow(QMainWindow):
         processing_layout.addLayout(similarity_layout)
 
         layout.addWidget(processing_group)
+
+        # Add cache clear button
+        cache_group = QGroupBox(tr.get_text("cache_settings"))
+        cache_layout = QVBoxLayout(cache_group)
+        
+        clear_cache_button = QPushButton(tr.get_text("clear_cache"))
+        clear_cache_button.clicked.connect(self.on_clear_cache_clicked)
+        cache_layout.addWidget(clear_cache_button)
+        
+        layout.addWidget(cache_group)
+        layout.addStretch()
 
         # Add apply button
         button_layout = QHBoxLayout()
@@ -1405,6 +1417,45 @@ class MainWindow(QMainWindow):
         # Enable start button if there are files
         self.start_button.setEnabled(True)
         self.status_label.setText(tr.get_text("files_in_batch", count=len(self.input_files)))
+
+    @pyqtSlot()
+    def on_clear_cache_clicked(self):
+        """Clear cache button clicked handler"""
+        try:
+            # Get cache directory from config
+            cache_dir = self.config["PATHS"]["CACHE_DIR"]
+            
+            # Show confirmation dialog
+            reply = QMessageBox.question(
+                self,
+                tr.get_text("clear_cache_confirm_title"),
+                tr.get_text("clear_cache_confirm_message"),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                # Clear cache
+                if hasattr(self, 'processor') and hasattr(self.processor, 'cache'):
+                    self.processor.cache.clear()
+                    QMessageBox.information(
+                        self,
+                        tr.get_text("clear_cache_success_title"),
+                        tr.get_text("clear_cache_success_message")
+                    )
+                else:
+                    QMessageBox.warning(
+                        self,
+                        tr.get_text("clear_cache_error_title"),
+                        tr.get_text("clear_cache_error_message")
+                    )
+        except Exception as e:
+            self.logger.error(f"Error clearing cache: {str(e)}")
+            QMessageBox.critical(
+                self,
+                tr.get_text("clear_cache_error_title"),
+                f"{tr.get_text('clear_cache_error_message')}\n{str(e)}"
+            )
 
 
 # Custom logging handler to emit logs to the GUI text area
