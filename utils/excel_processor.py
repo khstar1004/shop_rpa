@@ -231,15 +231,32 @@ def process_first_stage(input_file: str, output_dir: Optional[str] = None) -> st
             df['고려_가격차이'] = df['고려_가격'] - df['네이버_가격']
             df['네이버_가격차이'] = df['네이버_가격'] - df['고려_가격']
             
-            # 가격차이 퍼센트 계산
-            df['고려_가격차이_퍼센트'] = (df['고려_가격차이'] / df['네이버_가격']) * 100
-            df['네이버_가격차이_퍼센트'] = (df['네이버_가격차이'] / df['고려_가격']) * 100
+            # 가격 및 가격차이 숫자형으로 변환 (나누기 전)
+            korea_price_numeric = safe_to_numeric(df['고려_가격'])
+            naver_price_numeric = safe_to_numeric(df['네이버_가격'])
+            korea_diff_numeric = safe_to_numeric(df['고려_가격차이'])
+            naver_diff_numeric = safe_to_numeric(df['네이버_가격차이'])
+
+            # 안전한 퍼센트 계산 (0으로 나누기 방지)
+            df['고려_가격차이_퍼센트'] = np.divide(korea_diff_numeric * 100, naver_price_numeric, 
+                                             out=np.full_like(korea_diff_numeric, np.nan, dtype=np.double), 
+                                             where=naver_price_numeric!=0)
+            df['네이버_가격차이_퍼센트'] = np.divide(naver_diff_numeric * 100, korea_price_numeric, 
+                                              out=np.full_like(naver_diff_numeric, np.nan, dtype=np.double), 
+                                              where=korea_price_numeric!=0)
             
             logger.info("가격차이 및 퍼센트 컬럼 생성 완료")
-        
+        else:
+            logger.warning("가격차이 계산에 필요한 '고려_가격' 또는 '네이버_가격' 컬럼이 없습니다.")
+            # 필요한 컬럼 미리 생성 (NaN으로) - apply_second_stage_rules 에서 에러 방지용
+            if '고려_가격차이' not in df.columns: df['고려_가격차이'] = np.nan
+            if '네이버_가격차이' not in df.columns: df['네이버_가격차이'] = np.nan
+            if '고려_가격차이_퍼센트' not in df.columns: df['고려_가격차이_퍼센트'] = np.nan
+            if '네이버_가격차이_퍼센트' not in df.columns: df['네이버_가격차이_퍼센트'] = np.nan
+
         # 2. 기본수량 컬럼 확인
         if '네이버_기본수량' not in df.columns:
-            df['네이버_기본수량'] = pd.NA
+            df['네이버_기본수량'] = pd.NA # Use pd.NA for consistency
             logger.info("네이버_기본수량 컬럼 생성 완료")
         
         # 파일 저장
@@ -324,27 +341,54 @@ def apply_second_stage_rules(df):
     df_processed = df.copy()
     
     # --- 1. 데이터 변환 ---
-    numeric_cols = {
+    # 원본 Excel 파일의 컬럼 이름을 내부 표준 이름으로 변경하고 숫자로 변환
+    rename_and_numeric_cols = {
         '판매단가(V포함)': '본사_판매단가',
         '기본수량(1)': '본사_기본수량',
         '판매단가(V포함)(2)': '고려_판매단가',
-        '가격차이(2)': '고려_가격차이',
-        '가격차이(2)%': '고려_가격차이_퍼센트',
         '기본수량(2)': '고려_기본수량',
         '판매단가(V포함)(3)': '네이버_판매단가',
-        '가격차이(3)': '네이버_가격차이',
-        '가격차이(3)%': '네이버_가격차이_퍼센트',
-        '기본수량(3)': '네이버_기본수량',
+        '기본수량(3)': '네이버_기본수량', # 네이버 기본수량은 1차에서 생성될 수도 있음
     }
     
-    # 숫자 컬럼 변환
-    for original, new in numeric_cols.items():
-        if original in df_processed.columns:
+    processed_columns = set(df_processed.columns) # 컬럼 확인 속도 향상
+
+    for original, new in rename_and_numeric_cols.items():
+        if original in processed_columns:
             df_processed[new] = safe_to_numeric(df_processed[original])
+            # 원본 컬럼과 새 컬럼 이름이 다르고, 새 컬럼이 원본과 다른 이름으로 성공적으로 생성되었으면 원본 삭제 (중복 방지)
+            if original != new and new in df_processed.columns:
+                 # 원본 컬럼이 numeric_cols의 다른 값으로 사용되지 않는 경우에만 삭제
+                 is_original_used_elsewhere = any(val == original for val in rename_and_numeric_cols.values())
+                 if not is_original_used_elsewhere:
+                     try:
+                         df_processed = df_processed.drop(columns=[original])
+                         processed_columns.remove(original) # Update processed columns set
+                         logger.debug(f"원본 컬럼 '{original}' 삭제됨 (-> '{new}')")
+                     except KeyError:
+                         logger.warning(f"컬럼 '{original}' 삭제 시도 중 오류 발생 (이미 없음)")
+
+        elif new not in processed_columns: # 원본 컬럼도 없고, 새 이름의 컬럼도 없을 때
+            logger.warning(f"원본 컬럼 '{original}'을 찾을 수 없고, 대상 컬럼 '{new}'도 존재하지 않음. '{new}' 컬럼을 NaN으로 생성합니다.")
+            df_processed[new] = np.nan
+            processed_columns.add(new) # Update processed columns set
+        # else: 원본 컬럼은 없지만 새 이름의 컬럼('new')이 이미 존재하는 경우 (e.g., '네이버_기본수량')는 처리하지 않음
+
+    # 1차 처리에서 계산된 컬럼들이 숫자인지 확인 (필수는 아닐 수 있으나 안전 장치)
+    calculated_cols_to_check = ['고려_가격차이', '네이버_가격차이', '고려_가격차이_퍼센트', '네이버_가격차이_퍼센트']
+    for col in calculated_cols_to_check:
+        if col in processed_columns:
+            # 이미 numeric 타입이 아니면 변환 시도
+            if not pd.api.types.is_numeric_dtype(df_processed[col]):
+                 df_processed[col] = safe_to_numeric(df_processed[col])
+                 logger.debug(f"계산된 컬럼 '{col}'을 숫자 타입으로 변환했습니다.")
         else:
-            logger.warning(f"컬럼 '{original}'을 찾을 수 없음")
-    
-    # 퍼센트 컬럼 형식 확인 및 조정
+            # 1차 처리에서 필수적으로 생성되어야 하는 컬럼이 없는 경우
+            logger.error(f"필수 계산 컬럼 '{col}'이 누락되었습니다. 1차 처리 결과를 확인하세요. 해당 컬럼을 NaN으로 채웁니다.")
+            df_processed[col] = np.nan # 오류 방지를 위해 NaN으로 채움
+            processed_columns.add(col)
+
+    # 퍼센트 컬럼 형식 확인 및 조정 (100 곱해진 값 -> 0.xx 형식으로)
     percent_cols = ['고려_가격차이_퍼센트', '네이버_가격차이_퍼센트']
     for col in percent_cols:
         if col in df_processed.columns and not df_processed[col].empty:
@@ -542,10 +586,11 @@ def run_complete_workflow(input_file: str, output_root_dir: Optional[str] = None
             
             if not second_stage_file:
                 error_msg = "2차 파일 처리 실패: final 파일이 생성되지 않았습니다."
-                logger.warning(error_msg)
+                logger.error(error_msg)
                 results["status"] = "error"
                 results["error"] = error_msg
                 print(f"\n[오류] {error_msg}")
+                return results
             else:
                 results["status"] = "success"
                 print(f"\n[성공] 최종 보고서가 생성되었습니다: {second_stage_file}")
