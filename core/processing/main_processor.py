@@ -10,6 +10,7 @@ import pandas as pd
 
 from utils.caching import FileCache
 from utils.preprocessing import send_report_email
+from utils.excel_processor import run_complete_workflow, process_first_stage, process_second_stage
 
 from ..data_models import MatchResult, ProcessingResult, Product
 from ..matching.image_matcher import ImageMatcher
@@ -224,6 +225,8 @@ class ProductProcessor:
     def process_file(self, input_file: str) -> Tuple[Optional[str], Optional[str]]:
         """
         입력 엑셀 파일 처리 및 보고서 생성
+        
+        최적화된 코드: utils/excel_processor.py의 run_complete_workflow 함수를 활용
 
         Args:
             input_file: 입력 엑셀 파일 경로
@@ -234,77 +237,51 @@ class ProductProcessor:
         try:
             start_time = datetime.now()
             self.logger.info(
-                f"Processing started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                f"처리 시작: {start_time.strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
             # 파일 존재 확인
             if not os.path.exists(input_file):
-                error_msg = f"Input file not found: {input_file}"
+                error_msg = f"입력 파일을 찾을 수 없음: {input_file}"
                 self.logger.error(error_msg)
                 return None, error_msg
 
-            # 엑셀 전처리 작업 (XLS -> XLSX 변환 및 필요한 컬럼 추가)
-            input_file = self.process_excel_functionality(input_file)
-
-            # 입력 파일 읽기
-            try:
-                df = self.excel_manager.read_excel_file(input_file)
-
-                if df.empty:
-                    error_msg = "No data found in input file"
-                    self.logger.error(error_msg)
-                    return None, error_msg
-
-                total_items = len(df)
-                self.logger.info(f"Loaded {total_items} items from {input_file}")
-
-                # 데이터 정제
-                df = self.data_cleaner.clean_dataframe(df)
-
-            except Exception as e:
-                self.logger.error(f"Failed to read input file: {str(e)}", exc_info=True)
-                return None, f"Failed to read input file: {str(e)}"
-
-            # 대용량 파일 분할 처리
-            if self.file_splitter.needs_splitting(df):
-                try:
-                    split_files = self.file_splitter.split_input_file(df, input_file)
-                    self.logger.info(f"Input file split into {len(split_files)} files")
-
-                    # 각 분할 파일 처리
-                    result_files = []
-                    for split_file in split_files:
-                        result_file, _ = self._process_single_file(split_file)
-                        if result_file:
-                            result_files.append(result_file)
-
-                    # 결과 병합
-                    if len(result_files) > 1:
-                        merged_result = self.file_splitter.merge_result_files(
-                            result_files, input_file
-                        )
-                        return merged_result, None
-
-                    return result_files[0] if result_files else None, None
-
-                except Exception as e:
-                    self.logger.error(
-                        f"Error splitting input file: {str(e)}", exc_info=True
-                    )
-                    # 단일 파일로 처리
-                    self.logger.info("Falling back to processing as a single file")
-                    return self._process_single_file(input_file)
+            # 출력 디렉토리 설정
+            output_dir = self.config["PATHS"]["OUTPUT_DIR"]
+            
+            # 최적화된 워크플로우 실행
+            results = run_complete_workflow(
+                input_file=input_file,
+                output_root_dir=output_dir,
+                run_first_stage=True,
+                run_second_stage=True,
+                send_email=False  # 이메일은 별도로 처리
+            )
+            
+            # 결과 확인
+            if results["status"] == "success":
+                first_stage_file = results["first_stage_file"]
+                second_stage_file = results["second_stage_file"]
+                
+                end_time = datetime.now()
+                duration = (end_time - start_time).total_seconds()
+                self.logger.info(f"처리 완료: {duration:.2f}초 소요")
+                
+                return first_stage_file, None
             else:
-                # 단일 파일 처리
-                return self._process_single_file(input_file)
+                error_msg = results.get("error", "알 수 없는 오류")
+                self.logger.error(f"처리 실패: {error_msg}")
+                return None, error_msg
 
         except Exception as e:
-            self.logger.error(f"Error in process_file: {str(e)}", exc_info=True)
+            self.logger.error(f"처리 중 오류 발생: {str(e)}", exc_info=True)
             return None, str(e)
 
     def process_excel_functionality(self, input_file: str) -> str:
         """
         엑셀 파일에 대한 전처리 작업을 수행합니다.
+        
+        최적화된 코드: XLS -> XLSX 변환은 필요할 경우에만 수행
 
         Args:
             input_file: 입력 엑셀 파일 경로
@@ -313,66 +290,34 @@ class ProductProcessor:
             str: 처리된 파일 경로 (변경이 있는 경우 새 파일 경로, 없으면 원본 경로)
         """
         try:
-            input_dir = os.path.dirname(input_file)
-            input_ext = os.path.splitext(input_file)[1].lower()
-
-            # 1. XLS -> XLSX 변환 (확장자가 .xls인 경우)
-            if input_ext == ".xls":
+            # XLS -> XLSX 변환 (확장자가 .xls인 경우)
+            if input_file.lower().endswith('.xls'):
                 self.logger.info(f"XLS 파일 감지: {input_file}")
-                xlsx_file = self.excel_manager.convert_xls_to_xlsx(input_dir)
-                if xlsx_file:
-                    self.logger.info(f"XLS 파일이 XLSX로 변환되었습니다: {xlsx_file}")
-                    input_file = xlsx_file
-                else:
-                    self.logger.warning(
-                        "XLS 파일 변환에 실패했습니다. 원본 파일을 사용합니다."
-                    )
-
-            # 2. @ 기호 제거
-            input_file = self.excel_manager.remove_at_symbol(input_file)
-
-            # 3. 필요한 컬럼 확인 및 추가
-            self.excel_manager.check_excel_file(input_file)
-
+                
+                # 변환된 파일명 생성
+                output_file = os.path.splitext(input_file)[0] + '.xlsx'
+                
+                # pandas를 사용하여 직접 변환
+                df = pd.read_excel(input_file)
+                df.to_excel(output_file, index=False)
+                
+                self.logger.info(f"XLS 파일이 XLSX로 변환됨: {output_file}")
+                return output_file
+            
             return input_file
 
         except Exception as e:
             self.logger.error(f"엑셀 전처리 중 오류 발생: {str(e)}", exc_info=True)
             return input_file  # 오류 발생 시 원본 파일 사용
 
-    def post_process_output_file(self, output_file: str) -> str:
-        """
-        출력 엑셀 파일에 대한 후처리 작업을 수행합니다.
-
-        Args:
-            output_file: 처리된 엑셀 파일 경로
-
-        Returns:
-            str: 최종 출력 파일 경로
-        """
-        try:
-            # 0. 기본 엑셀 후처리 (@ 기호 제거, 이미지 수식 개선 등)
-            processed_file = self.excel_manager.post_process_excel_file(output_file)
-            
-            # 1. 하이퍼링크 추가
-            linked_file = self.excel_manager.add_hyperlinks_to_excel(processed_file)
-
-            # 2. 가격 차이가 있는 항목만 필터링
-            filtered_file = self.excel_manager.filter_excel_by_price_diff(linked_file)
-
-            # 3. 포맷팅 적용
-            self.excel_manager.apply_formatting_to_excel(filtered_file)
-
-            return filtered_file
-
-        except Exception as e:
-            self.logger.error(f"엑셀 후처리 중 오류 발생: {str(e)}", exc_info=True)
-            return output_file
-
     def _process_single_file(
         self, input_file: str, output_dir: Optional[str] = None
     ) -> Tuple[Optional[str], Optional[str]]:
-        """단일 파일 처리 로직 (체크포인트 지원)"""
+        """
+        단일 파일 처리 로직 (체크포인트 지원)
+        
+        최적화된 코드: utils/excel_processor.py 모듈 활용
+        """
         # 체크포인트 파일 경로 생성
         input_name = os.path.basename(input_file)
         base_name, _ = os.path.splitext(input_name)
@@ -398,29 +343,19 @@ class ProductProcessor:
             # 출력 디렉토리 설정
             if not output_dir:
                 output_dir = self.config["PATHS"]["OUTPUT_DIR"]
-            os.makedirs(output_dir, exist_ok=True)
             
-            # 중간 파일 경로 설정
-            intermediate_dir = os.path.join(output_dir, "intermediate")
-            os.makedirs(intermediate_dir, exist_ok=True)
-            intermediate_file = os.path.join(intermediate_dir, f"{base_name}_intermediate.xlsx")
+            # 최적화된 워크플로우 실행
+            results = run_complete_workflow(
+                input_file=input_file,
+                output_root_dir=output_dir,
+                run_first_stage=True,
+                run_second_stage=True,
+                send_email=False
+            )
             
-            # 최종 파일 경로 설정
-            final_dir = os.path.join(output_dir, "final")
-            os.makedirs(final_dir, exist_ok=True)
-            output_file = os.path.join(final_dir, f"{base_name}_final.xlsx")
-            
-            # 파일 처리 로직
-            # 1. 엑셀 전처리
-            processed_file = self.process_excel_functionality(input_file)
-            
-            # 2. 중간 파일 생성
-            self.excel_manager.save_products([], intermediate_file)
-            
-            # 3. 후처리 및 최종 파일 생성
-            final_file = self.post_process_output_file(intermediate_file)
-            if final_file != intermediate_file:
-                os.rename(final_file, output_file)
+            # 결과 처리
+            intermediate_file = results.get("first_stage_file")
+            output_file = results.get("second_stage_file")
             
             # 체크포인트 업데이트 - 처리 완료
             self._update_checkpoint(checkpoint_file, {
@@ -478,10 +413,7 @@ class ProductProcessor:
         """
         작업메뉴얼에 따른 전체 워크플로우 실행
         
-        1. 상품명 전처리 (1- 및 특수문자 제거)
-        2. 네이버쇼핑 및 고려기프트 검색
-        3. 1차 결과 생성 및 이메일 전송
-        4. 2차 결과 생성 (필요시)
+        최적화된 코드: utils/excel_processor.py 모듈의 run_complete_workflow 함수 활용
         
         Args:
             input_file: 입력 파일 경로
@@ -496,8 +428,6 @@ class ProductProcessor:
         """
         # 모듈 함수 직접 참조 대신 필요 시점에 임포트 (순환 참조 방지)
         from utils.preprocessing import send_report_email
-        import importlib
-        import json
         
         start_time = datetime.now()
         self.logger.info(f"작업메뉴얼 워크플로우 시작: {input_file}")
@@ -528,106 +458,48 @@ class ProductProcessor:
                     "status": "success",
                     "resumed_from_checkpoint": True
                 }
-                
-            elif checkpoint_data and checkpoint_data.get('status') == 'processing':
-                # 처리 중인 작업 재개
-                self.logger.info(f"중단된 워크플로우를 재개합니다: {input_file}")
-                # 진행 상태에 따라 단계별 재개 가능
-                first_stage_file = checkpoint_data.get('first_stage_file')
-                second_stage_file = checkpoint_data.get('second_stage_file')
-                email_sent = checkpoint_data.get('email_sent', False)
-                
-                # 체크포인트 상태 업데이트
-                self._update_checkpoint(checkpoint_file, {
-                    'resumed_at': datetime.now().isoformat()
-                })
-            else:
-                # 새 체크포인트 시작
-                self._update_checkpoint(checkpoint_file, {
-                    'status': 'processing',
-                    'input_file': input_file,
-                    'start_time': start_time.isoformat(),
-                    'step': 'started'
-                })
-                first_stage_file = None
-                second_stage_file = None
-                email_sent = False
-        else:
-            # 체크포인트 무시하고 새로 시작
-            self._update_checkpoint(checkpoint_file, {
-                'status': 'processing',
-                'input_file': input_file,
-                'start_time': start_time.isoformat(),
-                'step': 'started'
-            })
-            first_stage_file = None
-            second_stage_file = None
-            email_sent = False
+        
+        # 출력 디렉토리 설정
+        if not output_dir:
+            output_dir = self.config["PATHS"]["OUTPUT_DIR"]
+        
+        # 체크포인트 초기화
+        self._update_checkpoint(checkpoint_file, {
+            'status': 'processing',
+            'input_file': input_file,
+            'start_time': start_time.isoformat(),
+            'step': 'started'
+        })
         
         try:
-            # 출력 디렉토리 확인
-            if not output_dir:
-                output_dir = self.config["PATHS"]["OUTPUT_DIR"]
-                os.makedirs(output_dir, exist_ok=True)
-                
-            # 1. 파일 처리 (1차 결과)
-            if not first_stage_file:
-                # 진행상황 콜백 업데이트
-                if self.progress_callback:
-                    self.progress_callback("1차 파일 처리 중...", 25)
-                    
-                # process_excel_file 함수는 없으므로 _process_single_file 사용
-                _, first_stage_file = self._process_single_file(input_file, output_dir)
-                
-                if not first_stage_file:
-                    self.logger.error(f"1차 파일 생성 실패: {input_file}")
-                    raise ValueError(f"입력 파일 처리 중 오류 발생: {input_file}")
-                    
-                self.logger.info(f"1차 파일 생성 완료: {first_stage_file}")
-                
-                # 체크포인트 업데이트
-                self._update_checkpoint(checkpoint_file, {
-                    'step': 'first_stage_complete',
-                    'first_stage_file': first_stage_file
-                })
+            # 진행상황 콜백 업데이트
+            if self.progress_callback:
+                self.progress_callback("워크플로우 실행 중...", 10)
             
-            # 2. 이메일 전송
-            if not email_sent and send_email and first_stage_file:
+            # 최적화된 워크플로우 실행
+            results = run_complete_workflow(
+                input_file=input_file,
+                output_root_dir=output_dir,
+                run_first_stage=True,
+                run_second_stage=generate_second_stage,
+                send_email=send_email
+            )
+            
+            # 결과 수집
+            first_stage_file = results.get("first_stage_file")
+            second_stage_file = results.get("second_stage_file")
+            status = results.get("status", "error")
+            email_sent = results.get("email_sent", False)
+            
+            # 이메일 전송 (필요시)
+            if send_email and first_stage_file and not email_sent:
                 # 진행상황 콜백 업데이트
                 if self.progress_callback:
-                    self.progress_callback("이메일 전송 중...", 50)
+                    self.progress_callback("이메일 전송 중...", 80)
                     
                 email_sent = send_report_email(first_stage_file, recipient_email=email_recipient)
                 if email_sent:
                     self.logger.info(f"1차 결과 이메일 전송 완료: {email_recipient}")
-                    
-                    # 체크포인트 업데이트
-                    self._update_checkpoint(checkpoint_file, {
-                        'step': 'email_sent',
-                        'email_sent': True,
-                        'email_recipient': email_recipient
-                    })
-                else:
-                    self.logger.warning("1차 결과 이메일 전송 실패")
-            
-            # 3. 2차 파일 생성 (필요시)
-            if not second_stage_file and generate_second_stage and first_stage_file:
-                # 진행상황 콜백 업데이트
-                if self.progress_callback:
-                    self.progress_callback("2차 파일 생성 중...", 75)
-                    
-                # 동적으로 process_excel 모듈 로드
-                process_excel = importlib.import_module('process_excel')
-                second_stage_file = process_excel.process_first_to_second_stage(
-                    first_stage_file, output_dir
-                )
-                self.logger.info(f"2차 파일 생성 완료: {second_stage_file}")
-                
-                # 체크포인트 업데이트
-                self._update_checkpoint(checkpoint_file, {
-                    'step': 'second_stage_complete',
-                    'second_stage_file': second_stage_file
-                })
             
             # 처리 완료 시간
             end_time = datetime.now()
@@ -640,6 +512,10 @@ class ProductProcessor:
             # 체크포인트 업데이트 - 완료 상태
             self._update_checkpoint(checkpoint_file, {
                 'status': 'complete',
+                'first_stage_file': first_stage_file,
+                'second_stage_file': second_stage_file,
+                'email_sent': email_sent,
+                'email_recipient': email_recipient if email_sent else None,
                 'end_time': end_time.isoformat(),
                 'duration_seconds': duration
             })
@@ -654,7 +530,7 @@ class ProductProcessor:
                 "start_time": start_time.isoformat(),
                 "end_time": end_time.isoformat(),
                 "duration_seconds": duration,
-                "status": "success"
+                "status": status
             }
             
             self.logger.info(f"작업메뉴얼 워크플로우 완료: {duration:.1f}초 소요")
@@ -681,9 +557,6 @@ class ProductProcessor:
             # 오류 요약
             result = {
                 "input_file": input_file,
-                "first_stage_file": first_stage_file if 'first_stage_file' in locals() else None,
-                "second_stage_file": second_stage_file if 'second_stage_file' in locals() else None,
-                "email_sent": email_sent if 'email_sent' in locals() else False,
                 "start_time": start_time.isoformat(),
                 "end_time": end_time.isoformat(),
                 "duration_seconds": duration,

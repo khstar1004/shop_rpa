@@ -8,7 +8,7 @@ psutil==7.0.0
 
 # Core Utilities
 numpy==1.26.4
-pandas==2.2.2
+pandas>=1.0.0
 pillow==11.2.0
 python-dateutil==2.9.0.post0
 konlpy
@@ -27,7 +27,7 @@ lxml==5.2.0
 requests==2.31.0
 
 # Excel Processing
-openpyxl==3.1.2
+openpyxl>=3.0.0
 xlrd==2.0.1
 pywin32==306
 html5lib==1.1

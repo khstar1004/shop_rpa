@@ -4,6 +4,8 @@ from .writer import ExcelWriter
 from .converter import ExcelConverter
 from .postprocessor import ExcelPostProcessor
 import pandas as pd
+import os
+import time
 
 class ExcelManager:
     def __init__(self, config: dict, logger=None):
@@ -37,7 +39,63 @@ class ExcelManager:
         return self.formatter.filter_excel_by_price_diff(file_path)
 
     def remove_at_symbol(self, file_path: str) -> str:
-        return self.postprocessor.remove_at_symbol(file_path)
+        # Try to remove @ symbols with retries
+        max_retries = 3
+        retry_delay = 1  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                return self.postprocessor.remove_at_symbol(file_path)
+            except PermissionError as e:
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"Attempt {attempt + 1} failed: {str(e)}. Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    self.logger.error(f"Failed to remove @ symbols after {max_retries} attempts: {str(e)}")
+                    raise
 
     def save_products(self, products: list, output_path: str, sheet_name: str = None, naver_results: list = None) -> str:
-        return self.writer.save_products(products, output_path, sheet_name, naver_results) 
+        return self.writer.save_products(products, output_path, sheet_name, naver_results)
+
+    def check_excel_file(self, file_path: str) -> None:
+        """Check if Excel file has the required columns and add them if missing"""
+        try:
+            self.logger.info(f"Checking Excel file: {file_path}")
+            
+            # Check if file exists
+            if not os.path.exists(file_path):
+                self.logger.error(f"Excel file not found: {file_path}")
+                return
+            
+            # Read Excel file
+            df = pd.read_excel(file_path)
+            
+            # Define columns to add if missing
+            columns_to_add = ["본사 이미지", "고려기프트 이미지", "네이버 이미지"]
+            need_to_modify = False
+            
+            # Check and add missing columns
+            for column in columns_to_add:
+                if column not in df.columns:
+                    df[column] = ""
+                    need_to_modify = True
+                    self.logger.info(f"Added missing column: {column}")
+            
+            # If no modifications needed, return
+            if not need_to_modify:
+                self.logger.info("All required columns exist. No modifications needed.")
+                return
+            
+            # Clean column names (remove whitespace)
+            df.columns = [col.strip() for col in df.columns]
+            
+            # Save Excel file
+            df.to_excel(file_path, index=False)
+            self.logger.info(f"Updated Excel file with required columns: {file_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Error checking Excel file: {str(e)}")
+
+    def post_process_excel_file(self, file_path: str) -> str:
+        """Alias for post_process_excel to maintain backward compatibility"""
+        return self.post_process_excel(file_path) 
