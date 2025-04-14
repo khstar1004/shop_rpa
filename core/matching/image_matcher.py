@@ -25,12 +25,14 @@ from ..data_models import Product
 
 class ImageMatcher:
     def __init__(
-        self, cache: Optional[FileCache] = None, similarity_threshold: float = 0.8
+        self, cache: Optional[FileCache] = None, similarity_threshold: float = 0.8,
+        max_image_dimension: Optional[int] = None
     ):
         self.logger = logging.getLogger(__name__)
         self.cache = cache
         self.similarity_threshold = similarity_threshold
         self.remove_background = False  # 기본값은 배경 제거 비활성화
+        self.max_image_dimension = max_image_dimension  # 최대 이미지 해상도 설정
 
         # 더 최신 모델로 업그레이드 (b0 → b3)
         try:

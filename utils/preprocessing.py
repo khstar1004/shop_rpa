@@ -14,6 +14,11 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from typing import Any, Dict, List, Optional
 from pathlib import Path
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+import re
 
 import pandas as pd
 # Unused imports removed
@@ -650,3 +655,111 @@ def merge_result_files(file_paths: List[str], original_input: str) -> Optional[s
     except Exception as e:
         logger.error(f"Error merging files: {e}", exc_info=True)
         return None
+
+
+def send_report_email(result_file_path, recipient_email='dasomas@kakao.com'):
+    """
+    작업메뉴얼 요구사항에 따라 1차 가격조사 결과물을 이메일로 전송
+    
+    Args:
+        result_file_path: 결과 파일 경로
+        recipient_email: 수신자 이메일 (기본값: dasomas@kakao.com)
+    
+    Returns:
+        bool: 이메일 전송 성공 여부
+    """
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # 이메일 설정 로드 (환경변수나 설정 파일에서 로드)
+        sender_email = os.environ.get('EMAIL_USER', '')
+        sender_password = os.environ.get('EMAIL_PASSWORD', '')
+        smtp_server = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
+        smtp_port = int(os.environ.get('SMTP_PORT', 587))
+        use_ssl = os.environ.get('EMAIL_USE_SSL', 'False').lower() == 'true'
+        
+        if not sender_email or not sender_password:
+            logger.error("이메일 설정이 없습니다. 환경변수를 확인하세요.")
+            return False
+        
+        # 수신자 이메일 검증
+        if not recipient_email or '@' not in recipient_email:
+            logger.error(f"유효하지 않은 수신자 이메일 주소: {recipient_email}")
+            return False
+            
+        # 결과 파일 확인
+        if not os.path.exists(result_file_path):
+            logger.error(f"결과 파일이 존재하지 않습니다: {result_file_path}")
+            return False
+            
+        # 파일명에서 작업 정보 추출
+        file_name = os.path.basename(result_file_path)
+        product_category = "가격조사"
+        if "-" in file_name:
+            match = re.search(r'([\w-]+)-(\d{8})', file_name)
+            if match:
+                product_category = match.group(1)
+                
+        # 처리 시간 정보
+        now = datetime.now()
+        date_str = now.strftime("%Y년 %m월 %d일")
+        time_str = now.strftime("%H:%M:%S")
+        
+        # 이메일 작성
+        message = MIMEMultipart()
+        message['From'] = sender_email
+        message['To'] = recipient_email
+        message['Subject'] = f"[해오름] {date_str} {product_category} 1차 가격조사 결과"
+        
+        # 이메일 본문
+        body = f"""안녕하세요,
+
+{date_str} {product_category} 1차 가격조사 결과를 첨부합니다.
+
+- 조사 시작 시간: {datetime.fromtimestamp(os.path.getctime(result_file_path)).strftime('%Y-%m-%d %H:%M:%S')}
+- 조사 완료 시간: {time_str}
+- 파일명: {file_name}
+
+감사합니다.
+"""
+        message.attach(MIMEText(body, 'plain'))
+        
+        # 파일 첨부
+        try:
+            with open(result_file_path, 'rb') as file:
+                attachment = MIMEApplication(file.read(), Name=file_name)
+                attachment['Content-Disposition'] = f'attachment; filename="{file_name}"'
+                message.attach(attachment)
+        except Exception as file_err:
+            logger.error(f"첨부 파일 처리 중 오류: {str(file_err)}")
+            return False
+            
+        # 이메일 전송
+        try:
+            if use_ssl:
+                # SSL 연결
+                with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
+                    server.login(sender_email, sender_password)
+                    server.send_message(message)
+            else:
+                # TLS 연결
+                with smtplib.SMTP(smtp_server, smtp_port) as server:
+                    server.starttls()
+                    server.login(sender_email, sender_password)
+                    server.send_message(message)
+                    
+            logger.info(f"가격조사 결과 이메일 전송 완료: {recipient_email}")
+            return True
+        except smtplib.SMTPAuthenticationError:
+            logger.error("이메일 인증 실패. 계정과 비밀번호를 확인하세요.")
+            return False
+        except smtplib.SMTPException as smtp_err:
+            logger.error(f"SMTP 서버 오류: {str(smtp_err)}")
+            return False
+        except (ConnectionRefusedError, TimeoutError) as conn_err:
+            logger.error(f"SMTP 서버 연결 실패: {str(conn_err)}")
+            return False
+        
+    except Exception as e:
+        logger.error(f"이메일 전송 중 오류 발생: {str(e)}")
+        return False

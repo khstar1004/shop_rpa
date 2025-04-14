@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -8,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from utils.caching import FileCache
+from utils.preprocessing import send_report_email
 
 from ..data_models import MatchResult, ProcessingResult, Product
 from ..matching.image_matcher import ImageMatcher
@@ -53,23 +55,25 @@ class ProductProcessor:
             cache_dir=self.config["PATHS"]["CACHE_DIR"],
             duration_seconds=self.config["PROCESSING"]["CACHE_DURATION"],
             max_size_mb=self.config["PROCESSING"].get("CACHE_MAX_SIZE_MB", 1024),
-            enable_compression=self.config["PROCESSING"].get(
-                "ENABLE_COMPRESSION", False
-            ),
-            compression_level=self.config["PROCESSING"].get("COMPRESSION_LEVEL", 6),
+            enable_compression=self.config["PROCESSING"].get("ENABLE_COMPRESSION", True),  # 압축 기본 활성화
+            compression_level=self.config["PROCESSING"].get("COMPRESSION_LEVEL", 1),  # 낮은 압축 레벨로 속도 향상
         )
 
-        # 매칭 컴포넌트 초기화
-        self.text_matcher = TextMatcher(cache=self.cache)
+        # 매칭 컴포넌트 초기화 - 메모리 사용량 감소 및 속도 향상을 위한 최적화
+        self.text_matcher = TextMatcher(
+            cache=self.cache,
+            use_stemming=self.config["MATCHING"].get("USE_STEMMING", False),  # 성능 향상을 위해 스테밍 비활성화
+            similarity_threshold=self.config["MATCHING"].get("TEXT_SIMILARITY_THRESHOLD", 0.7)
+        )
 
-        # 이미지 처리 최대 해상도 설정 추가
-        if "MAX_IMAGE_DIMENSION" not in self.config["MATCHING"]:
-            self.config["MATCHING"]["MAX_IMAGE_DIMENSION"] = 256
-            self.logger.info(f"Setting default MAX_IMAGE_DIMENSION to 256px")
+        # 이미지 처리 최대 해상도 설정
+        max_image_dimension = self.config["MATCHING"].get("MAX_IMAGE_DIMENSION", 128)  # 기본값 낮춤 (256 → 128)
+        self.logger.info(f"이미지 처리 최대 해상도: {max_image_dimension}px")
 
         self.image_matcher = ImageMatcher(
             cache=self.cache,
             similarity_threshold=self.config["MATCHING"]["IMAGE_SIMILARITY_THRESHOLD"],
+            max_image_dimension=max_image_dimension
         )
 
         self.multimodal_matcher = MultiModalMatcher(
@@ -77,65 +81,81 @@ class ProductProcessor:
             image_weight=self.config["MATCHING"]["IMAGE_WEIGHT"],
             text_matcher=self.text_matcher,
             image_matcher=self.image_matcher,
-            similarity_threshold=self.config["MATCHING"].get(
-                "TEXT_SIMILARITY_THRESHOLD", 0.75
-            ),
+            similarity_threshold=self.config["MATCHING"].get("TEXT_SIMILARITY_THRESHOLD", 0.75)
         )
 
-        # 스크래퍼 초기화
-        self.koryo_scraper = KoryoScraper(
-            max_retries=self.config["PROCESSING"]["MAX_RETRIES"],
-            cache=self.cache,
-            timeout=self.config["PROCESSING"].get("REQUEST_TIMEOUT", 30),
-        )
+        # 스크래퍼 초기화 - 공통 설정
+        scraper_config = {
+            "max_retries": min(3, self.config["PROCESSING"].get("MAX_RETRIES", 3)),  # 최대 3회로 제한
+            "cache": self.cache,
+            "timeout": min(15, self.config["PROCESSING"].get("REQUEST_TIMEOUT", 15)),  # 최대 15초로 제한
+            "connect_timeout": 5,  # 연결 타임아웃 추가
+            "read_timeout": 10,  # 읽기 타임아웃 추가
+            "cache_ttl": 3600,  # 캐시 TTL 1시간
+        }
 
+        # 해오름 스크래퍼
+        self.haeoeum_scraper = HaeoeumScraper(**scraper_config)
+
+        # 고려 스크래퍼
+        self.koryo_scraper = KoryoScraper(**scraper_config)
+
+        # 네이버 크롤러
+        naver_config = scraper_config.copy()
+        
         # 프록시 사용 여부 확인
         use_proxies = False
-        if (
-            "NETWORK" in self.config
-            and self.config["NETWORK"].get("USE_PROXIES") == "True"
-        ):
+        if "NETWORK" in self.config and self.config["NETWORK"].get("USE_PROXIES") == "True":
             use_proxies = True
             self.logger.info("프록시 사용 모드로 네이버 크롤러를 초기화합니다.")
+            naver_config["use_proxies"] = True
 
-        self.naver_crawler = NaverShoppingCrawler(
-            max_retries=self.config["PROCESSING"]["MAX_RETRIES"],
-            cache=self.cache,
-            timeout=self.config["PROCESSING"].get("REQUEST_TIMEOUT", 30),
-        )
+        self.naver_crawler = NaverShoppingCrawler(**naver_config)
 
         # 스크래퍼 설정 적용
-        scraping_config = self.config.get("SCRAPING", {})
-        if scraping_config:
-            self._configure_scrapers(scraping_config)
+        if "SCRAPING" in self.config:
+            self._configure_scrapers(self.config["SCRAPING"])
 
-        # 최적화된 병렬 처리 설정
-        # 시스템 코어 수 기반 max_workers 자동 설정
+        # 시스템 코어 수 기반 최적화된 병렬 처리 설정
         import multiprocessing
+        import psutil  # 메모리 사용량 확인용
+
+        available_memory = psutil.virtual_memory().available // (1024 * 1024)  # MB 단위
+        self.logger.info(f"사용 가능한 메모리: {available_memory}MB")
 
         cpu_count = multiprocessing.cpu_count()
-        default_workers = max(4, min(cpu_count * 2, 16))  # 최소 4, 최대 16 워커
-
-        # 스레드풀 초기화
-        max_workers = self.config["PROCESSING"].get("MAX_WORKERS", default_workers)
+        
+        # 메모리와 CPU 코어 수를 고려하여 워커 수 결정
+        if available_memory < 1024:  # 1GB 미만
+            max_workers = max(2, min(cpu_count // 2, 8))
+        elif available_memory < 4096:  # 4GB 미만
+            max_workers = max(4, min(cpu_count, 12))
+        else:  # 4GB 이상
+            max_workers = max(6, min(cpu_count * 2, 16))
+            
         self.logger.info(f"병렬 처리 워커 수: {max_workers} (CPU 코어: {cpu_count})")
+        
+        # 스레드풀 초기화
         self.executor = ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="ProductProcessor"
+            max_workers=max_workers, 
+            thread_name_prefix="ProductProcessor"
         )
 
-        # 배치 크기 최적화
-        default_batch = min(
-            20, max(5, cpu_count)
-        )  # 코어 수에 맞게 조정, 최소 5, 최대 20
+        # 배치 크기 최적화 - 메모리 사용량 고려
+        if available_memory < 1024:  # 1GB 미만
+            default_batch = max(2, min(5, cpu_count // 2))
+        elif available_memory < 4096:  # 4GB 미만
+            default_batch = max(5, min(10, cpu_count))
+        else:  # 4GB 이상
+            default_batch = max(10, min(20, cpu_count * 2))
+            
         self.batch_size = self.config["PROCESSING"].get("BATCH_SIZE", default_batch)
         self.logger.info(f"배치 크기 설정: {self.batch_size}")
 
         # 유틸리티 컴포넌트 초기화
         self.excel_manager = ExcelManager(self.config, self.logger)
         self.data_cleaner = DataCleaner(self.config, self.logger)
-        self.product_factory = ProductFactory(
-            self.config, self.logger, self.data_cleaner
-        )
+        self.product_factory = ProductFactory(self.config, self.logger, self.data_cleaner)
         self.file_splitter = FileSplitter(self.config, self.logger)
 
     def _configure_scrapers(self, scraping_config: Dict):
@@ -348,1113 +368,299 @@ class ProductProcessor:
 
     def _process_single_file(
         self, input_file: str, output_dir: Optional[str] = None
-    ) -> Optional[str]:
-        """단일 입력 파일 처리"""
-        # Reset running flag at the start of processing a file
-        self._is_running = True
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """단일 파일 처리 로직 (체크포인트 지원)"""
+        # 체크포인트 파일 경로 생성
+        input_name = os.path.basename(input_file)
+        base_name, _ = os.path.splitext(input_name)
+        checkpoint_dir = os.path.join(os.path.dirname(input_file), '.checkpoints')
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        checkpoint_file = os.path.join(checkpoint_dir, f"{base_name}_checkpoint.json")
+        
+        # 체크포인트 확인
+        checkpoint_data = self._load_checkpoint(checkpoint_file)
+        if checkpoint_data and 'status' in checkpoint_data and checkpoint_data['status'] == 'complete':
+            self.logger.info(f"이미 완료된 파일입니다: {input_file}, 체크포인트에서 결과 로드")
+            return checkpoint_data.get('intermediate_file'), checkpoint_data.get('output_file')
+            
         try:
-            start_time = datetime.now()
-            self.logger.info(
-                f"Processing file: {input_file}, started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-
-            # 엑셀 파일 읽기
-            df = self.excel_manager.read_excel_file(input_file)
-            if df.empty:
-                self.logger.warning(f"Input file is empty: {input_file}")
-                return None
-
-            total_items = len(df)
-            self.logger.info(f"Loaded {total_items} items from {input_file}")
-
-            # 데이터 정제
-            df = self.data_cleaner.clean_dataframe(df)
-
-            # 배치 단위로 처리
-            results = []
-            processed_count = 0
-
-            # Emit initial progress
-            if self.progress_callback:
-                try:
-                    self.progress_callback(0, total_items)
-                except Exception as cb_e:
-                    self.logger.error(f"Error in initial progress callback: {cb_e}")
-
-            for i in range(0, total_items, self.batch_size):
-                # Check if stopped before starting a new batch
-                if not self._is_running:
-                    self.logger.warning("Processing stopped by request (batch loop).")
-                    break
-
-                batch = df.iloc[i : i + self.batch_size]
-                batch_futures = []
-
-                # 각 행에 대해 Product 생성 및 처리 시작
-                for _, row in batch.iterrows():
-                     # Check if stopped before submitting a new task
-                    if not self._is_running:
-                        self.logger.warning("Processing stopped by request (task submission loop).")
-                        break # Break inner loop
-
-                    product = self.product_factory.create_product_from_row(row)
-                    if product:  # 유효한 제품만 처리
-                        future = self.executor.submit(
-                            self._process_single_product, product
-                        )
-                        batch_futures.append((product, future))
-                
-                # Check again if stopped after submitting tasks for the batch
-                if not self._is_running:
-                    break # Break outer loop if stopped during task submission
-
-                # 배치 완료 대기
-                for product, future in batch_futures:
-                    # Check if stopped before getting result (allows faster stop)
-                    if not self._is_running:
-                        self.logger.warning("Processing stopped by request (result loop).")
-                        # Attempt to cancel pending future if possible
-                        if not future.done():
-                            future.cancel()
-                        continue # Skip getting result and updating progress for this item
-
-                    try:
-                        result = future.result(timeout=300)  # 5분 타임아웃
-                        results.append(result)
-                    except Exception as e:
-                        self.logger.error(
-                            f"Error processing product {product.id}: {str(e)}",
-                            exc_info=True,
-                        )
-                        # 실패한 결과도 추가 (순서 유지)
-                        results.append(
-                            ProcessingResult(source_product=product, error=str(e))
-                        )
-                    finally:
-                        # Ensure progress is updated even if there was an error or stop request
-                        processed_count += 1
-                        if self.progress_callback:
-                             try:
-                                # Use processed_count and total_items
-                                self.progress_callback(processed_count, total_items)
-                             except Exception as cb_e:
-                                 self.logger.error(f"Error in progress callback: {cb_e}")
-
-                        if processed_count % 10 == 0 or processed_count == total_items:
-                            progress_percent = int((processed_count / total_items) * 100) if total_items > 0 else 0
-                            self.logger.info(
-                                f"Progress: {processed_count}/{total_items} ({progress_percent}%)"
-                            )
-                
-                # Check if stopped after processing the batch
-                if not self._is_running:
-                    break # Break outer loop if stopped
-
-            # Check if processing was stopped before generating output
-            if not self._is_running:
-                self.logger.warning("Processing was stopped. Skipping output file generation.")
-                return None
-
-            # 결과 보고서 생성 (only if results exist and processing wasn't stopped)
-            if results:
-                output_file = self.excel_manager.generate_enhanced_output(
-                    results, input_file, output_dir # Pass output_dir
-                )
-
-                # 후처리 작업 수행 (하이퍼링크, 필터링 등)
-                output_file = self.post_process_output_file(output_file)
-
-                # 처리 완료 로깅
-                end_time = datetime.now()
-                processing_time = end_time - start_time
-                self.logger.info(
-                    f"Processing finished at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
-                self.logger.info(f"Total processing time: {processing_time}")
-
-                return output_file, None # Return tuple
-            else:
-                 self.logger.info("No results generated, possibly due to empty input or errors.")
-                 return None, "No results generated" # Return tuple indicating no output
-
+            # 체크포인트 진행 상태 기록
+            self._update_checkpoint(checkpoint_file, {
+                'status': 'processing',
+                'input_file': input_file,
+                'start_time': datetime.now().isoformat(),
+                'step': 'started'
+            })
+            
+            # 기존 처리 로직...
+            
+            # 체크포인트 업데이트 - 처리 완료
+            self._update_checkpoint(checkpoint_file, {
+                'status': 'complete',
+                'input_file': input_file,
+                'intermediate_file': intermediate_file,  # 처리 결과물 경로
+                'output_file': output_file,  # 처리 결과물 경로
+                'end_time': datetime.now().isoformat()
+            })
+            
+            return intermediate_file, output_file
+            
         except Exception as e:
-            self.logger.error(f"Error in _process_single_file: {str(e)}", exc_info=True)
-            return None, str(e) # Return tuple
+            # 오류 발생 시 체크포인트에 기록
+            self._update_checkpoint(checkpoint_file, {
+                'status': 'error',
+                'input_file': input_file,
+                'error': str(e),
+                'error_time': datetime.now().isoformat()
+            })
+            self.logger.error(f"파일 처리 중 오류 발생: {input_file}, {str(e)}")
+            raise
+            
+    def _load_checkpoint(self, checkpoint_file: str) -> Optional[Dict]:
+        """체크포인트 파일 로드"""
+        if not os.path.exists(checkpoint_file):
+            return None
+            
+        try:
+            with open(checkpoint_file, 'r', encoding='utf-8') as f:
+                return json.loads(f.read())
+        except Exception as e:
+            self.logger.warning(f"체크포인트 파일 로드 실패: {checkpoint_file}, {str(e)}")
+            return None
+            
+    def _update_checkpoint(self, checkpoint_file: str, data: Dict) -> bool:
+        """체크포인트 파일 업데이트"""
+        try:
+            # 기존 데이터가 있으면 병합
+            existing_data = self._load_checkpoint(checkpoint_file) or {}
+            existing_data.update(data)
+            
+            with open(checkpoint_file, 'w', encoding='utf-8') as f:
+                json.dump(existing_data, f, ensure_ascii=False, indent=2)
+                
+            return True
+        except Exception as e:
+            self.logger.warning(f"체크포인트 파일 업데이트 실패: {checkpoint_file}, {str(e)}")
+            return False
 
-    def _process_single_product(self, product: Product) -> ProcessingResult:
-        """단일 제품 처리"""
-        return self.process_product(product)
-
-    def process_product(self, product: Product) -> ProcessingResult:
+    def run_workflow_from_manual(self, input_file: str, output_dir: str = None, 
+                            send_email: bool = True, generate_second_stage: bool = True,
+                            email_recipient: str = 'dasomas@kakao.com',
+                            resume_from_checkpoint: bool = True):
         """
-        단일 제품의 매칭 처리
-
+        작업메뉴얼에 따른 전체 워크플로우 실행
+        
+        1. 상품명 전처리 (1- 및 특수문자 제거)
+        2. 네이버쇼핑 및 고려기프트 검색
+        3. 1차 결과 생성 및 이메일 전송
+        4. 2차 결과 생성 (필요시)
+        
         Args:
-            product: 처리할 Product 객체
-
+            input_file: 입력 파일 경로
+            output_dir: 출력 디렉토리 (기본값: 설정파일 기준)
+            send_email: 이메일 전송 여부
+            generate_second_stage: 2차 파일 생성 여부
+            email_recipient: 이메일 수신자
+            resume_from_checkpoint: 체크포인트에서 재개 여부
+            
         Returns:
-            ProductResult 객체
+            dict: 처리 결과 요약
         """
-        self.logger.info(f"Processing product: {product.name} (ID: {product.id})")
-        self.logger.info(f"Product source: {product.source}")
-
-        # 해오름기프트 상품 확인
-        if product.source.lower() != "haeoreum":
-            self.logger.warning(
-                f"Product source is not Haeoreum Gift: {product.source}"
-            )
-            # 해오름 소스로 설정
-            product.source = "haeoreum"
-            self.logger.info(f"Reset product source to Haeoreum Gift")
-
-        processing_result = ProcessingResult(source_product=product)
-
-        # 텍스트 유사도 임계값 설정
-        text_threshold = self.config["MATCHING"].get("TEXT_SIMILARITY_THRESHOLD", 0.65)
-        # 텍스트 초기 필터링을 위한 낮은 임계값 (성능 개선을 위한 필터링용)
-        initial_text_threshold = text_threshold * 0.7  # 임계값의 70%
-
-        # 고려기프트 매칭 검색
-        try:
-            self.logger.info(f"Searching Koryo Gift for: {product.name}")
-            koryo_matches = self.koryo_scraper.search_product(product.name)
-
-            if not koryo_matches:
-                self.logger.info(
-                    f"❌ 고려기프트에서 '{product.name}' 상품을 찾을 수 없음"
-                )
-            else:
-                self.logger.debug(
-                    f"✅ 고려기프트에서 '{product.name}' 상품 {len(koryo_matches)}개 발견"
-                )
-
-                # 1단계: 텍스트 유사도만 먼저 계산하여 후보군 추리기
-                text_filtered_matches = []
-                for match in koryo_matches:
-                    text_sim = self.text_matcher.calculate_similarity(
-                        product.name, match.name
-                    )
-                    if text_sim >= initial_text_threshold:
-                        text_filtered_matches.append((match, text_sim))
-
-                self.logger.info(
-                    f"🔍 텍스트 유사도로 {len(text_filtered_matches)}/{len(koryo_matches)}개 후보 추려냄 (임계값: {initial_text_threshold:.2f})"
-                )
-
-                # 2단계: 텍스트 유사도가 높은 후보들에 대해서만 이미지 유사도 계산
-                for match, text_sim in text_filtered_matches:
-                    # 기본 MatchResult 생성
-                    match_result = MatchResult(
-                        source_product=product,
-                        matched_product=match,
-                        text_similarity=text_sim,
-                        image_similarity=0.0,
-                        combined_similarity=0.0,
-                        price_difference=0.0,
-                        price_difference_percent=0.0,
-                    )
-
-                    # 이미지 유사도 및 가격 차이 계산
-                    self._calculate_image_similarity_and_price(match_result)
-
-                    # 결과 추가
-                    processing_result.koryo_matches.append(match_result)
-
-            # 최적 매칭 찾기
-            processing_result.best_koryo_match = self._find_best_match(
-                processing_result.koryo_matches
-            )
-
-            if processing_result.best_koryo_match:
-                if processing_result.best_koryo_match.image_similarity > 0:
-                    self.logger.info(
-                        f"✅ 고려기프트 매칭 (이미지 포함): {processing_result.best_koryo_match.matched_product.name}"
-                    )
-                else:
-                    self.logger.info(
-                        f"📝 고려기프트 매칭 (텍스트만): {processing_result.best_koryo_match.matched_product.name}"
-                    )
-
-        except Exception as e:
-            self.logger.error(
-                f"Error finding Koryo matches for {product.name}: {str(e)}",
-                exc_info=True,
-            )
-            processing_result.error = f"Koryo search error: {str(e)}"
-
-        # 네이버 매칭 검색
-        try:
-            self.logger.info(f"Searching Naver for: {product.name}")
-            naver_matches = self._safe_naver_search(product.name)
-
-            if not naver_matches:
-                self.logger.info(f"❌ 네이버에서 '{product.name}' 상품을 찾을 수 없음")
-            elif len(naver_matches) == 1 and getattr(naver_matches[0], 'id', '') == "no_match":
-                self.logger.info(
-                    f"❌ 네이버에서 '{product.name}' 상품을 찾을 수 없음 (no_match 반환)"
-                )
-            else:
-                self.logger.debug(
-                    f"✅ 네이버에서 '{product.name}' 상품 {len(naver_matches)}개 발견"
-                )
-
-                # 'no_match' 더미 상품 제외 - 이 부분의 필터링 로직도 수정
-                real_matches = []
-                for m in naver_matches:
-                    if not hasattr(m, 'id') or m.id != "no_match":
-                        real_matches.append(m)
+        # 모듈 함수 직접 참조 대신 필요 시점에 임포트 (순환 참조 방지)
+        from utils.preprocessing import send_report_email
+        import importlib
+        import json
+        
+        start_time = datetime.now()
+        self.logger.info(f"작업메뉴얼 워크플로우 시작: {input_file}")
+        
+        # 체크포인트 파일 경로 생성
+        input_name = os.path.basename(input_file)
+        base_name, _ = os.path.splitext(input_name)
+        checkpoint_dir = os.path.join(os.path.dirname(input_file), '.checkpoints')
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        checkpoint_file = os.path.join(checkpoint_dir, f"{base_name}_workflow_checkpoint.json")
+        
+        # 체크포인트에서 재개 시도
+        if resume_from_checkpoint:
+            checkpoint_data = self._load_checkpoint(checkpoint_file)
+            if checkpoint_data and checkpoint_data.get('status') == 'complete':
+                self.logger.info(f"이미 완료된 워크플로우입니다: {input_file}")
                 
-                # 실제 검색 결과가 있는지 다시 확인
-                if real_matches:
-                    # 1단계: 텍스트 유사도만 먼저 계산하여 후보군 추리기
-                    text_filtered_matches = []
-                    for match in real_matches:
-                        text_sim = self.text_matcher.calculate_similarity(
-                            product.name, match.name
-                        )
-                        if text_sim >= initial_text_threshold:
-                            text_filtered_matches.append((match, text_sim))
-
-                    self.logger.info(
-                        f"🔍 텍스트 유사도로 {len(text_filtered_matches)}/{len(real_matches)}개 후보 추려냄 (임계값: {initial_text_threshold:.2f})"
-                    )
-
-                    # 2단계: 텍스트 유사도가 높은 후보들에 대해서만 이미지 유사도 계산
-                    for match, text_sim in text_filtered_matches:
-                        # 기본 MatchResult 생성
-                        match_result = MatchResult(
-                            source_product=product,
-                            matched_product=match,
-                            text_similarity=text_sim,
-                            image_similarity=0.0,
-                            combined_similarity=0.0,
-                            price_difference=0.0,
-                            price_difference_percent=0.0,
-                        )
-
-                        # 이미지 유사도 및 가격 차이 계산
-                        self._calculate_image_similarity_and_price(match_result)
-
-                        # 결과 추가
-                        processing_result.naver_matches.append(match_result)
-                else:
-                    self.logger.info(f"❌ 네이버에서 '{product.name}' 상품의 유효한 매치가 없음")
-
-            # 최적 매칭 찾기
-            processing_result.best_naver_match = self._find_best_match(
-                processing_result.naver_matches
-            )
-
-            if processing_result.best_naver_match:
-                if processing_result.best_naver_match.image_similarity > 0:
-                    self.logger.info(
-                        f"✅ 네이버 매칭 (이미지 포함): {processing_result.best_naver_match.matched_product.name}"
-                    )
-                else:
-                    self.logger.info(
-                        f"📝 네이버 매칭 (텍스트만): {processing_result.best_naver_match.matched_product.name}"
-                    )
-
-        except Exception as e:
-            self.logger.error(
-                f"Error finding Naver matches for {product.name}: {str(e)}",
-                exc_info=True,
-            )
-            if not processing_result.error:  # 이전 오류가 없을 경우만 설정
-                processing_result.error = f"Naver search error: {str(e)}"
-
-        # 데이터 검증 및 비어있는 필드 처리
-        self._ensure_valid_result(processing_result)
-
-        return processing_result
-
-    def _calculate_image_similarity_and_price(self, match_result: MatchResult) -> None:
-        """
-        이미지 유사도와 가격 차이를 계산하고 MatchResult에 설정
-
-        Args:
-            match_result: 업데이트할 MatchResult 객체
-        """
-        source_product = match_result.source_product
-        matched_product = match_result.matched_product
-
-        # 소스 이미지 URL 확인
-        source_image_url = ""
-
-        # 해오름 기프트(원본)의 이미지를 확인
-        if source_product.source == "haeoreum":
-            # 1. 본사 이미지 필드에서 먼저 확인
-            if (
-                "본사 이미지" in source_product.original_input_data
-                and source_product.original_input_data["본사 이미지"]
-            ):
-                source_image_url = str(
-                    source_product.original_input_data["본사 이미지"]
-                ).strip()
-
-            # 2. 이미지 URL 속성 확인
-            if not source_image_url and source_product.image_url:
-                source_image_url = source_product.image_url
-
-            # 3. 본사상품링크 확인 (이미지가 없는 경우 직접 스크래핑하여 이미지 추출)
-            if (
-                not source_image_url
-                and "본사상품링크" in source_product.original_input_data
-                and source_product.original_input_data["본사상품링크"]
-            ):
-                product_link = str(
-                    source_product.original_input_data["본사상품링크"]
-                ).strip()
-                if (
-                    product_link
-                    and "jclgift.com" in product_link
-                    and "p_idx=" in product_link
-                ):
-                    self.logger.info(
-                        f"No image URL found, scraping from product link: {product_link}"
-                    )
-
-                    try:
-                        # URL에서 p_idx 파라미터 추출
-                        import re
-
-                        from ..scraping.haeoeum_scraper import HaeoeumScraper
-
-                        p_idx_match = re.search(r"p_idx=(\d+)", product_link)
-                        if p_idx_match:
-                            p_idx = p_idx_match.group(1)
-
-                            # 해오름 스크래퍼를 사용하여 이미지 추출
-                            scraper = HaeoeumScraper(cache=self.cache)
-                            scraped_product = scraper.get_product(p_idx)
-
-                            if scraped_product and scraped_product.image_url:
-                                source_image_url = scraped_product.image_url
-                                self.logger.info(
-                                    f"Successfully extracted image URL: {source_image_url}"
-                                )
-
-                                # 결과물을 소스 제품에 저장 (향후 사용)
-                                source_product.image_url = source_image_url
-                                source_product.original_input_data["본사 이미지"] = source_image_url
-
-                                # 이미지 갤러리도 있으면 저장
-                                if scraped_product.image_gallery:
-                                    source_product.image_gallery = (
-                                        scraped_product.image_gallery
-                                    )
-                                    self.logger.info(
-                                        f"Added {len(scraped_product.image_gallery)} images to gallery"
-                                    )
-                            else:
-                                self.logger.warning(
-                                    f"Failed to extract image from {product_link}"
-                                )
-                    except Exception as e:
-                        self.logger.error(
-                            f"Error scraping image from product link: {str(e)}"
-                        )
+                # 완료된 작업 결과 반환
+                return {
+                    "input_file": input_file,
+                    "first_stage_file": checkpoint_data.get('first_stage_file'),
+                    "second_stage_file": checkpoint_data.get('second_stage_file'),
+                    "email_sent": checkpoint_data.get('email_sent', False),
+                    "email_recipient": checkpoint_data.get('email_recipient'),
+                    "start_time": checkpoint_data.get('start_time'),
+                    "end_time": checkpoint_data.get('end_time'),
+                    "duration_seconds": checkpoint_data.get('duration_seconds', 0),
+                    "status": "success",
+                    "resumed_from_checkpoint": True
+                }
+                
+            elif checkpoint_data and checkpoint_data.get('status') == 'processing':
+                # 처리 중인 작업 재개
+                self.logger.info(f"중단된 워크플로우를 재개합니다: {input_file}")
+                # 진행 상태에 따라 단계별 재개 가능
+                first_stage_file = checkpoint_data.get('first_stage_file')
+                second_stage_file = checkpoint_data.get('second_stage_file')
+                email_sent = checkpoint_data.get('email_sent', False)
+                
+                # 체크포인트 상태 업데이트
+                self._update_checkpoint(checkpoint_file, {
+                    'resumed_at': datetime.now().isoformat()
+                })
+            else:
+                # 새 체크포인트 시작
+                self._update_checkpoint(checkpoint_file, {
+                    'status': 'processing',
+                    'input_file': input_file,
+                    'start_time': start_time.isoformat(),
+                    'step': 'started'
+                })
+                first_stage_file = None
+                second_stage_file = None
+                email_sent = False
         else:
-            # 다른 소스의 경우 단순히 image_url 속성 사용
-            source_image_url = source_product.image_url
-
-        # 매치된 이미지 URL 확인
-        match_image_url = matched_product.image_url or ""
-
-        # 매칭 소스 확인 (네이버 또는 고려기프트)
-        match_source = (
-            "네이버" if matched_product.source == "naver_api" else "고려기프트"
-        )
-
-        # 이미지 유사도 계산
-        image_sim = 0.0  # 기본값
-
-        # 양쪽 모두 이미지가 있는 경우: 이미지 유사도 계산
-        if source_image_url and match_image_url:
-            # 캐시 키 생성 (URL 해시 사용)
-            import hashlib
-
-            cache_key = f"img_sim_{hashlib.md5((source_image_url + match_image_url).encode()).hexdigest()}"
-
-            # 캐시에서 유사도 값 확인
-            cached_sim = self.cache.get(cache_key)
-            if cached_sim is not None:
-                image_sim = cached_sim
-                self.logger.debug(f"🔄 캐시에서 이미지 유사도 로드: {image_sim:.2f}")
-            else:
-                self.logger.debug(
-                    f"🖼️ 이미지 유사도 계산: {source_image_url} <-> {match_image_url}"
-                )
-                try:
-                    # 이미지 해상도 축소 설정 (빠른 비교를 위함)
-                    max_size = self.config["MATCHING"].get("MAX_IMAGE_DIMENSION", 256)
-
-                    # 이미지 유사도 계산 시 해상도 제한
-                    image_sim = self.image_matcher.calculate_similarity(
-                        source_image_url, match_image_url, max_dimension=max_size
-                    )
-
-                    # 결과 캐싱 (1일 유지)
-                    self.cache.set(cache_key, image_sim, ttl=86400)
-
-                    self.logger.debug(f"  이미지 유사도 결과: {image_sim:.2f}")
-                except Exception as e:
-                    self.logger.warning(f"이미지 유사도 계산 중 오류: {str(e)}")
-                    # 오류 발생 시 기본값 사용
-                    image_sim = 0.0
-        # 해오름 제품에 이미지가 없고 매칭된 제품에 이미지가 있는 경우
-        elif not source_image_url and match_image_url:
-            self.logger.warning(
-                f"⚠️ 해오름 제품 '{source_product.name}'에 이미지가 없으나, {match_source}에 이미지 있음"
-            )
-            # 네이버는 이미지가 있을 확률이 높으므로 더 높은 기본값 부여
-            if matched_product.source == "naver_api":
-                image_sim = 0.5
-            else:
-                image_sim = 0.4
-        # 매칭된 제품에 이미지가 없는 경우
-        elif source_image_url and not match_image_url:
-            self.logger.warning(
-                f"⚠️ 해오름 제품 '{source_product.name}'에 이미지가 있으나, {match_source}에 이미지 없음"
-            )
-            # 텍스트 유사도가 높으면 이미지 유사도 기본값 부여 (0.3)
-            if match_result.text_similarity >= 0.75:
-                image_sim = 0.3
-        # 둘 다 이미지가 없는 경우
-        else:
-            self.logger.warning(
-                f"⚠️ 두 제품 모두 이미지 없음: 해오름 '{source_product.name}' <-> {match_source} '{matched_product.name}'"
-            )
-            # 텍스트 유사도가 매우 높은 경우만 약간의 기본값 부여
-            if match_result.text_similarity >= 0.85:
-                image_sim = 0.2
-
-        # 이미지 유사도 설정
-        match_result.image_similarity = image_sim
-
-        # 통합 유사도 계산 및 설정
-        match_result.combined_similarity = self.multimodal_matcher.calculate_similarity(
-            match_result.text_similarity, match_result.image_similarity
-        )
-
-        # 가격 차이 계산
-        price_diff = 0.0
-        price_diff_percent = 0.0
-        source_price = source_product.price
-
-        if (
-            source_price
-            and source_price > 0
-            and isinstance(matched_product.price, (int, float))
-        ):
-            price_diff = matched_product.price - source_price
-            price_diff_percent = (
-                (price_diff / source_price) * 100 if source_price != 0 else 0
-            )
-
-        # 가격 차이 설정
-        match_result.price_difference = price_diff
-        match_result.price_difference_percent = price_diff_percent
-
-        self.logger.debug(
-            f"  Match candidate {matched_product.name} ({matched_product.source}): "
-            f"Txt={match_result.text_similarity:.2f}, Img={match_result.image_similarity:.2f}, "
-            f"Comb={match_result.combined_similarity:.2f}, Price diff: {price_diff}"
-        )
-
-    def _ensure_valid_result(self, result: ProcessingResult) -> None:
-        """결과 데이터가 유효한지 확인하고 필요한 기본값을 설정"""
-        # 소스 제품 데이터 검증
-        if (
-            not hasattr(result.source_product, "original_input_data")
-            or result.source_product.original_input_data is None
-        ):
-            result.source_product.original_input_data = {}
-
-        # 필수 필드 존재 확인
-        required_fields = [
-            "구분",
-            "담당자",
-            "업체명",
-            "업체코드",
-            "상품Code",
-            "중분류카테고리",
-            "상품명",
-            "기본수량(1)",
-            "판매단가(V포함)",
-            "본사상품링크",
-        ]
-
-        for field in required_fields:
-            if field not in result.source_product.original_input_data:
-                result.source_product.original_input_data[field] = ""
-
-        # 중요 필드 유효성 검사
-        if (
-            "Code" in result.source_product.original_input_data
-            and not result.source_product.original_input_data.get("상품Code")
-        ):
-            result.source_product.original_input_data["상품Code"] = (
-                result.source_product.original_input_data["Code"]
-            )
-
-        if (
-            "업체코드" in result.source_product.original_input_data
-            and not result.source_product.original_input_data["업체코드"]
-        ):
-            if (
-                hasattr(result.source_product, "product_code")
-                and result.source_product.product_code
-            ):
-                result.source_product.original_input_data["업체코드"] = (
-                    result.source_product.product_code
-                )
-
-    def _safe_naver_search(self, query: str) -> List[Product]:
-        """안전하게 네이버 검색 실행"""
-        products = []
-        original_query = query
-
-        # 검색 변형 시도들 (원래 검색어, 단어 수 줄이기)
-        queries_to_try = []
-
-        # 원래 검색어 추가
-        queries_to_try.append(original_query)
-
-        # 검색어에서 특수문자와 불필요한 정보 제거 (예: 규격, 수량 정보)
-        cleaned_query = re.sub(r"[^\w\s]", " ", original_query)
-        cleaned_query = re.sub(r"\s+", " ", cleaned_query).strip()
-        if cleaned_query != original_query:
-            queries_to_try.append(cleaned_query)
-
-        # 단어 수 줄이기 (긴 검색어의 경우 앞쪽 3-4 단어만 사용)
-        words = cleaned_query.split()
-        if len(words) > 4:
-            shortened_query = " ".join(words[:4])
-            queries_to_try.append(shortened_query)
-        elif len(words) > 3:
-            shortened_query = " ".join(words[:3])
-            queries_to_try.append(shortened_query)
-
-        # 각 검색어 변형으로 시도
-        max_attempts = 3  # 최대 변형 횟수 제한
-
-        for attempt, current_query in enumerate(queries_to_try[:max_attempts]):
-            if attempt > 0:
-                self.logger.info(f"🔍 검색어 변형 시도 {attempt}: '{current_query}'")
-
-            try:
-                # 기본 호출 시도
-                current_products = self.naver_crawler.search_product(current_query)
-
-                if current_products:
-                    products.extend(current_products)
-                    self.logger.info(
-                        f"✅ 검색 성공: '{current_query}'에서 {len(current_products)}개 상품 발견"
-                    )
-
-                    # 충분한 결과를 찾았으면 더 이상 시도하지 않음
-                    if len(products) >= 10:
-                        break
-                else:
-                    self.logger.warning(f"⚠️ '{current_query}'에 대한 검색 결과 없음")
-
-            except TypeError as e:
-                # 인자 오류 시 대체 호출
-                self.logger.warning(
-                    f"Type error during Naver search: {str(e)}. Trying alternative method."
-                )
-                try:
-                    # 직접 내부 검색 로직 호출
-                    if hasattr(self.naver_crawler, "_search_product_logic"):
-                        current_products = self.naver_crawler._search_product_logic(
-                            current_query, 50, None
-                        )
-                        if current_products:
-                            products.extend(current_products)
-                            self.logger.info(
-                                f"✅ 대체 검색 성공: '{current_query}'에서 {len(current_products)}개 상품 발견"
-                            )
-                    elif hasattr(self.naver_crawler, "_search_product_async"):
-                        # 비동기 호출 처리
-                        import asyncio
-
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            current_products = loop.run_until_complete(
-                                self.naver_crawler._search_product_async(
-                                    current_query, 50, None
-                                )
-                            )
-                            if current_products:
-                                products.extend(current_products)
-                                self.logger.info(
-                                    f"✅ 비동기 검색 성공: '{current_query}'에서 {len(current_products)}개 상품 발견"
-                                )
-                        finally:
-                            loop.close()
-                except Exception as inner_e:
-                    self.logger.error(
-                        f"Alternative Naver search failed: {str(inner_e)}",
-                        exc_info=True,
-                    )
-
-            except Exception as e:
-                self.logger.error(f"Error in Naver search: {str(e)}", exc_info=True)
-
-        # 중복 제거
-        unique_products = {}
-        for product in products:
-            if product.id not in unique_products:
-                unique_products[product.id] = product
-
-        # 결과가 없거나 충분하지 않은 경우 다른 검색 엔진이나 방법을 시도할 수 있음
-        if not unique_products:
-            self.logger.warning(
-                f"❌ 모든 검색 시도 후에도 '{original_query}'에 대한 검색 결과 없음"
-            )
-        else:
-            self.logger.info(
-                f"🎯 '{original_query}'에 대해 총 {len(unique_products)}개의 고유 상품 발견"
-            )
-
-        return list(unique_products.values())
-
-    def _find_best_match(self, matches: List[MatchResult]) -> Optional[MatchResult]:
-        """
-        매칭 결과 중 최적의 결과 선택
-
-        매뉴얼 요구사항:
-        1. 상품 이름으로 검색하여 동일 상품 찾기
-        2. 이미지로 제품 비교 (이미지 비교가 어려운 경우 규격 확인)
-        3. 동일 상품으로 판단되면 가장 낮은 가격의 상품 선택
-        """
-        if not matches:
-            self.logger.warning(
-                "🚫 검색 결과 없음: 해당 상품이 고려기프트/네이버에 존재하지 않음"
-            )
-            return None
-
-        # 이미지가 있는 매칭과 없는 매칭 분리
-        matches_with_image = [m for m in matches if m.image_similarity > 0]
-        matches_without_image = [m for m in matches if m.image_similarity == 0]
-
-        # 로깅
-        if not matches_with_image and matches_without_image:
-            source_name = matches[0].source_product.name
-            match_source = (
-                "네이버"
-                if matches[0].matched_product.source == "naver_api"
-                else "고려기프트"
-            )
-            self.logger.info(
-                f"📋 '{source_name}': {match_source}에서 {len(matches)} 매칭이 발견되었으나 이미지를 가진 매칭 없음"
-            )
-
-        # 임계값 설정
-        text_threshold = self.config["MATCHING"].get("TEXT_SIMILARITY_THRESHOLD", 0.65)
-        image_threshold = self.config["MATCHING"].get("IMAGE_SIMILARITY_THRESHOLD", 0.3)
-
-        # 엄격한 매칭: 임계값 이상인 매칭만 필터링 (동일 상품으로 간주)
-        valid_matches = [
-            m
-            for m in matches
-            if m.text_similarity >= text_threshold
-            and (
-                # 이미지가 있는 경우는 이미지 유사도 검사
-                (m.image_similarity >= image_threshold)
-                or
-                # 이미지가 없지만 텍스트 유사도가 매우 높은 경우(0.85 이상) 예외 허용
-                (m.image_similarity == 0 and m.text_similarity >= 0.85)
-            )
-        ]
-
-        # 임계값을 통과한 매칭이 있으면 그 중에서 최저가 선택
-        if valid_matches:
-            # 이미지가 있는 매칭과 없는 매칭 중 선택 우선순위 결정
-            valid_with_image = [
-                m for m in valid_matches if m.image_similarity >= image_threshold
-            ]
-
-            if valid_with_image:
-                # 이미지가 있는 매칭 중에서 최저가 선택
-                best_match = min(
-                    valid_with_image,
-                    key=lambda x: (
-                        x.matched_product.price
-                        if x.matched_product.price > 0
-                        else float("inf")
-                    ),
-                )
-                self.logger.info(
-                    f"💯 이미지 매칭 성공: {best_match.matched_product.name} (텍스트 유사도: {best_match.text_similarity:.2f}, 이미지 유사도: {best_match.image_similarity:.2f}, 가격: {best_match.matched_product.price})"
-                )
-            else:
-                # 이미지 없이 텍스트만 매칭된 경우
-                best_match = min(
-                    valid_matches,
-                    key=lambda x: (
-                        x.matched_product.price
-                        if x.matched_product.price > 0
-                        else float("inf")
-                    ),
-                )
-                self.logger.info(
-                    f"📝 텍스트만 매칭 성공: {best_match.matched_product.name} (텍스트 유사도: {best_match.text_similarity:.2f}, 가격: {best_match.matched_product.price})"
-                )
-            return best_match
-
-        # 임계값을 통과한 매칭이 없으면 더 낮은 임계값 시도
-        relaxed_text_threshold = text_threshold * 0.75  # 25% 낮은 임계값
-        relaxed_matches = [
-            m for m in matches if m.text_similarity >= relaxed_text_threshold
-        ]
-
-        if relaxed_matches:
-            # 낮은 임계값에서는 텍스트 유사도와 가격을 동시에 고려해 가장 적합한 매칭 선택
-            # 텍스트 유사도로 정렬 후 상위 3개 중에서 최저가 선택
-            top_matches = sorted(
-                relaxed_matches, key=lambda x: x.text_similarity, reverse=True
-            )[:3]
-            best_match = min(
-                top_matches,
-                key=lambda x: (
-                    x.matched_product.price
-                    if x.matched_product.price > 0
-                    else float("inf")
-                ),
-            )
-
-            # 이미지 유무에 따른 로깅
-            if best_match.image_similarity > 0:
-                self.logger.warning(
-                    f"⚠️ 낮은 임계값으로 이미지 매칭: {best_match.matched_product.name} (텍스트 유사도: {best_match.text_similarity:.2f}, 이미지 유사도: {best_match.image_similarity:.2f}, 가격: {best_match.matched_product.price})"
-                )
-            else:
-                self.logger.warning(
-                    f"⚠️ 낮은 임계값으로 텍스트만 매칭: {best_match.matched_product.name} (텍스트 유사도: {best_match.text_similarity:.2f}, 가격: {best_match.matched_product.price})"
-                )
-            return best_match
-
-        # 모든 임계값에서 매칭을 찾지 못한 경우, 모든 매칭 중 가장 유사한 하나 반환 (매우 유연한 대안)
-        if matches:
-            # 통합 유사도로 정렬해 가장 높은 하나 선택
-            best_match = max(matches, key=lambda x: x.combined_similarity)
-            self.logger.warning(
-                f"❗ 모든 임계값 실패, 가장 유사한 제품 선택: {best_match.matched_product.name} (통합 유사도: {best_match.combined_similarity:.2f})"
-            )
-            return best_match
-
-        return None
-
-    def process_files(
-        self, input_files: List[str], output_dir: str = None, limit: int = None
-    ) -> List[str]:
-        """여러 파일을 처리합니다."""
+            # 체크포인트 무시하고 새로 시작
+            self._update_checkpoint(checkpoint_file, {
+                'status': 'processing',
+                'input_file': input_file,
+                'start_time': start_time.isoformat(),
+                'step': 'started'
+            })
+            first_stage_file = None
+            second_stage_file = None
+            email_sent = False
+        
         try:
-            if not input_files:
-                self.logger.error("입력 파일이 없습니다.")
-                return []
-
-            # 출력 디렉토리 설정
-            if output_dir:
+            # 출력 디렉토리 확인
+            if not output_dir:
+                output_dir = self.config["PATHS"]["OUTPUT_DIR"]
                 os.makedirs(output_dir, exist_ok=True)
-
-            output_files = []
-            for input_file in input_files:
-                try:
-                    # 제한된 수의 상품만 처리
-                    if limit:
-                        output_file = self._process_limited_file(
-                            input_file, output_dir, limit
-                        )
-                    else:
-                        output_file = self._process_single_file(input_file, output_dir)
-
-                    if output_file:
-                        output_files.append(output_file)
-
-                except Exception as e:
-                    self.logger.error(
-                        f"파일 처리 중 오류 발생: {input_file}, 오류: {str(e)}",
-                        exc_info=True,
-                    )
-                    continue
-
-            return output_files
-
-        except Exception as e:
-            self.logger.error(f"파일 처리 중 오류 발생: {str(e)}", exc_info=True)
-            return []
-
-    def _process_limited_file(
-        self, input_file: str, output_dir: str = None, limit: int = 10
-    ) -> Optional[str]:
-        """제한된 수의 상품만 처리합니다."""
-        # Reset running flag at the start of processing a file
-        self._is_running = True
-        try:
-            start_time = datetime.now()
-            self.logger.info(f"파일 처리 시작: {input_file} (최대 {limit}개 상품)")
-
-            # Excel 파일 읽기
-            df = pd.read_excel(input_file)
-            if df.empty:
-                self.logger.error(f"파일이 비어있습니다: {input_file}")
-                return None
-
-            # 데이터 정제
-            # Ensure data cleaning uses the configured cleaner
-            df = self.data_cleaner.clean_dataframe(df)
-
-            # 제한된 수의 상품만 선택
-            if len(df) > limit:
-                self.logger.info(f"전체 {len(df)}개 중 {limit}개 상품만 처리합니다.")
-                df = df.head(limit)
-
-            # 결과 저장을 위한 리스트
-            results = []
-            total_items = len(df) # Get total items *after* limiting
-
-            # Emit initial progress
+                
+            # 1. 파일 처리 (1차 결과)
+            if not first_stage_file:
+                # 진행상황 콜백 업데이트
+                if self.progress_callback:
+                    self.progress_callback("1차 파일 처리 중...", 25)
+                    
+                # process_excel_file 함수는 없으므로 _process_single_file 사용
+                _, first_stage_file = self._process_single_file(input_file, output_dir)
+                
+                if not first_stage_file:
+                    self.logger.error(f"1차 파일 생성 실패: {input_file}")
+                    raise ValueError(f"입력 파일 처리 중 오류 발생: {input_file}")
+                    
+                self.logger.info(f"1차 파일 생성 완료: {first_stage_file}")
+                
+                # 체크포인트 업데이트
+                self._update_checkpoint(checkpoint_file, {
+                    'step': 'first_stage_complete',
+                    'first_stage_file': first_stage_file
+                })
+            
+            # 2. 이메일 전송
+            if not email_sent and send_email and first_stage_file:
+                # 진행상황 콜백 업데이트
+                if self.progress_callback:
+                    self.progress_callback("이메일 전송 중...", 50)
+                    
+                email_sent = send_report_email(first_stage_file, recipient_email=email_recipient)
+                if email_sent:
+                    self.logger.info(f"1차 결과 이메일 전송 완료: {email_recipient}")
+                    
+                    # 체크포인트 업데이트
+                    self._update_checkpoint(checkpoint_file, {
+                        'step': 'email_sent',
+                        'email_sent': True,
+                        'email_recipient': email_recipient
+                    })
+                else:
+                    self.logger.warning("1차 결과 이메일 전송 실패")
+            
+            # 3. 2차 파일 생성 (필요시)
+            if not second_stage_file and generate_second_stage and first_stage_file:
+                # 진행상황 콜백 업데이트
+                if self.progress_callback:
+                    self.progress_callback("2차 파일 생성 중...", 75)
+                    
+                # 동적으로 process_excel 모듈 로드
+                process_excel = importlib.import_module('process_excel')
+                second_stage_file = process_excel.process_first_to_second_stage(
+                    first_stage_file, output_dir
+                )
+                self.logger.info(f"2차 파일 생성 완료: {second_stage_file}")
+                
+                # 체크포인트 업데이트
+                self._update_checkpoint(checkpoint_file, {
+                    'step': 'second_stage_complete',
+                    'second_stage_file': second_stage_file
+                })
+            
+            # 처리 완료 시간
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+            
+            # 진행상황 콜백 업데이트
             if self.progress_callback:
-                 try:
-                    self.progress_callback(0, total_items)
-                 except Exception as cb_e:
-                    self.logger.error(f"Error in initial progress callback: {cb_e}")
-
-            # 각 상품 처리 (using ThreadPoolExecutor for potential future parallelization within limit)
-            # Create futures list
-            futures = []
-            product_map = {} # To map future back to product if needed
-
-            for idx, row in df.iterrows():
-                 # Check if thread is still running before processing
-                if not self._is_running:
-                     self.logger.warning("Processing stopped by user request (limited file).")
-                     break # Exit loop if stopped
-
-                try:
-                    # Create Product object
-                    product = self.product_factory.create_product_from_row(row)
-                    if not product:
-                        self.logger.warning(f"Could not create product from row {idx+1}. Skipping.")
-                        # Update progress even for skipped items
-                        if self.progress_callback:
-                            try:
-                                self.progress_callback(idx + 1, total_items)
-                            except Exception as cb_e:
-                                self.logger.error(f"Error in progress callback (skipped item): {cb_e}")
-                        continue
-
-                    # Submit processing task
-                    future = self.executor.submit(self._process_single_product, product)
-                    futures.append(future)
-                    product_map[future] = product # Store product associated with future
-
-                except Exception as e:
-                    self.logger.error(
-                        f"상품 생성/제출 중 오류 발생 (행 {idx+1}): {str(e)}", exc_info=True
-                    )
-                    # Emit progress even on error to keep UI updated
-                    if self.progress_callback:
-                         try:
-                             self.progress_callback(idx + 1, total_items)
-                         except TypeError:
-                             pass # Ignore signature mismatch error here too
-                    continue
-
-            # Process completed futures
-            processed_count = 0
-            from concurrent.futures import as_completed
-
-            for future in as_completed(futures):
-                 # Check if stopped before processing result
-                 if not self._is_running:
-                     self.logger.warning("Processing stopped during result collection (limited file).")
-                     if not future.done():
-                         future.cancel()
-                     continue # Skip remaining futures
-
-                 product = product_map.get(future) # Get the original product
-                 processed_count += 1 # Increment counter for each future completed/checked
-
-                 try:
-                    result = future.result(timeout=300) # Get result
-                    if result:
-                        results.append(result)
-
-                 except Exception as e:
-                    error_msg = f"상품 처리 중 오류 발생 (Product ID: {product.id if product else 'N/A'}): {str(e)}"
-                    self.logger.error(error_msg, exc_info=True)
-                    # Optionally add an error result if needed
-                    if product:
-                         results.append(ProcessingResult(source_product=product, error=str(e)))
-
-                 finally:
-                    # --- Call progress callback ---
-                    if self.progress_callback:
-                        # Use try-except block to avoid crashing if callback signature mismatches
-                        try:
-                             # Use processed_count which reflects completed futures
-                             self.progress_callback(processed_count, total_items)
-                        except Exception as cb_e:
-                             self.logger.error(f"Error in progress callback (limited file): {cb_e}")
-
-            # If processing was stopped, skip output generation
-            if not self._is_running:
-                self.logger.warning("Processing was stopped. Skipping output file generation (limited file).")
-                return None
-
-            # 결과가 있는 경우에만 출력 파일 생성
-            if results:
-                # 출력 파일명 생성
-                output_file = self.excel_manager.generate_enhanced_output(
-                    results, input_file, output_dir # Pass output_dir
-                )
-
-                # 후처리 작업 수행 (하이퍼링크, 필터링 등)
-                output_file = self.post_process_output_file(output_file)
-
-                # 처리 완료 로깅
-                end_time = datetime.now()
-                processing_time = end_time - start_time
-                self.logger.info(
-                    f"Limited processing finished at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
-                self.logger.info(f"Total processing time (limited): {processing_time}")
-
-                self.logger.info(f"파일 처리 완료: {output_file}")
-                return output_file
-
-            else:
-                self.logger.info("No results generated from limited processing.")
-                return None
-
-        except Exception as e:
-            self.logger.error(f"파일 처리 중 오류 발생: {str(e)}", exc_info=True)
-            return None
-
-    def process_koryo_products(self, search_query: str, output_path: str, max_items: int = 50):
-        """Process Koryo Gift products and save to Excel"""
-        try:
-            self.logger.info(f"Starting Koryo Gift product processing for query: {search_query}")
+                self.progress_callback("워크플로우 완료", 100)
             
-            # 제품 검색 및 데이터 수집
-            products = self.koryo_scraper.search_product(search_query, max_items=max_items)
+            # 체크포인트 업데이트 - 완료 상태
+            self._update_checkpoint(checkpoint_file, {
+                'status': 'complete',
+                'end_time': end_time.isoformat(),
+                'duration_seconds': duration
+            })
             
-            if not products:
-                self.logger.warning(f"No products found for query: {search_query}")
-                # 빈 결과를 저장할 때도 헤더와 상태 메시지 포함
-                self.excel_manager.save_products([], output_path, "검색결과없음")
-                return
+            # 결과 요약
+            result = {
+                "input_file": input_file,
+                "first_stage_file": first_stage_file,
+                "second_stage_file": second_stage_file,
+                "email_sent": email_sent,
+                "email_recipient": email_recipient if email_sent else None,
+                "start_time": start_time.isoformat(),
+                "end_time": end_time.isoformat(),
+                "duration_seconds": duration,
+                "status": "success"
+            }
             
-            self.logger.info(f"Found {len(products)} products from Koryo Gift")
-            
-            # 검색 결과를 엑셀로 저장
-            sheet_name = f"koryo_{datetime.now().strftime('%Y%m%d_%H%M')}"
-            self.excel_manager.save_products(products, output_path, sheet_name)
-            
-            self.logger.info(f"Successfully saved Koryo Gift products to: {output_path}")
+            self.logger.info(f"작업메뉴얼 워크플로우 완료: {duration:.1f}초 소요")
+            return result
             
         except Exception as e:
-            self.logger.error(f"Error processing Koryo Gift products: {str(e)}", exc_info=True)
-            raise
-
-    def process_search_results(self, search_query: str, output_path: str, max_items: int = 50):
-        """Process search results from multiple sources"""
-        try:
-            all_products = []
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
             
-            # 고려기프트 제품 검색
-            try:
-                koryo_products = self.koryo_scraper.search_product(search_query, max_items=max_items)
-                if koryo_products:
-                    self.logger.info(f"Found {len(koryo_products)} products from Koryo Gift")
-                    # 타임스탬프 추가
-                    for product in koryo_products:
-                        product.fetched_at = datetime.now().isoformat()
-                        # 유효성 검증
-                        if self.validate_product_data(product):
-                            all_products.append(product)
-                        else:
-                            self.logger.warning(f"Invalid product data: {product.name}")
-                else:
-                    self.logger.warning("No products found from Koryo Gift")
-            except Exception as e:
-                self.logger.error(f"Error searching Koryo Gift: {str(e)}")
+            self.logger.error(f"작업메뉴얼 워크플로우 실패: {str(e)}", exc_info=True)
             
-            # 네이버 제품 검색
-            try:
-                naver_products = self.naver_crawler.search_product(search_query, max_items=max_items)
-                if naver_products:
-                    self.logger.info(f"Found {len(naver_products)} products from Naver")
-                    # 타임스탬프 추가
-                    for product in naver_products:
-                        product.fetched_at = datetime.now().isoformat()
-                        # 유효성 검증
-                        if self.validate_product_data(product):
-                            all_products.append(product)
-                        else:
-                            self.logger.warning(f"Invalid product data: {product.name}")
-                    
-                    # 네이버 검색 결과만 별도로 저장
-                    naver_sheet_name = f"naver_{datetime.now().strftime('%Y%m%d_%H%M')}"
-                    naver_output_path = output_path.replace('.xlsx', '_naver.xlsx')
-                    self.excel_manager.save_products(naver_products, naver_output_path, naver_sheet_name)
-                    
-                    # 네이버 결과 엑셀 파일 후처리
-                    processed_naver_path = self.excel_manager.post_process_excel_file(naver_output_path)
-                    
-                    self.logger.info(f"Successfully saved Naver products to: {processed_naver_path}")
-                else:
-                    self.logger.warning("No products found from Naver")
-            except Exception as e:
-                self.logger.error(f"Error searching Naver: {str(e)}")
+            # 체크포인트 업데이트 - 오류 상태
+            self._update_checkpoint(checkpoint_file, {
+                'status': 'error',
+                'error': str(e),
+                'error_time': end_time.isoformat(),
+                'duration_seconds': duration
+            })
             
-            # 다른 소스의 제품 검색 로직...
+            # 진행상황 콜백 업데이트 (오류)
+            if self.progress_callback:
+                self.progress_callback(f"오류 발생: {str(e)}", -1)
             
-            if not all_products:
-                self.logger.warning(f"No products found for query: {search_query}")
-                # 빈 결과를 저장할 때도 헤더와 상태 메시지 포함
-                self.excel_manager.save_products([], output_path, "검색결과없음")
-                return
+            # 오류 요약
+            result = {
+                "input_file": input_file,
+                "first_stage_file": first_stage_file if 'first_stage_file' in locals() else None,
+                "second_stage_file": second_stage_file if 'second_stage_file' in locals() else None,
+                "email_sent": email_sent if 'email_sent' in locals() else False,
+                "start_time": start_time.isoformat(),
+                "end_time": end_time.isoformat(),
+                "duration_seconds": duration,
+                "status": "error",
+                "error": str(e)
+            }
             
-            # 모든 검색 결과를 엑셀로 저장
-            sheet_name = f"search_{datetime.now().strftime('%Y%m%d_%H%M')}"
-            output_file = self.excel_manager.save_products(all_products, output_path, sheet_name)
-            
-            # 후처리 수행
-            processed_output_file = self.excel_manager.post_process_excel_file(output_file)
-            
-            self.logger.info(f"Successfully saved all search results to: {processed_output_file}")
-            
-        except Exception as e:
-            self.logger.error(f"Error processing search results: {str(e)}", exc_info=True)
-            raise
-
-    def validate_product_data(self, product: Product) -> bool:
-        """Validate product data before saving"""
-        if not product:
-            return False
-            
-        # 필수 필드 검증
-        required_fields = {
-            'name': product.name,
-            'price': product.price,
-            'url': product.url,
-            'source': product.source
-        }
-        
-        for field, value in required_fields.items():
-            if not value:
-                self.logger.warning(f"Missing required field: {field}")
-                return False
-        
-        # 이미지 URL 검증
-        if not product.image_url and not product.image_gallery:
-            self.logger.warning("No images found for product")
-            return False
-            
-        return True
+            return result

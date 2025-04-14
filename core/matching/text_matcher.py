@@ -22,12 +22,18 @@ except ImportError:
 
 
 class TextMatcher:
-    def __init__(self, cache: Optional[FileCache] = None, use_ko_sbert: bool = True):
+    def __init__(self, cache: Optional[FileCache] = None, use_ko_sbert: bool = True, use_stemming: bool = False, similarity_threshold: float = 0.7):
         # 로거 초기화
         self.logger = logging.getLogger(__name__)
 
         # 한국어 특화 모델 사용 여부 선택
         self.use_ko_sbert = use_ko_sbert
+        
+        # 스테밍 사용 여부
+        self.use_stemming = use_stemming
+        
+        # 유사도 임계값
+        self.similarity_threshold = similarity_threshold
 
         # 한국어에 특화된 Ko-SBERT 모델 (Ko-SRoBERTa-multitask)
         if self.use_ko_sbert:

@@ -12,8 +12,9 @@ from datetime import datetime
 
 # 테스트 스크립트 경로
 TEST_SCRIPTS = [
-    "tests/test_koryo_scraper.py",     # 기본 검색 테스트
-    "tests/test_koryo_detailed.py"     # 상세 정보 추출 테스트
+    "tests/test_koryo_scraper.py",      # 기본 검색 테스트
+    "tests/test_koryo_detailed.py",     # 상세 정보 추출 테스트
+    "tests/test_koryo_tumbler.py"       # 텀블러 전용 크롤링 테스트 (추가)
 ]
 
 def run_tests(args):
@@ -24,15 +25,18 @@ def run_tests(args):
     
     # 로그 디렉토리 생성
     os.makedirs("logs", exist_ok=True)
+    os.makedirs("screenshots", exist_ok=True)
+    os.makedirs("output", exist_ok=True)
     
     # 캐시 클리어 옵션 처리
     if args.clear_cache:
         print("\n캐시 디렉토리 정리 중...")
         try:
-            cache_files = [f for f in os.listdir("cache") if f.startswith("test_koryo")]
-            for file in cache_files:
-                os.remove(os.path.join("cache", file))
-            print(f"캐시 파일 {len(cache_files)}개 삭제 완료")
+            if os.path.exists("cache"):
+                cache_files = [f for f in os.listdir("cache") if f.startswith("test_koryo") or f.startswith("search_")]
+                for file in cache_files:
+                    os.remove(os.path.join("cache", file))
+                print(f"캐시 파일 {len(cache_files)}개 삭제 완료")
         except Exception as e:
             print(f"캐시 정리 중 오류 발생: {str(e)}")
     
@@ -47,8 +51,19 @@ def run_tests(args):
         print(f"{'#' * 70}\n")
         
         try:
+            # 추가 옵션 설정
+            env = os.environ.copy()
+            
+            # 스크립트 별 옵션 처리
+            script_args = []
+            
+            # Playwright UI 비활성화 (CLI 모드에서는 headless로 실행)
+            if "test_koryo_tumbler.py" in script and not args.show_browser:
+                script_args.append("--headless")
+            
             # 스크립트 실행 (Python 경로를 명시적으로 지정)
-            result = subprocess.run([sys.executable, script], check=False)
+            cmd = [sys.executable, script] + script_args
+            result = subprocess.run(cmd, check=False, env=env)
             
             if result.returncode == 0:
                 print(f"\n✓ 테스트 성공: {os.path.basename(script)}")
@@ -73,7 +88,23 @@ def main():
     parser = argparse.ArgumentParser(description="고려기프트 스크래퍼 테스트 실행")
     parser.add_argument("--all", action="store_true", help="모든 테스트 실행 (기본: 기본 테스트만)")
     parser.add_argument("--clear-cache", action="store_true", help="테스트 전 캐시 정리")
+    parser.add_argument("--show-browser", action="store_true", help="브라우저 UI 표시 (디버깅용)")
+    parser.add_argument("--tumbler-only", action="store_true", help="텀블러 테스트만 실행")
     args = parser.parse_args()
+    
+    # 텀블러 테스트만 실행 옵션 처리
+    if args.tumbler_only:
+        tumbler_test = "tests/test_koryo_tumbler.py"
+        if os.path.exists(tumbler_test):
+            print(f"\n텀블러 테스트만 실행합니다: {tumbler_test}")
+            cmd = [sys.executable, tumbler_test]
+            if not args.show_browser:
+                cmd.append("--headless")
+            subprocess.run(cmd, check=False)
+            return 0
+        else:
+            print(f"[오류] 텀블러 테스트 스크립트를 찾을 수 없습니다: {tumbler_test}")
+            return 1
     
     run_tests(args)
     return 0

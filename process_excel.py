@@ -13,6 +13,11 @@ import logging
 import os
 import sys
 from urllib.parse import urlparse # For URL check
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import re
+import shutil
 
 # 프로젝트 루트 경로 설정 (스크립트 위치 기반)
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -188,6 +193,192 @@ def main():
     else:
         parser.print_help()
 
+def process_first_to_second_stage(input_file, output_dir=None):
+    """
+    작업메뉴얼에 따라 1차 파일에서 2차 파일 생성
+    
+    규칙:
+    1. 노란색 셀(가격차이 음수) 상품만 2차 파일로 이동
+    2. 네이버쇼핑 [기본수량] 없는 상품 중 가격차이(%) ≤ 10% -> 삭제
+    3. 가격차이 양수(+) 상품 -> 삭제
+    4. 고려기프트/네이버쇼핑에 가격불량 기록 전무 -> 줄 삭제
+    5. 이미지 제거, 링크만 남김
+    
+    Args:
+        input_file: 1차 파일 경로
+        output_dir: 출력 디렉토리 (없으면 입력 파일과 동일 디렉토리)
+        
+    Returns:
+        str: 생성된 2차 파일 경로
+    """
+    try:
+        logger.info(f"1차 -> 2차 파일 변환 시작: {input_file}")
+        
+        # 입력 파일 유효성 검사
+        if not input_file or not os.path.exists(input_file):
+            logger.error(f"입력 파일이 존재하지 않습니다: {input_file}")
+            raise FileNotFoundError(f"입력 파일이 존재하지 않습니다: {input_file}")
+            
+        # 파일 확장자 확인
+        _, ext = os.path.splitext(input_file)
+        if ext.lower() not in ['.xls', '.xlsx', '.xlsm', '.csv']:
+            logger.error(f"지원되지 않는 파일 형식입니다: {ext}")
+            raise ValueError(f"지원되지 않는 파일 형식입니다: {ext}")
+        
+        # 출력 디렉토리 설정
+        if not output_dir:
+            output_dir = os.path.dirname(input_file)
+        
+        # 출력 디렉토리 존재 확인 및 생성    
+        if not os.path.exists(output_dir):
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+                logger.info(f"출력 디렉토리 생성: {output_dir}")
+            except Exception as e:
+                logger.error(f"출력 디렉토리 생성 실패: {str(e)}")
+                raise
+            
+        # 출력 파일명 생성 (파일명-result.xlsx)
+        input_filename = os.path.basename(input_file)
+        file_base, file_ext = os.path.splitext(input_filename)
+        output_filename = f"{file_base}-result.xlsx"  # 출력은 항상 xlsx 형식으로 통일
+        output_file = os.path.join(output_dir, output_filename)
+        
+        # 1차 파일 로드
+        try:
+            # CSV 파일인 경우 특별 처리
+            if ext.lower() == '.csv':
+                df = pd.read_csv(input_file, encoding='utf-8')
+                logger.info(f"CSV 파일 로드 완료: {len(df)}행")
+            else:
+                df = pd.read_excel(input_file)
+                logger.info(f"Excel 파일 로드 완료: {len(df)}행")
+        except Exception as e:
+            logger.error(f"입력 파일 로드 중 오류: {str(e)}")
+            raise
+        
+        # 필수 컬럼 확인
+        required_columns = ['가격차이(2)', '가격차이(3)', '기본수량(3)', '가격차이(3)%']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            logger.error(f"필수 컬럼이 누락되었습니다: {missing_columns}")
+            raise ValueError(f"필수 컬럼이 누락되었습니다: {missing_columns}")
+        
+        # 원본 데이터 백업
+        df_original = df.copy()
+        
+        # 구분값(A/P) 추출 및 보존
+        has_distinction = '구분' in df.columns
+        distinction_values = {}
+        if has_distinction:
+            for idx, row in df.iterrows():
+                if pd.notna(row.get('상품Code')):
+                    distinction_values[str(row.get('상품Code'))] = row.get('구분', 'A')
+        
+        # 데이터 유형 변환 (숫자형 컬럼)
+        numeric_columns = ['가격차이(2)', '가격차이(3)', '가격차이(3)%']
+        for col in numeric_columns:
+            try:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                df[col] = df[col].fillna(0)  # NaN을 0으로 대체
+            except Exception as e:
+                logger.warning(f"컬럼 '{col}' 숫자 변환 중 오류: {str(e)}")
+        
+        # 1. 노란색 셀(가격차이 음수) 상품 필터링
+        # 가격차이(2) 또는 가격차이(3)가 음수인 행만 선택
+        try:
+            df_filtered = df[
+                (df['가격차이(2)'] < 0) | 
+                (df['가격차이(3)'] < 0)
+            ].copy()
+            
+            logger.info(f"규칙 1 적용 후: {len(df_filtered)}행 (음수 가격차이)")
+        except Exception as e:
+            logger.error(f"규칙 1 적용 중 오류: {str(e)}")
+            # 오류 발생 시도 계속 진행
+            df_filtered = df.copy()
+        
+        # 2. 네이버쇼핑 [기본수량] 없는 상품 중 가격차이(%) ≤ 10% -> 삭제
+        # 기본수량(3)이 비어있고 가격차이(3)%가 -10% 이상인 행 제거
+        try:
+            # 먼저 값이 없거나 NaN인 행 대응
+            has_basic_quantity = df_filtered['기본수량(3)'].notna() & (df_filtered['기본수량(3)'] != '')
+            # 값이 있는 행 중 숫자로 변환 가능한지 확인
+            numeric_basic_quantity = pd.to_numeric(df_filtered.loc[has_basic_quantity, '기본수량(3)'], errors='coerce')
+            
+            # 필터링을 위한 조건 준비
+            missing_basic_quantity = ~has_basic_quantity | numeric_basic_quantity.isna()
+            
+            # 가격차이(3)% 변환
+            price_diff_percent = pd.to_numeric(df_filtered['가격차이(3)%'], errors='coerce')
+            price_diff_percent = price_diff_percent.fillna(0)  # NaN을 0으로 대체
+            small_price_diff = (price_diff_percent >= -10)
+            
+            # 조건: 기본수량 없고 가격차이 작은(-10% 이상) 행 제외
+            rows_to_delete = missing_basic_quantity & small_price_diff
+            df_filtered = df_filtered.loc[~rows_to_delete].copy()
+            
+            logger.info(f"규칙 2 적용 후: {len(df_filtered)}행 (기본수량 없는 작은 가격차이 제거)")
+        except Exception as e:
+            logger.error(f"규칙 2 적용 중 오류: {str(e)}")
+            # 오류 시 이 규칙은 건너뜀
+        
+        # 3. 가격차이 양수(+) 상품 -> 삭제
+        try:
+            df_filtered = df_filtered[
+                ~((df_filtered['가격차이(2)'] > 0) & 
+                  (df_filtered['가격차이(3)'] > 0))
+            ].copy()
+            
+            logger.info(f"규칙 3 적용 후: {len(df_filtered)}행 (양수 가격차이 제거)")
+        except Exception as e:
+            logger.error(f"규칙 3 적용 중 오류: {str(e)}")
+            # 오류 시 이 규칙은 건너뜀
+        
+        # 4. 고려기프트/네이버쇼핑에 가격불량 기록 전무 -> 줄 삭제
+        try:
+            # 양쪽 모두 가격불량(음수 가격차이)이 없는 행 제거
+            has_koryo_price_issue = (df_filtered['가격차이(2)'] < 0)
+            has_naver_price_issue = (df_filtered['가격차이(3)'] < 0)
+            
+            df_filtered = df_filtered[
+                has_koryo_price_issue | has_naver_price_issue
+            ].copy()
+            
+            logger.info(f"규칙 4 적용 후: {len(df_filtered)}행 (가격불량 없는 행 제거)")
+        except Exception as e:
+            logger.error(f"규칙 4 적용 중 오류: {str(e)}")
+            # 오류 시 이 규칙은 건너뜀
+        
+        # 결과가 비어있으면 기록
+        if len(df_filtered) == 0:
+            logger.warning("필터링 후 데이터가 0행입니다. 조건에 맞는 행이 없을 수 있습니다.")
+        
+        # 5. 이미지 관련 처리 - 이미지 URL 컬럼만 유지하고 실제 이미지는 제거
+        # 이미지 파일이 있는 열인지 확인하고 처리
+        image_columns = [col for col in df_filtered.columns if '이미지' in col.lower()]
+        logger.info(f"이미지 관련 컬럼: {image_columns}")
+        
+        # 구분값(A/P) 복원 - 작업메뉴얼 요구사항
+        if has_distinction and '상품Code' in df_filtered.columns and '구분' in df_filtered.columns:
+            for idx, row in df_filtered.iterrows():
+                product_code = str(row.get('상품Code', ''))
+                if product_code in distinction_values:
+                    df_filtered.at[idx, '구분'] = distinction_values[product_code]
+            logger.info("구분값(A/P) 복원 완료")
+        
+        # 결과 저장
+        try:
+            df_filtered.to_excel(output_file, index=False)
+            logger.info(f"2차 파일 생성 완료: {output_file} (최종 {len(df_filtered)}행)")
+            return output_file
+        except Exception as e:
+            logger.error(f"결과 파일 저장 중 오류: {str(e)}")
+            raise
+        
+    except Exception as e:
+        logger.error(f"1차 -> 2차 파일 변환 중 오류: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     main() 

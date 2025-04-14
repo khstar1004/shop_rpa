@@ -169,3 +169,122 @@ We identified and fixed several issues with Excel file saving:
 5. **Testing**: Added comprehensive tests to verify Excel file saving works properly.
 
 These fixes should resolve issues with Excel files not saving properly or saving empty files.
+
+## 쇼핑 RPA
+
+네이버쇼핑과 고려기프트에서 상품 가격 정보를 비교하는 자동화 프로그램입니다.
+
+## 핵심 기능
+
+- Excel 파일에서 상품 정보 추출
+- 네이버쇼핑 및 고려기프트에서 동일 상품 검색
+- 가격 비교 및 분석
+- 결과를 엑셀 파일로 저장
+- 가격 차이에 따른 상품 필터링
+- 결과 이메일 전송
+
+## 설치 방법
+
+1. 필요한 패키지 설치:
+```
+pip install -r requirements.txt
+```
+
+2. 환경 설정:
+   - 이메일 전송 설정(필요 시): 환경 변수 설정
+     - `EMAIL_USER`: 발신자 이메일 주소
+     - `EMAIL_PASSWORD`: 발신자 이메일 비밀번호
+     - `SMTP_SERVER`: SMTP 서버 주소 (기본값: smtp.gmail.com)
+     - `SMTP_PORT`: SMTP 포트 (기본값: 587)
+     - `EMAIL_USE_SSL`: SSL 사용 여부 (True/False)
+
+## 사용 방법
+
+### GUI 모드
+
+GUI를 통해 프로그램을 실행하려면:
+
+```
+python main.py
+```
+
+### CLI 모드
+
+명령줄에서 프로그램을 실행하려면:
+
+```
+python main.py --cli --input-files [파일경로1] [파일경로2] ... --output-dir [출력디렉토리]
+```
+
+### 작업메뉴얼 기준 워크플로우
+
+작업메뉴얼에 정의된 프로세스에 따라 자동화된 워크플로우를 실행하려면:
+
+```
+python main.py --cli --input-files [파일경로] --manual-workflow
+```
+
+#### 작업메뉴얼 워크플로우 옵션
+
+1. **파일 분할 (300행 단위)**
+   ```
+   --split
+   ```
+
+2. **이메일 전송 비활성화**
+   ```
+   --no-email
+   ```
+
+3. **2차 파일 생성 비활성화**
+   ```
+   --no-second-stage
+   ```
+
+4. **이메일 수신자 지정**
+   ```
+   --email-recipient someone@example.com
+   ```
+
+5. **작업메뉴얼 워크플로우 도움말**
+   ```
+   --help-manual
+   ```
+
+#### 워크플로우 실행 예시
+
+1. **전체 프로세스 실행 (분할 포함)**
+   ```
+   python main.py --cli --input-files data/example.xlsx --manual-workflow --split
+   ```
+
+2. **이메일 전송 없이 실행**
+   ```
+   python main.py --cli --input-files data/example.xlsx --manual-workflow --no-email
+   ```
+
+3. **2차 파일 생성 없이 실행**
+   ```
+   python main.py --cli --input-files data/example.xlsx --manual-workflow --no-second-stage
+   ```
+
+## 처리 과정
+
+1. **1차 파일 처리**
+   - 상품명 전처리 (1- 제거, 특수문자 제거 등)
+   - 네이버쇼핑 및 고려기프트에서 상품 검색
+   - 가격 비교 및 차이 계산
+   - 결과 저장 및 이메일 전송
+
+2. **2차 파일 처리**
+   - 가격차이가 음수인 상품만 선별
+   - 기본수량 없는 상품 중 가격차이 10% 이하 제거
+   - 가격차이 양수인 상품 제거
+   - 가격불량 기록 없는 상품 줄 삭제
+   - 구분값(A/P) 유지
+   - 이미지 링크만 남기고 실제 이미지 제거
+
+## 지원 파일 형식
+
+- Excel (.xls, .xlsx, .xlsm)
+- CSV (.csv)
