@@ -120,6 +120,15 @@ class KoryoScraper(BaseMultiLayerScraper):
         self._thread_local.context = None
         self._thread_local.page = None
 
+    # 비동기 컨텍스트 매니저 지원을 위한 메서드 추가
+    async def __aenter__(self):
+        """비동기 컨텍스트 매니저 진입"""
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """비동기 컨텍스트 매니저 종료"""
+        return False
+
     @contextmanager
     def thread_context(self) -> Generator[Tuple[Optional[Browser], Optional[Page]], None, None]:
         """Playwright 브라우저 컨텍스트를 관리하는 컨텍스트 매니저"""

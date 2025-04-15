@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Union, Tuple, Any
 from pathlib import Path
 import asyncio
 import nest_asyncio
+from utils.caching import Cache
 
 # Add the project root directory to the Python path
 project_root = str(Path(__file__).parent.parent.absolute())
@@ -427,16 +428,25 @@ def run_scraping_for_excel(df: pd.DataFrame) -> pd.DataFrame:
         logger.info("해오름 스크래퍼 초기화 완료")
     except Exception as e:
         logger.error(f"해오름 스크래퍼 초기화 중 오류: {e}")
+        haeoeum_scraper = None
     
     try:
         from core.scraping.koryo_scraper import KoryoScraper
-        koryo_scraper = KoryoScraper(debug=True)
+        koryo_scraper = KoryoScraper()
+        cache = Cache(
+            directory="cache",
+            max_size_mb=1024,
+            ttl=3600,
+            compression=True
+        )
+        logger.info(f"Cache initialized at 'cache' with duration 3600 seconds. Current size: {cache.current_size_mb:.2f}MB, Max size: {cache.max_size_mb}MB. Compression enabled.")
         logger.info("고려 스크래퍼 초기화 완료")
     except Exception as e:
         logger.error(f"고려 스크래퍼 초기화 중 오류: {e}")
+        koryo_scraper = None
     
     try:
-        from core.scraping.naver_scraper import NaverScraper
+        from core.scraping.naver_crawler import NaverShoppingCrawler as NaverScraper
         naver_scraper = NaverScraper(debug=True)
         logger.info("네이버 스크래퍼 초기화 완료")
     except Exception as e:
@@ -527,11 +537,32 @@ def run_scraping_for_excel(df: pd.DataFrame) -> pd.DataFrame:
                             product = haeoeum_scraper.get_product(product_idx)
                             
                             if product:
-                                # 항상 이미지가 있음을 보장
-                                if product.image_gallery:
-                                    df.at[idx, '본사 이미지'] = product.image_gallery[0]
-                                    # 상태가 정상임을 표시
-                                    df.at[idx, '본사 상태'] = "정상"
+                                # 항상 이미지가 있음을 보장 - 메인 이미지만 사용
+                                if product.image_url:
+                                    # 메인 이미지 URL만 사용하고 PNG 파일이 아닌지 확인
+                                    main_image = product.image_url
+                                    if not main_image.lower().endswith('.png'):
+                                        df.at[idx, '본사 이미지'] = main_image
+                                        # 상태가 정상임을 표시
+                                        df.at[idx, '본사 상태'] = "정상"
+                                    else:
+                                        # PNG 파일이면 대체 이미지 찾기 (이미지 갤러리에서)
+                                        if product.image_gallery and len(product.image_gallery) > 1:
+                                            # 갤러리에서 PNG가 아닌 첫 번째 이미지 찾기
+                                            for img in product.image_gallery:
+                                                if not img.lower().endswith('.png'):
+                                                    df.at[idx, '본사 이미지'] = img
+                                                    df.at[idx, '본사 상태'] = "정상"
+                                                    break
+                                            else:
+                                                # PNG가 아닌 이미지를 찾지 못한 경우
+                                                df.at[idx, '본사 이미지'] = f"{haeoeum_scraper.BASE_URL}/images/no_image.jpg"
+                                                logger.warning(f"해오름 상품 {product_idx}의 PNG가 아닌 이미지를 찾을 수 없음")
+                                                df.at[idx, '본사 상태'] = "유사 이미지가 없음"
+                                        else:
+                                            df.at[idx, '본사 이미지'] = f"{haeoeum_scraper.BASE_URL}/images/no_image.jpg"
+                                            logger.warning(f"해오름 상품 {product_idx}의 PNG가 아닌 이미지를 찾을 수 없음")
+                                            df.at[idx, '본사 상태'] = "유사 이미지가 없음"
                                 else:
                                     df.at[idx, '본사 이미지'] = f"{haeoeum_scraper.BASE_URL}/images/no_image.jpg"
                                     logger.warning(f"해오름 상품 {product_idx}의 이미지가 없어 기본 이미지 사용")
@@ -639,19 +670,39 @@ def run_scraping_for_excel(df: pd.DataFrame) -> pd.DataFrame:
                             if products and len(products) > 0:
                                 product = products[0]
                                 
-                                # 안전하게 이미지 URL 추출
+                                # 이미지 URL 처리 강화
                                 try:
-                                    if hasattr(product, 'image_gallery') and product.image_gallery:
-                                        df.at[idx, '네이버 이미지'] = product.image_gallery[0] if isinstance(product.image_gallery, (list, tuple)) else ""
+                                    image_url = ""
+                                    # 1. 이미지 URL 직접 확인
+                                    if hasattr(product, 'image_url') and product.image_url:
+                                        image_url = product.image_url
+                                    
+                                    # 2. 이미지 갤러리 확인
+                                    elif hasattr(product, 'image_gallery') and product.image_gallery:
+                                        if isinstance(product.image_gallery, (list, tuple)) and len(product.image_gallery) > 0:
+                                            image_url = product.image_gallery[0]
+                                    
+                                    # 3. 이미지 URL 정규화
+                                    if image_url:
+                                        # HTTP를 HTTPS로 변환
+                                        if image_url.startswith('http:'):
+                                            image_url = 'https:' + image_url[5:]
+                                        # 프로토콜이 없는 경우 https: 추가
+                                        elif image_url.startswith('//'):
+                                            image_url = 'https:' + image_url
+                                            
+                                        # 이미지 URL 설정
+                                        df.at[idx, '네이버 이미지'] = image_url
+                                        logger.info(f"네이버 이미지 URL 추출 성공: {image_url[:50]}...")
                                     else:
-                                        df.at[idx, '네이버 이미지'] = ""
-                                        # 이미지가 없는 경우 메시지 추가
+                                        # 이미지가 없는 경우 기본 네이버 이미지 사용
+                                        df.at[idx, '네이버 이미지'] = "https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png"
                                         df.at[idx, '네이버 상태'] = "유사 이미지가 없음"
-                                        logger.warning(f"네이버 상품 {product_name}의 이미지가 없음")
-                                except (IndexError, TypeError) as e:
-                                    logger.warning(f"네이버 이미지 추출 오류: {e}")
-                                    df.at[idx, '네이버 이미지'] = ""
-                                    df.at[idx, '네이버 상태'] = "유사 이미지가 없음"
+                                        logger.warning(f"네이버 상품 {product_name}의 이미지가 없어 기본 이미지 사용")
+                                except Exception as img_err:
+                                    logger.error(f"네이버 이미지 추출 중 오류: {img_err}")
+                                    df.at[idx, '네이버 이미지'] = "https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png"
+                                    df.at[idx, '네이버 상태'] = "이미지 추출 오류"
                                 
                                 # 가격 정보 추출
                                 if hasattr(product, 'price') and pd.notna(product.price):
@@ -673,15 +724,19 @@ def run_scraping_for_excel(df: pd.DataFrame) -> pd.DataFrame:
                                 logger.warning(f"네이버 상품 검색 결과 없음: {product_name}")
                                 # 상품이 없을 수 있음을 허용 - 상태 메시지 추가
                                 df.at[idx, '네이버 상태'] = "상품을 찾을 수 없음"
+                                df.at[idx, '네이버 이미지'] = "https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png"
                         except Exception as e:
                             logger.error(f"네이버 상품 검색 중 오류: {e}")
                             df.at[idx, '네이버 상태'] = "검색 오류 발생"
+                            df.at[idx, '네이버 이미지'] = "https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png"
                     else:
                         logger.warning("네이버 스크래핑: 상품명이 비어 있어 검색 불가")
                         df.at[idx, '네이버 상태'] = "상품명 정보 없음"
+                        df.at[idx, '네이버 이미지'] = "https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png"
             except Exception as e:
                 logger.error(f"네이버 스크래핑 오류 (행 {idx}): {e}")
                 df.at[idx, '네이버 상태'] = "처리 오류 발생"
+                df.at[idx, '네이버 이미지'] = "https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png"
     
     # 데이터 타입 변환 (숫자형 컬럼)
     numeric_cols = ['고려_가격', '네이버_가격']
