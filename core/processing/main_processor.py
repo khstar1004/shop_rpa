@@ -58,9 +58,9 @@ class ProductProcessor:
             
         self.cache = FileCache(
             cache_dir=cache_dir,
-            duration_seconds=int(self.config.get("PROCESSING", "cache_duration", fallback=86400)),
+            ttl=int(self.config.get("PROCESSING", "cache_duration", fallback=86400)),
             max_size_mb=int(self.config.get("PROCESSING", "cache_max_size_mb", fallback=1024)),
-            enable_compression=self.config.getboolean("PROCESSING", "enable_compression", fallback=True),
+            compression=self.config.getboolean("PROCESSING", "enable_compression", fallback=True),
             compression_level=int(self.config.get("PROCESSING", "compression_level", fallback=6))
         )
 

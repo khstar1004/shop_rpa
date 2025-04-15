@@ -120,5 +120,12 @@
     "clear_cache_success_title": "캐시 비우기 완료",
     "clear_cache_success_message": "캐시가 성공적으로 비워졌습니다.",
     "clear_cache_error_title": "캐시 비우기 오류",
-    "clear_cache_error_message": "캐시를 비우는 중 오류가 발생했습니다."
+    "clear_cache_error_message": "캐시를 비우는 중 오류가 발생했습니다.",
+    
+    "intermediate_reports": "중간 보고서",
+    "final_reports": "최종 보고서",
+    "other_reports": "기타 파일",
+    "intermediate_report": "중간 보고서",
+    "final_report": "최종 보고서",
+    "report": "보고서"
 }

@@ -119,7 +119,44 @@ class ProcessingThread(QThread):
                         self.logger.info(f"Successfully processed '{file_name}' -> '{result_file}'")
                         output_files.append(result_file)
                         processed_files_count += 1
-                        self.processing_complete.emit(result_file, "")
+                        
+                        # Determine if this is intermediate or final file and find its counterpart
+                        try:
+                            base_name = os.path.basename(result_file)
+                            file_dir = os.path.dirname(result_file)
+                            parent_dir = os.path.dirname(file_dir)
+                            
+                            if "_intermediate" in base_name:
+                                # This is an intermediate file, find the final file
+                                final_name = base_name.replace("_intermediate", "_final")
+                                final_dir = os.path.join(parent_dir, "final")
+                                final_file = os.path.join(final_dir, final_name)
+                                
+                                if os.path.exists(final_file):
+                                    self.logger.info(f"Found matching final file: {final_file}")
+                                    self.processing_complete.emit(result_file, final_file)
+                                else:
+                                    self.logger.warning(f"No matching final file found for {result_file}")
+                                    self.processing_complete.emit(result_file, "")
+                            elif "_final" in base_name:
+                                # This is a final file, find the intermediate file
+                                intermediate_name = base_name.replace("_final", "_intermediate")
+                                intermediate_dir = os.path.join(parent_dir, "intermediate")
+                                intermediate_file = os.path.join(intermediate_dir, intermediate_name)
+                                
+                                if os.path.exists(intermediate_file):
+                                    self.logger.info(f"Found matching intermediate file: {intermediate_file}")
+                                    self.processing_complete.emit(intermediate_file, result_file)
+                                else:
+                                    self.logger.warning(f"No matching intermediate file found for {result_file}")
+                                    self.processing_complete.emit(result_file, "")
+                            else:
+                                # Neither intermediate nor final, just emit the file
+                                self.logger.warning(f"File doesn't match pattern: {result_file}")
+                                self.processing_complete.emit(result_file, "")
+                        except Exception as e:
+                            self.logger.error(f"Error finding matching file: {str(e)}")
+                            self.processing_complete.emit(result_file, "")
                     elif error_message:
                         self.logger.error(f"Error processing file '{file_name}': {error_message}")
                         self.error_occurred.emit(f"파일 '{file_name}' 처리 오류: {error_message}")
@@ -184,18 +221,28 @@ class ProcessingThread(QThread):
         # Check if the thread is still supposed to be running before emitting signals
         if self._is_running:
             try:
+                # Ensure current and total are valid integers
+                current = max(0, int(current))
+                total = max(1, int(total))  # Ensure we don't divide by zero
+                
+                # Emit progress signal
                 self.progress_updated.emit(current, total)
-                # Update status message less frequently or based on percentage?
-                # Example: update every 10 items or at the end
-                if total > 0 and (current % 10 == 0 or current == total or current == 0):
-                     percentage = int((current / total) * 100)
-                     self.status_updated.emit(f"처리 중... {current}/{total} ({percentage}%)")
-                elif total == 0:
-                     self.status_updated.emit(f"처리 중... (항목 없음)")
-
+                
+                # Update status message less frequently to avoid GUI overload
+                if total > 0 and (current % 10 == 0 or current == total or current == 0 or current == 1):
+                    percentage = int((current / total) * 100)
+                    self.status_updated.emit(f"처리 중... {current}/{total} ({percentage}%)")
+                elif total <= 1:
+                    self.status_updated.emit(f"처리 중... (항목 없음)")
+                    
             except Exception as e:
-                 # Catch Qt signal emission errors (less likely but possible)
-                 self.logger.error(f"Error emitting progress signals: {e}")
+                # Catch any errors during signal emission
+                try:
+                    self.logger.error(f"Error emitting progress signals: {e}")
+                except:
+                    # Last resort if logger fails
+                    import traceback
+                    print(f"Critical error updating progress: {traceback.format_exc()}")
 
 # --- Remove old methods if they are no longer needed ---
 # def _process_single_file(self, input_file): ...

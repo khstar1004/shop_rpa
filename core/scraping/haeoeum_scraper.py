@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 import sys
+import asyncio
 
 # Add the project root directory to Python path
 project_root = str(Path(__file__).parent.parent.parent.absolute())
@@ -106,8 +107,8 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                     "width": int(self.config.get('SCRAPING', 'viewport_width', fallback='1280')),
                     "height": int(self.config.get('SCRAPING', 'viewport_height', fallback='720'))
                 },
-                "timeout": int(self.config.get('SCRAPING', 'wait_timeout', fallback='15000')),
-                "wait_until": "networkidle",  # 더 안정적인 페이지 로드 조건
+                "timeout": int(self.config.get('SCRAPING', 'wait_timeout', fallback='60000')),  # 타임아웃을 60초로 증가
+                "wait_until": "domcontentloaded",  # 더 빠른 페이지 로드 조건
                 "ignore_https_errors": not self.config.getboolean('SCRAPING', 'ssl_verification', fallback=True)
             }
         else:
@@ -256,12 +257,22 @@ class HaeoeumScraper(BaseMultiLayerScraper):
             return Product.from_dict(cached_result)
 
         url = f"{self.PRODUCT_VIEW_URL}?p_idx={product_idx}"
-        self.logger.info(f"상품 데이터 추출 시작: {url}")
+        self.logger.info(f"상품 이미지 추출 시작: {url}")
 
-        product_data = None
-        soup = None
+        # 기본 상품 정보 설정 (Excel에서 실제 정보를 가져오므로 최소한만 설정)
+        product_data = {
+            "id": hashlib.md5(f"haeoeum_{product_idx}".encode()).hexdigest(),
+            "name": f"JCL_{product_idx}",  # Excel에서 실제 이름을 사용
+            "source": "haeoeum",
+            "price": 0,  # Excel에서 실제 가격을 사용
+            "url": url,
+            "image_url": "",
+            "image_gallery": [],
+            "product_code": product_idx,
+            "status": "OK"
+        }
         
-        # 1. requests로 먼저 시도
+        # 1. requests로 이미지 추출 시도
         try:
             response = self.session.get(url, timeout=self.timeout_config)
             response.raise_for_status()
@@ -279,74 +290,52 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                     response.encoding = 'cp949'
             
             soup = BeautifulSoup(response.text, "html.parser")
-            product_data = self._extract_product_data(soup, product_idx, url)
             
             # 이미지 추출
-            images = self._extract_images(url, soup)
+            images = self._extract_images_with_soup(soup, url)
             if images:
                 product_data["image_url"] = images[0]
                 product_data["image_gallery"] = images
+                self.logger.info(f"requests로 이미지 {len(images)}개 추출 성공")
                 
         except Exception as e:
-            self.logger.error(f"requests를 사용한 상품 데이터 추출 실패: {e}")
+            self.logger.error(f"requests를 사용한 이미지 추출 실패: {e}")
 
         # 2. Playwright로 시도 (requests 실패 시 또는 이미지가 없는 경우)
-        if (not product_data or not product_data.get("image_gallery")) and self.playwright_available:
+        if (not product_data.get("image_gallery") or len(product_data["image_gallery"]) == 0) and self.playwright_available:
             try:
-                with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=self.headless)
-                    page = browser.new_page()
-                    page.goto(url, wait_until=self.playwright_config["wait_until"])
-                    
-                    # 이미지가 로드될 때까지 대기
-                    page.wait_for_selector("img", timeout=5000)
-                    
-                    # HTML 파싱
-                    html = page.content()
-                    soup = BeautifulSoup(html, "html.parser")
-                    
-                    # 상품 데이터 추출
-                    if not product_data:
-                        product_data = self._extract_product_data(soup, product_idx, url)
-                    
-                    # 이미지 추출
-                    images = self._extract_images(url, soup)
-                    if images:
-                        product_data["image_url"] = images[0]
-                        product_data["image_gallery"] = images
-                    
-                    browser.close()
-                    
+                images = self._extract_images_with_playwright_common(url)
+                if images:
+                    product_data["image_url"] = images[0]
+                    product_data["image_gallery"] = images
+                    self.logger.info(f"Playwright로 이미지 {len(images)}개 추출 성공")
             except Exception as e:
-                self.logger.error(f"Playwright를 사용한 상품 데이터 추출 실패: {e}")
+                self.logger.error(f"Playwright를 사용한 이미지 추출 실패: {e}")
 
-        # 3. 데이터 검증 및 기본값 설정
-        if not product_data:
-            self.logger.warning(f"상품 데이터 추출 실패, 기본값 사용: {product_idx}")
-            product_data = {
-                "id": hashlib.md5(f"haeoeum_{product_idx}".encode()).hexdigest(),
-                "name": f"해오름상품_{product_idx}",
-                "source": "haeoeum",
-                "price": 10000,  # 임시 가격
-                "url": url,
-                "image_url": f"{self.BASE_URL}/images/no_image.jpg",
-                "status": "Error",
-                "product_code": product_idx,
-                "image_gallery": [f"{self.BASE_URL}/images/no_image.jpg"],
-                "quantity_prices": {"1": 10000}
-            }
+        # 3. 대체 방법으로 시도 (이전 방법 모두 실패 시)
+        if not product_data.get("image_gallery") or len(product_data["image_gallery"]) == 0:
+            try:
+                images = self._extract_images_with_stubborn_method(url)
+                if images:
+                    product_data["image_url"] = images[0]
+                    product_data["image_gallery"] = images
+                    self.logger.info(f"대체 방법으로 이미지 {len(images)}개 추출 성공")
+            except Exception as e:
+                self.logger.error(f"대체 방법으로 이미지 추출 실패: {e}")
+
+        # 4. 이미지가 없는 경우 기본 이미지 설정
+        if not product_data.get("image_gallery") or len(product_data["image_gallery"]) == 0:
+            self.logger.warning(f"이미지 추출 실패, 기본 이미지 사용: {product_idx}")
+            product_data["image_url"] = f"{self.BASE_URL}/images/no_image.jpg"
+            product_data["image_gallery"] = [f"{self.BASE_URL}/images/no_image.jpg"]
+            product_data["status"] = "Image Not Found"
         
-        # 4. Product 객체 생성
+        # 5. Product 객체 생성
         try:
             product = Product(**{k: v for k, v in product_data.items() if k in Product.__annotations__})
             
-            # 복잡한 필드 설정
-            if 'image_gallery' in product_data:
-                product.image_gallery = product_data['image_gallery']
-            if 'specifications' in product_data:
-                product.specifications = product_data['specifications']
-            if 'quantity_prices' in product_data:
-                product.quantity_prices = product_data['quantity_prices']
+            # 이미지 갤러리 설정
+            product.image_gallery = product_data['image_gallery']
             
             # 원본 데이터 저장
             product.original_input_data = product_data
@@ -609,31 +598,30 @@ class HaeoeumScraper(BaseMultiLayerScraper):
 
     def _extract_product_idx(self, url: str) -> Optional[str]:
         """
-        URL에서 제품 ID를 추출합니다.
+        URL에서 제품 ID(p_idx)를 추출합니다.
         
         Args:
             url: 제품 URL
             
         Returns:
-            제품 ID 또는 None (추출 실패 시)
+            제품 ID 또는 URL 분석 실패 시 None
         """
         try:
+            if not url or "product_view.asp" not in url:
+                return None
+                
+            # URL 파싱
             parsed_url = urlparse(url)
             query_params = dict(param.split('=') for param in parsed_url.query.split('&'))
             
             # p_idx 파라미터 찾기
-            if 'p_idx' in query_params:
-                return query_params['p_idx']
-                
-            # 다른 가능한 ID 파라미터 확인
-            for param in ['idx', 'id', 'no', 'product_id']:
-                if param in query_params:
-                    return query_params[param]
-            
-            return None
+            return query_params.get('p_idx')
         except Exception as e:
-            self.logger.error(f"URL에서 제품 ID 추출 실패: {e}")
+            self.logger.error(f"URL에서 제품 ID 추출 실패: {url} - {e}")
             return None
+            
+    # 이전 메서드의 별칭 유지 (하위 호환성)
+    extract_product_idx_from_url = _extract_product_idx
 
     def _handle_dialog(self, dialog):
         """
@@ -1175,12 +1163,15 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         
         # 1. BeautifulSoup으로 먼저 시도
         if soup:
-            images.extend(self._extract_images_with_soup(soup, url))
+            soup_images = self._extract_images_with_soup(soup, url)
+            self.logger.info(f"BeautifulSoup으로 {len(soup_images)}개 이미지 추출")
+            images.extend(soup_images)
             
         # 2. Playwright로 시도 (이미지가 없거나 Playwright가 사용 가능한 경우)
         if (not images or len(images) < 2) and self.playwright_available:
             try:
                 playwright_images = self._extract_images_with_playwright(url)
+                self.logger.info(f"Playwright로 {len(playwright_images)}개 이미지 추출")
                 images.extend(playwright_images)
             except Exception as e:
                 self.logger.warning(f"Playwright 이미지 추출 실패: {e}")
@@ -1189,9 +1180,10 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         if not images and self.playwright_available:
             try:
                 stubborn_images = self._extract_images_with_stubborn_method(url)
+                self.logger.info(f"대체 방법으로 {len(stubborn_images)}개 이미지 추출 성공")
                 images.extend(stubborn_images)
             except Exception as e:
-                self.logger.warning(f"Stubborn 이미지 추출 실패: {e}")
+                self.logger.warning(f"대체 이미지 추출 실패: {e}")
         
         # 중복 제거 및 URL 정규화
         unique_images = []
@@ -1199,7 +1191,7 @@ class HaeoeumScraper(BaseMultiLayerScraper):
             if img_url:
                 try:
                     full_url = urljoin(url, img_url)
-                    if not any(x in full_url.lower() for x in ['icon', 'button', 'btn_', 'pixel.gif']):
+                    if full_url.strip() and not any(x in full_url.lower() for x in ['icon', 'button', 'btn_', 'pixel.gif']):
                         if full_url not in unique_images:
                             unique_images.append(full_url)
                 except Exception:
@@ -1260,64 +1252,66 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         return images
 
     def _extract_images_with_playwright(self, url: str) -> List[str]:
-        """Playwright를 사용한 이미지 추출"""
+        """Playwright를 사용하여 이미지 추출 (동기 방식으로 변경)"""
+        if not self.playwright_available:
+            return []
+
+        max_retries = 3
+        retry_delay = 2  # 초
         images = []
+
+        for attempt in range(max_retries):
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=self.headless)
+                    page = browser.new_page()
+                    
+                    # 타임아웃 설정
+                    page.set_default_timeout(self.playwright_config["timeout"])
+                    
+                    # 페이지 로드
+                    page.goto(url, wait_until=self.playwright_config["wait_until"])
+                    
+                    # 이미지 로드 대기
+                    page.wait_for_selector("img", timeout=5000)
+                    
+                    # 이미지 추출
+                    images = page.evaluate("""() => {
+                        function isValidImage(url) {
+                            return url && 
+                                url.trim() !== '' && 
+                                !url.includes('btn_') &&
+                                !url.includes('icon_') &&
+                                url.match(/\\.(jpg|jpeg|png|gif)(\\?|$)/i);
+                        }
+                        
+                        // 모든 이미지 수집
+                        const allImages = Array.from(document.querySelectorAll('img'))
+                            .map(img => img.src)
+                            .filter(isValidImage);
+                        
+                        // 큰 이미지만 수집
+                        const largeImages = Array.from(document.querySelectorAll('img')).filter(img => {
+                            const width = img.naturalWidth || img.width;
+                            const height = img.naturalHeight || img.height;
+                            return (width > 150 || height > 150) && isValidImage(img.src);
+                        }).map(img => img.src);
+                        
+                        return [...new Set([...largeImages, ...allImages])];
+                    }""")
+                    
+                    browser.close()
+                    
+                    if images:
+                        self.logger.info(f"Playwright로 {len(images)}개 이미지 추출 성공 (시도 {attempt+1}/{max_retries})")
+                        return images
+                    
+            except Exception as e:
+                self.logger.warning(f"Playwright 이미지 추출 시도 {attempt + 1}/{max_retries} 실패: {e}")
+                time.sleep(retry_delay)
         
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=self.headless)
-                page = browser.new_page()
-                
-                # 페이지 로드
-                page.goto(url, wait_until=self.playwright_config["wait_until"])
-                page.wait_for_selector("img", timeout=5000)
-                
-                # JavaScript로 이미지 추출
-                images = page.evaluate("""() => {
-                    function isValidImage(url) {
-                        return url && 
-                               url.trim() !== '' && 
-                               !url.includes('btn_') &&
-                               !url.includes('icon_') &&
-                               url.match(/\\.(jpg|jpeg|png|gif)(\\?|$)/i);
-                    }
-                    
-                    // 모든 이미지 수집
-                    const allImages = Array.from(document.querySelectorAll('img'))
-                        .map(img => img.src)
-                        .filter(isValidImage);
-                    
-                    // 큰 이미지만 수집
-                    const largeImages = Array.from(document.querySelectorAll('img')).filter(img => {
-                        const style = window.getComputedStyle(img);
-                        const width = parseInt(style.width);
-                        const height = parseInt(style.height);
-                        return (width > 150 || height > 150) && isValidImage(img.src);
-                    }).map(img => img.src);
-                    
-                    // 백그라운드 이미지 URL 수집
-                    const bgElements = Array.from(document.querySelectorAll('*')).filter(el => {
-                        const style = window.getComputedStyle(el);
-                        const bgImage = style.backgroundImage || '';
-                        return bgImage.includes('url(') && !bgImage.includes('gradient');
-                    });
-                    
-                    const bgImages = bgElements.map(el => {
-                        const style = window.getComputedStyle(el);
-                        const bgImage = style.backgroundImage;
-                        const urlMatch = bgImage.match(/url\\(['"]?([^'"\\)]+)['"]?\\)/);
-                        return urlMatch ? urlMatch[1] : null;
-                    }).filter(url => isValidImage(url));
-                    
-                    return [...new Set([...largeImages, ...allImages, ...bgImages])];
-                }""")
-                
-                browser.close()
-                
-        except Exception as e:
-            self.logger.error(f"Playwright 이미지 추출 실패: {e}")
-            
-        return images
+        self.logger.error(f"Playwright 이미지 추출 최종 실패")
+        return []
 
     def _extract_images_with_stubborn_method(self, url: str) -> List[str]:
         """까다로운 경우를 위한 특수 이미지 추출 방법"""
@@ -1420,33 +1414,263 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         images = []
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch()
+                browser = p.chromium.launch(headless=self.headless)
                 page = browser.new_page()
                 page.goto(url)
                 page.wait_for_load_state("networkidle")
-                images = page.evaluate("Array.from(document.images).map(img => img.src)")
+                page.wait_for_selector("img", timeout=5000)
+                images = page.evaluate("""() => {
+                    function isValidImage(url) {
+                        return url && 
+                               url.trim() !== '' && 
+                               !url.includes('btn_') &&
+                               !url.includes('icon_') &&
+                               url.match(/\\.(jpg|jpeg|png|gif)(\\?|$)/i);
+                    }
+                    
+                    // 모든 이미지 수집
+                    const allImages = Array.from(document.querySelectorAll('img'))
+                        .map(img => img.src)
+                        .filter(isValidImage);
+                    
+                    // 큰 이미지만 수집
+                    const largeImages = Array.from(document.querySelectorAll('img')).filter(img => {
+                        const width = img.naturalWidth || img.width;
+                        const height = img.naturalHeight || img.height;
+                        return (width > 150 || height > 150) && isValidImage(img.src);
+                    }).map(img => img.src);
+                    
+                    return [...new Set([...largeImages, ...allImages])];
+                }""")
                 browser.close()
         except Exception as e:
             self.logger.error(f"Error in shared Playwright extraction: {e}")
         return images
 
-    def _wait_for_load(self, page):
-        """페이지가 완전히 로드될 때까지 기다림"""
+    def extract_images_for_excel_product(self, product_idx: str) -> Dict[str, Any]:
+        """
+        Excel에 포함된 제품의 이미지만 추출하는 전용 메서드.
+        다른 정보는 Excel에서 이미 가져올 수 있기 때문에 이미지만 가져옵니다.
+        
+        Args:
+            product_idx: 제품 ID (URL의 p_idx 파라미터)
+            
+        Returns:
+            딕셔너리 { "image_url": 첫 번째 이미지 URL, "image_gallery": 이미지 URL 목록 }
+        """
+        url = f"{self.PRODUCT_VIEW_URL}?p_idx={product_idx}"
+        self.logger.info(f"Excel 제품 이미지 추출 시작: {url}")
+        
+        # 캐시 확인
+        cache_key = f"haeoeum_excel_image|{product_idx}"
+        cached_result = self.get_cached_data(cache_key)
+        if cached_result:
+            self.logger.info(f"캐시된 이미지 데이터 사용: p_idx={product_idx}")
+            return cached_result
+        
+        result = {
+            "image_url": f"{self.BASE_URL}/images/no_image.jpg",
+            "image_gallery": [f"{self.BASE_URL}/images/no_image.jpg"],
+            "status": "OK"
+        }
+        
+        # 1. requests로 이미지 추출 시도
         try:
-            # 네트워크 유휴 상태 대기
-            page.wait_for_load_state("networkidle", timeout=30000)
+            response = self.session.get(url, timeout=self.timeout_config)
+            response.raise_for_status()
             
-            # DOM 콘텐츠 로드 대기
-            page.wait_for_load_state("domcontentloaded", timeout=10000)
+            # 인코딩 처리
+            if not response.encoding or response.encoding == 'ISO-8859-1':
+                try:
+                    import chardet
+                    detected = chardet.detect(response.content)
+                    if detected['confidence'] > 0.7:
+                        response.encoding = detected['encoding']
+                    else:
+                        response.encoding = 'cp949'
+                except ImportError:
+                    response.encoding = 'cp949'
             
-            # 잠시 기다림 (추가 리소스 로드를 위해)
-            page.wait_for_timeout(2000)
+            soup = BeautifulSoup(response.text, "html.parser")
             
+            # 이미지 추출
+            images = self._extract_images_with_soup(soup, url)
+            if images:
+                result["image_url"] = images[0]
+                result["image_gallery"] = images
+                self.logger.info(f"requests로 Excel 제품 이미지 {len(images)}개 추출 성공")
+                
+                # 캐시에 저장
+                self.cache_sparse_data(cache_key, result)
+                return result
+                
         except Exception as e:
-            self.logger.warning(f"Wait for load timed out: {e}")
+            self.logger.error(f"requests를 사용한 Excel 제품 이미지 추출 실패: {e}")
 
-    def _merge_unique_images(self, *image_lists: list) -> list:
-        return list(dict.fromkeys(img for lst in image_lists for img in lst))
+        # 2. Playwright로 시도
+        if self.playwright_available:
+            try:
+                images = self._extract_images_with_playwright_common(url)
+                if images:
+                    result["image_url"] = images[0]
+                    result["image_gallery"] = images
+                    self.logger.info(f"Playwright로 Excel 제품 이미지 {len(images)}개 추출 성공")
+                    
+                    # 캐시에 저장
+                    self.cache_sparse_data(cache_key, result)
+                    return result
+            except Exception as e:
+                self.logger.error(f"Playwright를 사용한 Excel 제품 이미지 추출 실패: {e}")
+
+        # 3. 대체 방법으로 시도
+        try:
+            images = self._extract_images_with_stubborn_method(url)
+            if images:
+                result["image_url"] = images[0]
+                result["image_gallery"] = images
+                self.logger.info(f"대체 방법으로 Excel 제품 이미지 {len(images)}개 추출 성공")
+                
+                # 캐시에 저장
+                self.cache_sparse_data(cache_key, result)
+                return result
+        except Exception as e:
+            self.logger.error(f"대체 방법으로 Excel 제품 이미지 추출 실패: {e}")
+
+        # 이미지 추출 실패 시 결과 반환
+        result["status"] = "Image Not Found"
+        self.logger.warning(f"Excel 제품 이미지 추출 실패, 기본 이미지 사용: {product_idx}")
+        
+        # 캐시에 저장
+        self.cache_sparse_data(cache_key, result)
+        return result
+
+    def get_product_image_url(self, product_idx: str) -> str:
+        """
+        주어진 제품의 이미지 URL만 반환하는 간단한 메서드.
+        
+        Args:
+            product_idx: 제품 ID (URL의 p_idx 파라미터)
+            
+        Returns:
+            이미지 URL 문자열
+        """
+        result = self.extract_images_for_excel_product(product_idx)
+        return result["image_url"]
+    
+    def get_product_image_gallery(self, product_idx: str) -> List[str]:
+        """
+        주어진 제품의 이미지 갤러리 목록을 반환하는 간단한 메서드.
+        
+        Args:
+            product_idx: 제품 ID (URL의 p_idx 파라미터)
+            
+        Returns:
+            이미지 URL 목록
+        """
+        result = self.extract_images_for_excel_product(product_idx)
+        return result["image_gallery"]
+    
+    def get_image_url_from_product_url(self, product_url: str) -> str:
+        """
+        제품 URL에서 직접 이미지 URL을 추출합니다.
+        
+        Args:
+            product_url: 제품 전체 URL (예: http://www.jclgift.com/product/product_view.asp?p_idx=431692)
+            
+        Returns:
+            이미지 URL (추출 실패 시 기본 이미지 URL 반환)
+        """
+        product_idx = self._extract_product_idx(product_url)
+        if not product_idx:
+            self.logger.warning(f"URL에서 제품 ID를 추출할 수 없음: {product_url}")
+            return f"{self.BASE_URL}/images/no_image.jpg"
+            
+        return self.get_product_image_url(product_idx)
+        
+    def get_image_gallery_from_product_url(self, product_url: str) -> List[str]:
+        """
+        제품 URL에서 직접 이미지 갤러리를 추출합니다.
+        
+        Args:
+            product_url: 제품 전체 URL (예: http://www.jclgift.com/product/product_view.asp?p_idx=431692)
+            
+        Returns:
+            이미지 URL 목록 (추출 실패 시 기본 이미지 URL이 포함된 목록 반환)
+        """
+        product_idx = self._extract_product_idx(product_url)
+        if not product_idx:
+            self.logger.warning(f"URL에서 제품 ID를 추출할 수 없음: {product_url}")
+            return [f"{self.BASE_URL}/images/no_image.jpg"]
+            
+        return self.get_product_image_gallery(product_idx)
+
+    def batch_extract_images_from_urls(self, urls: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        여러 제품 URL에서 이미지를 일괄 추출합니다.
+        엑셀 데이터 처리에 최적화되어 있습니다.
+        
+        Args:
+            urls: 제품 URL 목록
+            
+        Returns:
+            딕셔너리 { "p_idx": { "image_url": 첫 번째 이미지 URL, "image_gallery": 이미지 URL 목록 } }
+        """
+        result = {}
+        total_urls = len(urls)
+        
+        self.logger.info(f"URL {total_urls}개에서 이미지 일괄 추출 시작")
+        
+        for i, url in enumerate(urls):
+            if not url or not isinstance(url, str):
+                continue
+                
+            product_idx = self._extract_product_idx(url)
+            if not product_idx:
+                continue
+                
+            self.logger.info(f"[{i+1}/{total_urls}] 제품 이미지 추출 중: {product_idx}")
+            images_data = self.extract_images_for_excel_product(product_idx)
+            result[product_idx] = images_data
+            
+        self.logger.info(f"URL {total_urls}개 중 {len(result)}개 제품 이미지 추출 완료")
+        return result
+        
+    def extract_images_from_excel_data(self, excel_data: List[Dict[str, Any]], url_column: str = "본사상품링크") -> List[Dict[str, Any]]:
+        """
+        엑셀 데이터에서 이미지를 추출하여 원본 데이터에 추가합니다.
+        
+        Args:
+            excel_data: 엑셀에서 로드한 딕셔너리 목록 (각 행이 하나의 딕셔너리)
+            url_column: URL이 포함된 열 이름
+            
+        Returns:
+            이미지 URL이 추가된 원본 데이터 목록
+        """
+        if not excel_data:
+            return []
+            
+        # URL 추출
+        urls = [row.get(url_column, "") for row in excel_data if url_column in row]
+        
+        # 이미지 일괄 추출
+        images_data = self.batch_extract_images_from_urls(urls)
+        
+        # 결과를 원본 데이터에 추가
+        for row in excel_data:
+            url = row.get(url_column, "")
+            product_idx = self._extract_product_idx(url)
+            
+            if product_idx and product_idx in images_data:
+                row["image_url"] = images_data[product_idx]["image_url"]
+                row["image_gallery"] = images_data[product_idx]["image_gallery"]
+                row["image_status"] = images_data[product_idx].get("status", "OK")
+            else:
+                # 이미지를 찾지 못한 경우 기본값 설정
+                row["image_url"] = f"{self.BASE_URL}/images/no_image.jpg"
+                row["image_gallery"] = [f"{self.BASE_URL}/images/no_image.jpg"]
+                row["image_status"] = "URL Invalid or Not Found"
+                
+        return excel_data
 
     def _extract_detailed_images_with_playwright(self, url: str) -> Tuple[List[str], str]:
         """
@@ -1508,9 +1732,16 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                         return urlMatch ? urlMatch[1] : null;
                     }).filter(url => isValidImage(url));
                     
-                    // 결과 합치기 (중복 제거)
-                    const uniqueImages = [...new Set([...largeImages, ...allImages, ...bgImages])];
-                    return uniqueImages;
+                    // onclick 속성에서 이미지 URL 추출
+                    const onclickImages = Array.from(document.querySelectorAll('[onclick*="view_big"]'))
+                        .map(el => {
+                            const onclick = el.getAttribute('onclick');
+                            const match = onclick.match(/view_big\\(['"]([^'"]+)['"]\\)/);
+                            return match ? match[1] : null;
+                        })
+                        .filter(url => isValidImage(url));
+                    
+                    return [...new Set([...largeImages, ...allImages, ...bgImages, ...onclickImages])];
                 }""")
                 
                 # 스크린샷 저장 (분석용)
@@ -1599,3 +1830,72 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         
         self.logger.info(f"Detailed method found {len(filtered_images)} images")
         return filtered_images, html_content
+
+    def _merge_unique_images(self, *image_lists: list) -> list:
+        """이미지 URL 목록들을 병합하고 중복을 제거합니다."""
+        return list(dict.fromkeys(img for lst in image_lists for img in lst if img))
+
+    def _wait_for_load(self, page):
+        """페이지가 완전히 로드될 때까지 기다림"""
+        try:
+            # 네트워크 유휴 상태 대기
+            page.wait_for_load_state("networkidle", timeout=30000)
+            
+            # DOM 콘텐츠 로드 대기
+            page.wait_for_load_state("domcontentloaded", timeout=10000)
+            
+            # 잠시 기다림 (추가 리소스 로드를 위해)
+            page.wait_for_timeout(2000)
+            
+        except Exception as e:
+            self.logger.warning(f"Wait for load timed out: {e}")
+
+
+# 사용 예제
+if __name__ == "__main__":
+    # 로깅 설정
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # 스크래퍼 초기화
+    scraper = HaeoeumScraper(headless=True, output_dir="output")
+    
+    # 1. 단일 제품 이미지 추출 예제
+    product_idx = "431692"  # 예시 상품 ID
+    print(f"\n예제 1: 단일 제품 이미지 추출 (ID: {product_idx})")
+    
+    image_result = scraper.extract_images_for_excel_product(product_idx)
+    print(f"이미지 URL: {image_result['image_url']}")
+    print(f"이미지 갤러리: {image_result['image_gallery'][:3]}... (총 {len(image_result['image_gallery'])}개)")
+    
+    # 2. URL에서 제품 ID 추출 예제
+    product_url = "http://www.jclgift.com/product/product_view.asp?p_idx=431692"
+    print(f"\n예제 2: URL에서 제품 ID 추출")
+    
+    extracted_id = scraper._extract_product_idx(product_url)
+    print(f"추출된 ID: {extracted_id}")
+    
+    # 3. 제품 URL에서 이미지 직접 추출 예제
+    print(f"\n예제 3: 제품 URL에서 이미지 직접 추출")
+    
+    image_url = scraper.get_image_url_from_product_url(product_url)
+    print(f"이미지 URL: {image_url}")
+    
+    # 4. 엑셀 데이터 예제
+    print(f"\n예제 4: 엑셀 데이터에서 이미지 추출")
+    
+    # 샘플 엑셀 데이터
+    excel_data = [
+        {"상품명": "칼라인쇄 부동산화일 A4", "본사상품링크": "http://www.jclgift.com/product/product_view.asp?p_idx=431692"},
+        {"상품명": "다른 상품", "본사상품링크": "http://www.jclgift.com/product/product_view.asp?p_idx=123456"}
+    ]
+    
+    result = scraper.extract_images_from_excel_data(excel_data)
+    
+    for item in result:
+        print(f"상품명: {item['상품명']}")
+        print(f"이미지 URL: {item['image_url']}")
+        print(f"상태: {item.get('image_status', 'Unknown')}")
+        print()

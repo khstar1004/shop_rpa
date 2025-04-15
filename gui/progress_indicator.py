@@ -4,6 +4,7 @@ from typing import List
 from PyQt5.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, pyqtProperty
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFontMetrics
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
+import logging
 
 class ProgressStepIndicator(QWidget):
     """Widget for displaying step-by-step progress"""
@@ -26,6 +27,7 @@ class ProgressStepIndicator(QWidget):
         self._animation_progress = 0  # For animated transitions
         self._animation = None
         self._animation_target = 0
+        self.logger = logging.getLogger(__name__)
         
         self.setMinimumHeight(80)
         self.initUI()
@@ -185,7 +187,11 @@ class ProgressStepIndicator(QWidget):
     
     def set_current_step(self, step: int):
         """Set current step with animation"""
-        if 0 <= step < len(self.steps):
+        try:
+            if step < 0 or step >= len(self.steps):
+                self.logger.warning(f"Invalid step index: {step}, must be between 0 and {len(self.steps)-1}")
+                return
+                
             if step == self.current_step:
                 return
                 
@@ -200,10 +206,16 @@ class ProgressStepIndicator(QWidget):
             
             self.current_step = step
             self.update()
+        except Exception as e:
+            self.logger.error(f"Error in set_current_step: {str(e)}")
     
     def set_completed_steps(self, steps: int):
         """Set completed steps with animation"""
-        if 0 <= steps <= len(self.steps):
+        try:
+            if steps < 0 or steps > len(self.steps):
+                self.logger.warning(f"Invalid completed steps: {steps}, must be between 0 and {len(self.steps)}")
+                return
+                
             if steps == self.completed_steps:
                 return
                 
@@ -218,6 +230,8 @@ class ProgressStepIndicator(QWidget):
             
             self.completed_steps = steps
             self.update()
+        except Exception as e:
+            self.logger.error(f"Error in set_completed_steps: {str(e)}")
 
     def get_step_description(self, step_index: int) -> str:
         """Get description for a specific step"""

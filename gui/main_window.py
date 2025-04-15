@@ -795,33 +795,53 @@ class MainWindow(QMainWindow):
         self._start_processing()
 
     def _start_processing(self):
-        """Start processing selected files"""
+        """실제 처리 시작"""
         try:
-            # Update state
-            self.start_button.setEnabled(False)
-            self.stop_button.setEnabled(True)
-            self.status_label.setText(tr.get_text("starting"))
-            self.progress_bar.setValue(0)
-            self.log_area.clear()
-            logging.info(tr.get_text("analysis_started"))
-            
-            # Record start time for statistics
-            self.processing_start_time = time.time()
+            # Get the input file path
+            if self.input_file is None:
+                self.logger.error("파일이 선택되지 않았습니다.")
+                self.status_label.setText(tr.get_text("status_error", "오류: 파일이 선택되지 않았습니다."))
+                return
 
-            # Determine the files to process
-            input_files = self.input_files if hasattr(self, 'input_files') and self.input_files else [self.input_file]
-            
-            # Get the product limit
-            product_limit = self.product_limit_spinbox.value() if self.product_limit_spinbox.value() > 0 else None
-            if product_limit:
-                logging.info(f"상품 처리 수 제한 설정됨: {product_limit}개")
+            # Prepare progress bar
+            if self.progress_bar:
+                self.progress_bar.setValue(0)
+                self.progress_bar.setFormat("0%")
+                self.progress_bar.show()
 
-            # Create and start processing thread
+            # Reset step indicator if it exists
+            if hasattr(self, 'step_indicator') and self.step_indicator is not None:
+                self.step_indicator.set_current_step(0)
+                self.step_indicator.set_completed_steps(0)
+
+            # Update status
+            self.status_label.setText(tr.get_text("status_processing", "처리 중..."))
+
+            # Get thread count from spinbox
+            thread_count = self.threads_spinbox.value()
+            product_limit = self.product_limit_spinbox.value() if hasattr(self, 'product_limit_spinbox') else 0
+
+            # Create a processor instance if needed
+            if not hasattr(self, 'processor') or self.processor is None:
+                try:
+                    from core.processing.main_processor import ProductProcessor
+                    self.processor = ProductProcessor(self.config)
+                    self.processor.set_thread_count(thread_count)
+                except Exception as e:
+                    self.logger.error(f"프로세서 초기화 중 오류 발생: {str(e)}", exc_info=True)
+                    self._show_error_message(tr.get_text("processor_init_error", f"프로세서 초기화 오류: {str(e)}"))
+                    return
+
+            # Create and start the processing thread
             self.processing_thread = ProcessingThread(
-                self.processor, 
-                input_files, 
-                product_limit=product_limit
+                self.processor,
+                self.input_file,
+                None,  # No specific output directory
+                product_limit,
+                self
             )
+
+            # Connect signals
             self.processing_thread.progress_updated.connect(self.update_progress)
             self.processing_thread.status_updated.connect(self.update_status)
             self.processing_thread.log_message.connect(self.append_log)
@@ -829,14 +849,16 @@ class MainWindow(QMainWindow):
             self.processing_thread.processing_error.connect(self.on_processing_error)
             self.processing_thread.finished.connect(self.on_thread_finished)
 
+            # Start the thread
             self.processing_thread.start()
 
+            # Update button states
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+
         except Exception as e:
-            logging.error(f"Error starting processing: {e}")
-            self.status_label.setText(tr.get_text("error_occurred"))
-            self.start_button.setEnabled(True)
-            self.stop_button.setEnabled(False)
-            self.on_processing_error(str(e))
+            self.logger.error(f"처리 시작 중 오류: {str(e)}", exc_info=True)
+            self._show_error_message(tr.get_text("processing_start_error", f"처리 시작 오류: {str(e)}"))
 
     @pyqtSlot()
     def on_stop_clicked(self):
@@ -858,85 +880,94 @@ class MainWindow(QMainWindow):
     @pyqtSlot(int, int)
     def update_progress(self, current_item, total_items):
         """Update progress bar value and ensure it's visible"""
-        if not self.progress_bar.isVisible():
-            self.progress_bar.show()
-
-        if total_items > 0:
-            percentage = int((current_item / total_items) * 100)
-            # Ensure percentage is within 0-100 bounds
-            percentage = max(0, min(percentage, 100))
+        try:
+            if not self.progress_bar:
+                return
             
-            # Smoothly animate progress bar value if change is significant
-            current_value = self.progress_bar.value()
-            if abs(percentage - current_value) > 3:  # Only animate if difference is significant
-                # Use property animation for smooth transition
-                self.progress_bar.setValue(percentage)
-            else:
-                self.progress_bar.setValue(percentage)
-            
-            # Update progress bar text to show both percentage and count
-            self.progress_bar.setFormat(f"{percentage}% ({current_item}/{total_items})")
+            if not self.progress_bar.isVisible():
+                self.progress_bar.show()
 
-            # During processing, update drop area to show loading
-            if percentage > 0 and percentage < 100 and hasattr(self, 'drop_area'):
-                if not hasattr(self, 'loading_icon') or self.loading_icon is None:
-                    self.loading_icon = QSvgWidget(os.path.join(os.path.dirname(__file__), "assets", "loading.svg"))
-                    self.loading_icon.setFixedSize(48, 48)
-                    # Replace the file icon with the loading icon temporarily
-                    if hasattr(self.drop_area, 'file_icon') and self.drop_area.file_icon:
-                        self.drop_area.file_icon.hide()
-                        # Find the layout containing the file icon
-                        icon_layout = None
-                        for i in range(self.drop_area.layout().count()):
-                            item = self.drop_area.layout().itemAt(i)
-                            if isinstance(item, QHBoxLayout):
-                                icon_layout = item
-                                break
-                        
-                        if icon_layout:
-                            # Add loading icon to the layout
-                            icon_layout.insertWidget(1, self.loading_icon)
-                            self.loading_icon.show()
-                            
-                # Update the hint text to show progress
-                if hasattr(self.drop_area, 'hint_label'):
-                    self.drop_area.hint_label.setText(f"{tr.get_text('processing')}: {percentage}%")
-
-            # Update status label with count
-            status_text = tr.get_text("processing_progress", current=current_item, total=total_items)
-            self.status_label.setText(status_text)
-            
-            # Update step indicator based on progress
-            if hasattr(self, 'step_indicator'):
-                if percentage <= 10:
-                    self.step_indicator.set_current_step(0)  # Load step
-                    self.step_indicator.set_completed_steps(0)
-                elif percentage <= 90:
-                    self.step_indicator.set_current_step(1)  # Process step
-                    self.step_indicator.set_completed_steps(1)
+            if total_items > 0:
+                percentage = int((current_item / total_items) * 100)
+                # Ensure percentage is within 0-100 bounds
+                percentage = max(0, min(percentage, 100))
+                
+                # Smoothly animate progress bar value if change is significant
+                current_value = self.progress_bar.value()
+                if abs(percentage - current_value) > 3:  # Only animate if difference is significant
+                    # Use property animation for smooth transition
+                    self.progress_bar.setValue(percentage)
                 else:
-                    self.step_indicator.set_current_step(2)  # Save step
-                    self.step_indicator.set_completed_steps(2)
-            
-            # Update resource graph with real-time data
-            if hasattr(self, 'resource_graph'):
-                try:
-                    import psutil
-                    process = psutil.Process(os.getpid())
-                    memory_mb = process.memory_info().rss / 1024 / 1024
-                    cpu_percent = process.cpu_percent(interval=0.1)
-                    self.resource_graph.update_data(memory_mb, cpu_percent)
-                except ImportError:
-                    pass  # psutil not available
-                except Exception as e:
-                    logging.debug(f"Resource graph update error: {str(e)}")
-        else:
-            # Handle case where total_items is 0 or less (e.g., empty file)
-            self.progress_bar.setValue(0)
-            self.progress_bar.setFormat("0% (0/0)")
-            self.status_label.setText(tr.get_text("processing_starting")) # Or a more specific message
+                    self.progress_bar.setValue(percentage)
+                
+                # Update progress bar text to show both percentage and count
+                self.progress_bar.setFormat(f"{percentage}% ({current_item}/{total_items})")
 
-        self.progress_bar.repaint()  # Force immediate update
+                # During processing, update drop area to show loading
+                if percentage > 0 and percentage < 100 and hasattr(self, 'drop_area'):
+                    if not hasattr(self, 'loading_icon') or self.loading_icon is None:
+                        self.loading_icon = QSvgWidget(os.path.join(os.path.dirname(__file__), "assets", "loading.svg"))
+                        self.loading_icon.setFixedSize(48, 48)
+                        # Replace the file icon with the loading icon temporarily
+                        if hasattr(self.drop_area, 'file_icon') and self.drop_area.file_icon:
+                            self.drop_area.file_icon.hide()
+                            # Find the layout containing the file icon
+                            icon_layout = None
+                            for i in range(self.drop_area.layout().count()):
+                                item = self.drop_area.layout().itemAt(i)
+                                if isinstance(item, QHBoxLayout):
+                                    icon_layout = item
+                                    break
+                            
+                            if icon_layout:
+                                # Add loading icon to the layout
+                                icon_layout.insertWidget(1, self.loading_icon)
+                                self.loading_icon.show()
+                                
+                    # Update the hint text to show progress
+                    if hasattr(self.drop_area, 'hint_label'):
+                        self.drop_area.hint_label.setText(f"{tr.get_text('processing')}: {percentage}%")
+
+                # Update status label with count
+                status_text = tr.get_text("processing_progress", current=current_item, total=total_items)
+                self.status_label.setText(status_text)
+                
+                # Update step indicator based on progress
+                if hasattr(self, 'step_indicator') and self.step_indicator is not None:
+                    try:
+                        if percentage <= 10:
+                            self.step_indicator.set_current_step(0)  # Load step
+                            self.step_indicator.set_completed_steps(0)
+                        elif percentage <= 90:
+                            self.step_indicator.set_current_step(1)  # Process step
+                            self.step_indicator.set_completed_steps(1)
+                        else:
+                            self.step_indicator.set_current_step(2)  # Save step
+                            self.step_indicator.set_completed_steps(2)
+                    except Exception as e:
+                        self.logger.error(f"Step indicator update error: {str(e)}")
+                
+                # Update resource graph with real-time data
+                if hasattr(self, 'resource_graph') and self.resource_graph is not None:
+                    try:
+                        import psutil
+                        process = psutil.Process(os.getpid())
+                        memory_mb = process.memory_info().rss / 1024 / 1024
+                        cpu_percent = process.cpu_percent(interval=0.1)
+                        self.resource_graph.update_data(memory_mb, cpu_percent)
+                    except ImportError:
+                        pass  # psutil not available
+                    except Exception as e:
+                        logging.debug(f"Resource graph update error: {str(e)}")
+            else:
+                # Handle case where total_items is 0 or less (e.g., empty file)
+                self.progress_bar.setValue(0)
+                self.progress_bar.setFormat("0% (0/0)")
+                self.status_label.setText(tr.get_text("processing_starting")) # Or a more specific message
+
+            self.progress_bar.repaint()  # Force immediate update
+        except Exception as e:
+            self.logger.error(f"Progress update error: {str(e)}")
 
     @pyqtSlot(str)
     def update_status(self, message):
@@ -950,8 +981,24 @@ class MainWindow(QMainWindow):
     def on_processing_complete(self, primary_path, secondary_path):
         """Handle processing completion"""
         try:
+            # Validate file paths
+            file_paths = []
+            
+            if primary_path and os.path.exists(primary_path):
+                file_paths.append(primary_path)
+                
+            if secondary_path and os.path.exists(secondary_path):
+                file_paths.append(secondary_path)
+                
+            if not file_paths:
+                self.logger.warning("No valid output files found in processing completion")
+                return
+                
+            # Show completion message
             self._show_completion_message(primary_path, secondary_path)
-            self._show_results_summary([primary_path, secondary_path])
+            
+            # Show results summary dialog with both files
+            self._show_results_summary(file_paths)
             
             # Show success toast notification
             toast = WidgetFactory.create_toast_notification(self)
@@ -1010,10 +1057,33 @@ class MainWindow(QMainWindow):
     def _show_completion_message(self, primary_path, secondary_path):
         """Show completion message with toast notification"""
         try:
-            message = tr.get_text(
-                "processing_complete_details",
-                "Processing completed:\nPrimary: {primary}\nSecondary: {secondary}"
-            ).format(primary=primary_path, secondary=secondary_path)
+            # Build message with file paths
+            message_lines = [tr.get_text("processing_complete", "처리 완료")]
+            
+            if primary_path and os.path.exists(primary_path):
+                # Identify type of file (intermediate or final)
+                if "_intermediate" in primary_path:
+                    file_type = tr.get_text("intermediate_report", "Intermediate")
+                elif "_final" in primary_path:
+                    file_type = tr.get_text("final_report", "Final")
+                else:
+                    file_type = tr.get_text("report", "Report")
+                    
+                message_lines.append(f"{file_type}: {os.path.basename(primary_path)}")
+                
+            if secondary_path and os.path.exists(secondary_path):
+                # Identify type of file (intermediate or final)
+                if "_intermediate" in secondary_path:
+                    file_type = tr.get_text("intermediate_report", "Intermediate")
+                elif "_final" in secondary_path:
+                    file_type = tr.get_text("final_report", "Final")
+                else:
+                    file_type = tr.get_text("report", "Report")
+                    
+                message_lines.append(f"{file_type}: {os.path.basename(secondary_path)}")
+            
+            # Combine message lines
+            message = "\n".join(message_lines)
             
             # Show success toast notification
             toast = WidgetFactory.create_toast_notification(self)
@@ -1269,6 +1339,23 @@ class MainWindow(QMainWindow):
             
     def _show_results_summary(self, output_files):
         """Show a summary dialog of processing results with visualization options"""
+        # Filter out empty paths and ensure we have unique file paths
+        valid_files = [f for f in output_files if f and os.path.exists(f)]
+        unique_files = []
+        
+        # Ensure we don't have duplicates in the list
+        for file_path in valid_files:
+            if file_path not in unique_files:
+                unique_files.append(file_path)
+                
+        if not unique_files:
+            QMessageBox.warning(
+                self,
+                tr.get_text("warning"),
+                tr.get_text("no_reports_generated")
+            )
+            return
+        
         summary_dialog = QDialog(self)
         summary_dialog.setWindowTitle(tr.get_text("processing_complete"))
         summary_dialog.setMinimumSize(600, 400)
@@ -1284,25 +1371,41 @@ class MainWindow(QMainWindow):
         file_group = QGroupBox(tr.get_text("generated_reports"))
         file_layout = QVBoxLayout(file_group)
         
-        for output_file in output_files:
-            file_name = os.path.basename(output_file)
-            file_row = QHBoxLayout()
+        # Group files by type
+        intermediate_files = [f for f in unique_files if "_intermediate" in f]
+        final_files = [f for f in unique_files if "_final" in f]
+        other_files = [f for f in unique_files if "_intermediate" not in f and "_final" not in f]
+        
+        # Add intermediate files section if exists
+        if intermediate_files:
+            intermediate_label = QLabel(tr.get_text("intermediate_reports", "Intermediate Reports"))
+            intermediate_label.setStyleSheet("font-weight: bold; color: #555;")
+            file_layout.addWidget(intermediate_label)
             
-            # File icon
-            icon_label = QLabel()
-            icon_label.setPixmap(self.style().standardPixmap(self.style().SP_FileIcon))
+            for output_file in intermediate_files:
+                self._add_file_link(file_layout, output_file)
+                
+            file_layout.addSpacing(10)  # Add some space between sections
             
-            # File name with link
-            file_link = QPushButton(file_name)
-            file_link.setStyleSheet("text-align: left; border: none; text-decoration: underline; color: blue;")
-            file_link.setCursor(Qt.PointingHandCursor)
+        # Add final files section if exists
+        if final_files:
+            final_label = QLabel(tr.get_text("final_reports", "Final Reports"))
+            final_label.setStyleSheet("font-weight: bold; color: #555;")
+            file_layout.addWidget(final_label)
             
-            # Use lambda with default arg to avoid late binding issues
-            file_link.clicked.connect(lambda checked=False, path=output_file: self._open_file(path))
+            for output_file in final_files:
+                self._add_file_link(file_layout, output_file)
+                
+            file_layout.addSpacing(10)  # Add some space between sections
             
-            file_row.addWidget(icon_label)
-            file_row.addWidget(file_link, 1)  # Stretch to fill space
-            file_layout.addLayout(file_row)
+        # Add other files if exists
+        if other_files:
+            other_label = QLabel(tr.get_text("other_reports", "Other Files"))
+            other_label.setStyleSheet("font-weight: bold; color: #555;")
+            file_layout.addWidget(other_label)
+            
+            for output_file in other_files:
+                self._add_file_link(file_layout, output_file)
         
         layout.addWidget(file_group)
         
@@ -1323,7 +1426,28 @@ class MainWindow(QMainWindow):
         
         # Show the dialog
         summary_dialog.exec_()
-    
+        
+    def _add_file_link(self, layout, file_path):
+        """Helper method to add a file link to the layout"""
+        file_name = os.path.basename(file_path)
+        file_row = QHBoxLayout()
+        
+        # File icon
+        icon_label = QLabel()
+        icon_label.setPixmap(self.style().standardPixmap(self.style().SP_FileIcon))
+        
+        # File name with link
+        file_link = QPushButton(file_name)
+        file_link.setStyleSheet("text-align: left; border: none; text-decoration: underline; color: blue;")
+        file_link.setCursor(Qt.PointingHandCursor)
+        
+        # Use lambda with default arg to avoid late binding issues
+        file_link.clicked.connect(lambda checked=False, path=file_path: self._open_file(path))
+        
+        file_row.addWidget(icon_label)
+        file_row.addWidget(file_link, 1)  # Stretch to fill space
+        layout.addLayout(file_row)
+
     def _open_file(self, file_path):
         """Open a file with the system's default application"""
         if not os.path.exists(file_path):

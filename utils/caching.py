@@ -18,7 +18,7 @@ class Cache:
     def __init__(
         self,
         cache_dir: str,
-        duration_seconds: int = 86400,
+        ttl: int = 86400,
         max_size_mb: int = 1024,
         enable_compression: bool = False,
         compression_level: int = 6,
@@ -26,13 +26,13 @@ class Cache:
         """
         Args:
             cache_dir: Directory to store cache files.
-            duration_seconds: Cache duration in seconds (default: 1 day).
+            ttl: Cache duration in seconds (default: 1 day).
             max_size_mb: Maximum size of cache directory in MB (default: 1GB).
             enable_compression: Whether to compress cache entries.
             compression_level: Compression level (1-9, default: 6).
         """
         self.cache_dir = cache_dir
-        self.duration = duration_seconds
+        self.duration = ttl
         self.max_size_bytes = max_size_mb * 1024 * 1024
         self.enable_compression = enable_compression
         self.compression_level = compression_level
@@ -44,7 +44,7 @@ class Cache:
         logger.info(
             "Cache initialized at '%s' with duration %d seconds. "
             "Current size: %.2fMB, Max size: %dMB. Compression %s.",
-            self.cache_dir, duration_seconds,
+            self.cache_dir, ttl,
             cache_size / 1024 / 1024, max_size_mb,
             'enabled' if enable_compression else 'disabled'
         )
@@ -313,5 +313,33 @@ def cache_result(
 
     return decorator
 
-# For backward compatibility
-FileCache = Cache
+class FileCache(Cache):
+    """File-based cache implementation that inherits from base Cache class."""
+    
+    def __init__(
+        self,
+        cache_dir: Optional[str] = None,
+        ttl: int = 86400,
+        max_size_mb: int = 1024,
+        compression: bool = False,
+        compression_level: int = 6,
+    ):
+        """
+        Initialize the file cache.
+        
+        Args:
+            cache_dir: Optional directory path for cache files. If not provided, defaults to 'cache' in current directory.
+            ttl: Time to live in seconds (default: 1 day)
+            max_size_mb: Maximum cache size in MB (default: 1024MB)
+            compression: Whether to enable compression (default: False)
+            compression_level: Compression level (1-9, default: 6)
+        """
+        if cache_dir is None:
+            cache_dir = os.path.join(os.getcwd(), 'cache')
+        super().__init__(
+            cache_dir=cache_dir,
+            ttl=ttl,
+            max_size_mb=max_size_mb,
+            enable_compression=compression,
+            compression_level=compression_level
+        )
