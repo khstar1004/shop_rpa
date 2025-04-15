@@ -4,9 +4,10 @@ import re
 from pathlib import Path
 from datetime import datetime
 from configparser import ConfigParser
-from typing import Optional, Dict, Union, Any
+from typing import Optional, Dict, Union, Any, List, Tuple
 
 import pandas as pd
+import numpy as np
 from openpyxl import load_workbook
 
 
@@ -27,8 +28,11 @@ class ExcelReader:
         
         # Excel 설정
         self.excel_settings = {
+            "sheet_name": self._get_config_value("EXCEL", "default_sheet_name", "Sheet1"),
+            "alternative_sheet_names": self._get_config_value("EXCEL", "alternative_sheet_names", "").split(","),
             "header_row": int(self._get_config_value("EXCEL", "header_row", 1)),
-            "data_start_row": int(self._get_config_value("EXCEL", "data_start_row", 2)),
+            "start_row": int(self._get_config_value("EXCEL", "start_row", 2)),
+            "alternative_start_rows": [int(x) for x in self._get_config_value("EXCEL", "alternative_start_rows", "0,1,3").split(",") if x],
             "max_rows": int(self._get_config_value("EXCEL", "max_rows", 1000)),
             "max_file_size_mb": int(self._get_config_value("EXCEL", "max_file_size_mb", 200)),
             "validation_rules": self._get_bool_config_value("EXCEL", "validation_rules", True),
@@ -43,23 +47,18 @@ class ExcelReader:
             "number_format": self._get_config_value("EXCEL", "number_format", "#,##0")
         }
         
-        # 컬럼 매핑 설정
-        self.column_mapping = {
-            "name": self._get_config_value("EXCEL", "name_column", "상품명"),
-            "price": self._get_config_value("EXCEL", "price_column", "판매단가(V포함)"),
-            "code": self._get_config_value("EXCEL", "code_column", "상품Code"),
-            "url": self._get_config_value("EXCEL", "url_column", "본사상품링크"),
-            "image": self._get_config_value("EXCEL", "image_column", "본사 이미지")
-        }
+        # Get required columns from config
+        required_cols_str = self._get_config_value("EXCEL", "required_columns", "상품명,판매단가(V포함),상품Code,본사 이미지,본사상품링크")
+        self.excel_settings["required_columns"] = [col.strip() for col in required_cols_str.split(",") if col.strip()]
         
-        # 필수 컬럼 설정
-        self.required_columns = [
-            self.column_mapping["name"],
-            self.column_mapping["price"],
-            self.column_mapping["code"],
-            self.column_mapping["url"],
-            self.column_mapping["image"]
-        ]
+        # Column alternatives
+        self.column_alternatives = {
+            "상품명": self._get_config_value("EXCEL", "column_alternatives_상품명", "품명,제품명,상품,product,name,item,품목,상품이름").split(","),
+            "판매단가(V포함)": self._get_config_value("EXCEL", "column_alternatives_판매단가", "단가,판매가,가격,price,가격(v포함),단가(vat),판매단가").split(","),
+            "상품Code": self._get_config_value("EXCEL", "column_alternatives_상품code", "코드,code,item code,product code,품목코드,제품코드,상품코드").split(","),
+            "본사 이미지": self._get_config_value("EXCEL", "column_alternatives_이미지", "이미지,image,상품이미지,제품이미지,이미지주소,image url").split(","),
+            "본사상품링크": self._get_config_value("EXCEL", "column_alternatives_링크", "링크,link,url,상품링크,제품링크,상품url,제품url,홈페이지").split(",")
+        }
         
         # 가격 유효성 검사 설정
         self.price_validation = {
@@ -67,10 +66,8 @@ class ExcelReader:
             "max": float(self._get_config_value("EXCEL", "price_max", 10000000000))
         }
         
-        self.logger.info(f"Excel 설정: {self.excel_settings}")
-        self.logger.info(f"컬럼 매핑: {self.column_mapping}")
-        self.logger.info(f"필수 컬럼: {self.required_columns}")
-        self.logger.info(f"가격 유효성 검사 설정: {self.price_validation}")
+        self.logger.info(f"Excel 설정 초기화 완료: {len(self.excel_settings)} 항목")
+        self.logger.debug(f"컬럼 대체어: {len(self.column_alternatives)} 항목")
 
     def _make_config_getter(self, config):
         """config 객체에 따라 적절한 getter 함수 반환"""
@@ -94,6 +91,7 @@ class ExcelReader:
             return bool(value)
 
     def _ensure_default_excel_settings(self) -> None:
+        """설정에 필요한 기본값을 설정합니다."""
         defaults = {
             "sheet_name": "Sheet1",
             "start_row": 2,
@@ -135,6 +133,7 @@ class ExcelReader:
                         self.excel_settings[key][sub_key] = sub_value
 
     def _clean_url(self, url: str) -> str:
+        """URL 정제 및 이미지 URL 유효성 검사"""
         if not url or not isinstance(url, str):
             return ""
         cleaned_url = url.strip().replace('@', '')
@@ -150,41 +149,57 @@ class ExcelReader:
         cleaned_url = cleaned_url.replace('\\', '/').replace('"', '%22').replace(' ', '%20')
         return cleaned_url
 
-    def _compute_price_metrics(self, base_price, compare_price):
-        try:
-            base_price = float(base_price)
-            compare_price = float(compare_price)
-        except (ValueError, TypeError):
-            return (None, None)
-        if base_price > 0 and compare_price > 0 and abs(compare_price - base_price) < base_price * 5:
-            diff = compare_price - base_price
-            percent = round((diff / base_price) * 100, 2)
-            return (diff, percent)
-        return (None, None)
-
     def _create_minimal_error_dataframe(self, error_message: str) -> pd.DataFrame:
+        """오류 상황에서 기본 데이터프레임을 생성합니다."""
         required_columns = self.excel_settings["required_columns"]
         error_data = {col: [""] for col in required_columns}
+
+        # 첫 번째 행에 오류 메시지 표시
         if "상품명" in required_columns:
             error_data["상품명"] = [f"Error: {error_message}"]
+
         if "판매단가(V포함)" in required_columns:
             error_data["판매단가(V포함)"] = [0]
+
         if "상품Code" in required_columns:
             error_data["상품Code"] = ["ERROR"]
+
         return pd.DataFrame(error_data)
 
     def _ensure_required_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """데이터프레임에 필수 컬럼이 있는지 확인하고 없으면 추가합니다."""
         df_copy = df.copy()
         required_columns = self.excel_settings["required_columns"]
+
+        # 해오름기프트 엑셀 형식에 맞게 컬럼 형태 표준화
+        # 샘플: 구분 담당자 업체명 업체코드 상품Code 중분류카테고리 상품명 기본수량(1) 판매단가(V포함) 본사상품링크
+        haeoreum_columns = [
+            "구분",
+            "담당자",
+            "업체명",
+            "업체코드",
+            "상품Code",
+            "중분류카테고리",
+            "상품명",
+            "기본수량(1)",
+            "판매단가(V포함)",
+            "본사상품링크",
+        ]
+
+        # 컬럼명 공백 제거 및 표준화
         renamed_columns = {}
         for col in df_copy.columns:
             cleaned_col = str(col).strip()
             if cleaned_col != col:
                 renamed_columns[col] = cleaned_col
+
         if renamed_columns:
             df_copy = df_copy.rename(columns=renamed_columns)
             self.logger.info(f"Cleaned column names: {renamed_columns}")
+
+        # 컬럼명 매핑 (해오름 형식에 맞게)
         column_mapping = {
+            # 기본 필드 매핑
             "Code": "상품Code",
             "상품코드": "상품Code",
             "상품 코드": "상품Code",
@@ -205,24 +220,27 @@ class ExcelReader:
             "이미지": "본사 이미지",
             "이미지URL": "본사 이미지",
             "제품이미지": "본사 이미지",
-            "상품이미지": "본사 이미지"
+            "상품이미지": "본사 이미지",
         }
-        self.logger.debug("Starting column remapping...")
+
+        # 해오름 형식에 맞게 컬럼 리매핑
         for src_col, target_col in column_mapping.items():
             if src_col in df_copy.columns and target_col not in df_copy.columns:
                 df_copy[target_col] = df_copy[src_col]
                 self.logger.info(f"Mapped column '{src_col}' to '{target_col}'")
-            elif src_col in df_copy.columns and target_col in df_copy.columns:
-                self.logger.debug(f"Column '{target_col}' already exists, skipping mapping from '{src_col}'.")
+
+        # 필수 컬럼 확인 및 생성
         for col in required_columns:
             if col not in df_copy.columns:
-                self.logger.warning(f"Required column '{col}' is missing. Attempting to find similar.")
+                # 유사한 컬럼 찾기
                 similar_col = self._find_similar_column(df_copy, col)
+
                 if similar_col:
-                    self.logger.info(f"Found similar column '{similar_col}' mapped to '{col}'")
+                    self.logger.info(f"Mapped '{similar_col}' to required column '{col}'")
                     df_copy[col] = df_copy[similar_col]
                 else:
-                    self.logger.warning(f"Could not find similar column for '{col}'. Creating default values.")
+                    self.logger.warning(f"Creating default values for missing column '{col}'")
+                    # 컬럼 유형에 따른 기본값 설정
                     if "단가" in col or "가격" in col:
                         df_copy[col] = 0
                     elif "Code" in col or "코드" in col:
@@ -233,66 +251,155 @@ class ExcelReader:
                         df_copy[col] = ""
                     else:
                         df_copy[col] = ""
+
+        # 소스 컬럼 추가 (해오름기프트 소스 명시)
         if "source" not in df_copy.columns:
             df_copy["source"] = "haeoreum"
             self.logger.info("Added 'source' column with value 'haeoreum'")
+
         return df_copy
 
-    def _find_similar_column(self, df: pd.DataFrame, target_column: str):
-        column_mapping = {
-            "상품명": ["품명", "제품명", "상품", "product", "name", "item", "품목", "상품이름"],
-            "판매단가(V포함)": ["단가", "판매가", "가격", "price"],
-            "상품Code": ["코드", "code", "item code", "product code"],
-            "본사 이미지": ["이미지", "image", "상품이미지"],
-            "본사상품링크": ["링크", "link", "url"]
-        }
+    def _find_similar_column(self, df: pd.DataFrame, target_column: str) -> Optional[str]:
+        """데이터프레임에서 타겟 컬럼과 유사한 컬럼을 찾습니다."""
+        # 대소문자 무시, 유사성 검사
         for col in df.columns:
             if col.lower() == target_column.lower():
                 return col
-        if target_column in column_mapping:
-            for similar in column_mapping[target_column]:
+
+        # 컬럼 대체어 검사
+        if target_column in self.column_alternatives:
+            for similar in self.column_alternatives[target_column]:
+                similar = similar.strip()
                 for col in df.columns:
                     if similar.lower() in col.lower():
                         return col
-        return ""
-    
-    def read_excel_file(self, file_path: str) -> pd.DataFrame:
+
+        return None
+
+    def _try_read_with_various_settings(self, file_path: str) -> List[Tuple[pd.DataFrame, str, int]]:
+        """다양한 설정으로 엑셀 파일 읽기 시도"""
+        all_dataframes = []
+        file_path_obj = Path(file_path)
+        
+        if not file_path_obj.exists():
+            self.logger.error(f"Excel file not found: {file_path}")
+            return all_dataframes
+
+        # 시트 확인
+        sheet_names = []
         try:
+            workbook = load_workbook(file_path, read_only=True, data_only=True)
+            sheet_names = workbook.sheetnames
+            workbook.close()  # Close workbook to free resources
+        except Exception as e:
+            self.logger.warning(f"Could not inspect Excel structure: {str(e)}. Using default sheet names.")
+            sheet_names = [self.excel_settings["sheet_name"]] + self.excel_settings["alternative_sheet_names"]
+
+        # 시트별 읽기 시도
+        for sheet_name in sheet_names:
+            if not sheet_name:
+                continue
+                
+            # 다양한 행 스킵 값으로 시도
+            for skip_rows in [0] + self.excel_settings["alternative_start_rows"]:
+                try:
+                    df = pd.read_excel(
+                        file_path, 
+                        sheet_name=sheet_name,
+                        skiprows=skip_rows,
+                        engine="openpyxl",
+                        na_values=['#N/A', '#NA', '#NULL', '#DIV/0!', '#VALUE!', '#REF!', '#NAME?']
+                    )
+                    
+                    if not df.empty:
+                        # 열 이름 정리 (공백 제거)
+                        df.columns = [str(col).strip() if isinstance(col, str) else col for col in df.columns]
+                        self.logger.info(f"Found data in sheet '{sheet_name}' with skiprows={skip_rows}, {len(df)} rows")
+                        all_dataframes.append((df, sheet_name, skip_rows))
+                except Exception as e:
+                    self.logger.debug(f"Failed with sheet='{sheet_name}', skiprows={skip_rows}: {str(e)}")
+
+        # 대체 엔진 시도
+        if not all_dataframes:
+            try:
+                # xlrd 엔진 시도 (오래된 Excel 형식)
+                df = pd.read_excel(file_path, engine="xlrd")
+                if not df.empty:
+                    all_dataframes.append((df, "Unknown (xlrd)", 0))
+            except Exception:
+                pass
+
+            try:
+                # CSV 형식 시도
+                df = pd.read_csv(file_path, encoding='utf-8')
+                if not df.empty:
+                    all_dataframes.append((df, "CSV", 0))
+            except Exception:
+                try:
+                    # CP949 인코딩으로 시도
+                    df = pd.read_csv(file_path, encoding='cp949')
+                    if not df.empty:
+                        all_dataframes.append((df, "CSV (CP949)", 0))
+                except Exception:
+                    pass
+
+        return all_dataframes
+
+    def read_excel_file(self, file_path: str) -> pd.DataFrame:
+        """Excel 파일을 읽고 검증하여 DataFrame을 반환합니다."""
+        try:
+            # 파일 존재 확인
             file_path_obj = Path(file_path)
             if not file_path_obj.exists():
                 self.logger.error(f"Excel file not found: {file_path}")
                 return self._create_minimal_error_dataframe("File not found")
+
             self.logger.info(f"Reading Excel file: {file_path}")
-            sheet_name = self.excel_settings["sheet_name"]
-            try:
-                excel_file = pd.ExcelFile(file_path, engine="openpyxl")
-                if sheet_name not in excel_file.sheet_names and excel_file.sheet_names:
-                    self.logger.warning(f"Sheet '{sheet_name}' not found. Using first sheet: '{excel_file.sheet_names[0]}'")
-                    sheet_name = excel_file.sheet_names[0]
-                excel_file.close()
-            except Exception as e:
-                self.logger.warning(f"Could not pre-inspect Excel structure: {str(e)}. Will attempt read with default/first sheet.")
-            best_df = None
-            try:
-                df = pd.read_excel(file_path, sheet_name=sheet_name, header=0, engine="openpyxl")
-                if not df.empty:
-                    self.logger.info(f"Successfully read {len(df)} rows from sheet '{sheet_name}'.")
-                    best_df = df
-                else:
-                    self.logger.warning(f"Empty DataFrame read from sheet '{sheet_name}'.")
-            except Exception as e:
-                self.logger.warning(f"Primary read attempt failed: {str(e)}")
-            if best_df is None:
-                self.logger.info("Primary read failed, attempting alternative strategies...")
-                # Alternative strategies can be added here
-                best_df = df  # placeholder for alternative read
-            if best_df is None or best_df.empty:
-                self.logger.error(f"Could not read valid data from {file_path}.")
-                return self._create_minimal_error_dataframe("No valid data")
-            self.logger.info("Ensuring required columns...")
-            processed_df = self._ensure_required_columns(best_df)
-            self.logger.info("Finished ensuring columns.")
-            return processed_df
+
+            # 다양한 방법으로 읽기 시도
+            all_dataframes = self._try_read_with_various_settings(file_path)
+
+            # 데이터프레임이 없으면 기본 형식 반환
+            if not all_dataframes:
+                self.logger.error(f"Could not read any valid data from {file_path}")
+                return self._create_minimal_error_dataframe("No data found")
+
+            # 가장 많은 행을 가진 데이터프레임 선택
+            best_df, sheet, skiprows = max(all_dataframes, key=lambda x: len(x[0]))
+            self.logger.info(f"Selected dataframe from sheet '{sheet}' with {len(best_df)} rows")
+
+            # 필수 컬럼 확인 및 추가
+            best_df = self._ensure_required_columns(best_df)
+
+            # 가격 데이터 정제
+            if "판매단가(V포함)" in best_df.columns:
+                try:
+                    best_df["판매단가(V포함)"] = pd.to_numeric(
+                        best_df["판매단가(V포함)"].astype(str).str.replace(',', ''), 
+                        errors='coerce'
+                    )
+                    best_df["판매단가(V포함)"].fillna(0, inplace=True)
+                except Exception as e:
+                    self.logger.warning(f"Error converting price data: {e}")
+
+            # NaN 값을 적절한 값으로 대체
+            best_df.fillna({
+                "상품명": "제품명 없음",
+                "상품Code": "코드 없음",
+                "본사상품링크": "",
+                "본사 이미지": ""
+            }, inplace=True)
+
+            # URL 정제
+            if "본사상품링크" in best_df.columns:
+                best_df["본사상품링크"] = best_df["본사상품링크"].apply(self._clean_url)
+            
+            if "본사 이미지" in best_df.columns:
+                best_df["본사 이미지"] = best_df["본사 이미지"].apply(self._clean_url)
+
+            self.logger.info(f"Excel file read successfully: {file_path}, {len(best_df)} rows")
+            return best_df
+
         except Exception as e:
-            self.logger.error(f"Critical error reading Excel file: {str(e)}", exc_info=True)
-            return self._create_minimal_error_dataframe(f"Critical Error: {str(e)}") 
+            self.logger.error(f"Error reading Excel file: {str(e)}", exc_info=True)
+            return self._create_minimal_error_dataframe(f"Error: {str(e)}") 
