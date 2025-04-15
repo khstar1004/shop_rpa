@@ -6,16 +6,30 @@ from .postprocessor import ExcelPostProcessor
 import pandas as pd
 import os
 import time
+import logging
 
 class ExcelManager:
     def __init__(self, config: dict, logger=None):
         self.config = config
-        self.logger = logger
-        self.reader = ExcelReader(config, logger)
-        self.formatter = ExcelFormatter(config, logger)
-        self.writer = ExcelWriter(config, logger)
-        self.converter = ExcelConverter(config, logger)
-        self.postprocessor = ExcelPostProcessor(config, logger)
+        self.logger = logger or logging.getLogger(__name__)
+        
+        # 수정된 부분: config 객체가 ConfigParser인지 dict인지 확인
+        # reader, formatter 등 생성 전에 config를 적절히 처리
+        if hasattr(config, 'sections') and callable(config.get):
+            # ConfigParser 객체인 경우 dict로 변환하여 전달
+            config_dict = {}
+            for section in config.sections():
+                config_dict[section] = dict(config[section])
+            processed_config = config_dict
+        else:
+            # 이미 dict인 경우 그대로 사용
+            processed_config = config
+            
+        self.reader = ExcelReader(processed_config, logger)
+        self.formatter = ExcelFormatter(processed_config, logger)
+        self.writer = ExcelWriter(processed_config, logger)
+        self.converter = ExcelConverter(processed_config, logger)
+        self.postprocessor = ExcelPostProcessor(processed_config, logger)
 
     def read_excel(self, file_path: str) -> pd.DataFrame:
         return self.reader.read_excel_file(file_path)

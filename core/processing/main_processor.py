@@ -42,7 +42,7 @@ class ProductProcessor:
         self._init_components()
 
         # 배치 처리 설정
-        self.batch_size = config["PROCESSING"].get("BATCH_SIZE", 10)
+        self.batch_size = int(config.get("PROCESSING", "batch_size", fallback=5))
 
     def stop_processing(self):
         """Stop the processing gracefully."""
@@ -52,46 +52,69 @@ class ProductProcessor:
     def _init_components(self):
         """필요한 컴포넌트 초기화"""
         # 캐시 초기화
+        cache_dir = self.config.get("PATHS", "cache_dir", fallback="cache")
+        if not os.path.isabs(cache_dir):
+            cache_dir = os.path.join(os.getcwd(), cache_dir)
+            
         self.cache = FileCache(
-            cache_dir=self.config["PATHS"]["CACHE_DIR"],
-            duration_seconds=self.config["PROCESSING"]["CACHE_DURATION"],
-            max_size_mb=self.config["PROCESSING"].get("CACHE_MAX_SIZE_MB", 1024),
-            enable_compression=self.config["PROCESSING"].get("ENABLE_COMPRESSION", True),  # 압축 기본 활성화
-            compression_level=self.config["PROCESSING"].get("COMPRESSION_LEVEL", 1),  # 낮은 압축 레벨로 속도 향상
+            cache_dir=cache_dir,
+            duration_seconds=int(self.config.get("PROCESSING", "cache_duration", fallback=86400)),
+            max_size_mb=int(self.config.get("PROCESSING", "cache_max_size_mb", fallback=1024)),
+            enable_compression=self.config.getboolean("PROCESSING", "enable_compression", fallback=True),
+            compression_level=int(self.config.get("PROCESSING", "compression_level", fallback=6))
         )
 
-        # 매칭 컴포넌트 초기화 - 메모리 사용량 감소 및 속도 향상을 위한 최적화
+        # 매칭 컴포넌트 초기화
         self.text_matcher = TextMatcher(
-            cache=self.cache,
-            use_stemming=self.config["MATCHING"].get("USE_STEMMING", False),  # 성능 향상을 위해 스테밍 비활성화
-            similarity_threshold=self.config["MATCHING"].get("TEXT_SIMILARITY_THRESHOLD", 0.7)
+            config=self.config,
+            logger=self.logger,
+            cache=self.cache
         )
 
         # 이미지 처리 최대 해상도 설정
-        max_image_dimension = self.config["MATCHING"].get("MAX_IMAGE_DIMENSION", 128)  # 기본값 낮춤 (256 → 128)
+        max_image_dimension = int(self.config.get("MATCHING", "max_image_dimension", fallback=128))
         self.logger.info(f"이미지 처리 최대 해상도: {max_image_dimension}px")
 
+        # ImageMatcher 초기화
+        image_matcher_config = {
+            "IMAGE_MATCHER": {
+                "image_similarity_threshold": float(self.config.get("MATCHING", "image_similarity_threshold", fallback=0.70)),
+                "max_image_dimension": max_image_dimension
+            },
+            "cache": self.cache
+        }
         self.image_matcher = ImageMatcher(
-            cache=self.cache,
-            similarity_threshold=self.config["MATCHING"]["IMAGE_SIMILARITY_THRESHOLD"],
-            max_image_dimension=max_image_dimension
+            config=image_matcher_config,
+            logger=self.logger
         )
 
+        # MultiModalMatcher 초기화
+        multimodal_config = {
+            "MULTIMODAL_MATCHER": {
+                "text_weight": float(self.config.get("MATCHING", "text_weight", fallback=0.7)),
+                "image_weight": float(self.config.get("MATCHING", "image_weight", fallback=0.3)),
+                "text_similarity_threshold": float(self.config.get("MATCHING", "text_similarity_threshold", fallback=0.75))
+            }
+        }
         self.multimodal_matcher = MultiModalMatcher(
-            text_weight=self.config["MATCHING"]["TEXT_WEIGHT"],
-            image_weight=self.config["MATCHING"]["IMAGE_WEIGHT"],
+            text_weight=float(self.config.get("MATCHING", "text_weight", fallback=0.7)),
+            image_weight=float(self.config.get("MATCHING", "image_weight", fallback=0.3)),
             text_matcher=self.text_matcher,
             image_matcher=self.image_matcher,
-            similarity_threshold=self.config["MATCHING"].get("TEXT_SIMILARITY_THRESHOLD", 0.75)
+            similarity_threshold=float(self.config.get("MATCHING", "text_similarity_threshold", fallback=0.75)),
+            config=multimodal_config,
+            logger=self.logger
         )
 
         # 스크래퍼 초기화 - 공통 설정
         scraper_config = {
-            "max_retries": min(3, self.config["PROCESSING"].get("MAX_RETRIES", 3)),  # 최대 3회로 제한
+            "max_retries": min(3, int(self.config.get("SCRAPING", "max_retries", fallback=3))),
             "cache": self.cache,
-            "timeout": min(15, self.config["PROCESSING"].get("REQUEST_TIMEOUT", 15)),  # 최대 15초로 제한
-            "connect_timeout": 5,  # 연결 타임아웃 추가
-            "read_timeout": 10,  # 읽기 타임아웃 추가
+            "timeout": min(15, int(self.config.get("SCRAPING", "request_timeout", fallback=15))),
+            "connect_timeout": int(self.config.get("SCRAPING", "connect_timeout", fallback=30)),
+            "read_timeout": int(self.config.get("SCRAPING", "read_timeout", fallback=30)),
+            "debug": self.config.getboolean("SCRAPING", "debug", fallback=False),
+            "user_agent": self.config.get("SCRAPING", "user_agent", fallback="Mozilla/5.0")
         }
 
         # 해오름 스크래퍼
@@ -101,18 +124,16 @@ class ProductProcessor:
         self.koryo_scraper = KoryoScraper(**scraper_config)
 
         # 네이버 크롤러
-        naver_config = {
-            "max_retries": min(3, self.config["PROCESSING"].get("MAX_RETRIES", 3)),  # 최대 3회로 제한
-            "cache": self.cache,
-            "timeout": min(15, self.config["PROCESSING"].get("REQUEST_TIMEOUT", 15)),  # 최대 15초로 제한
-        }
+        naver_config = scraper_config.copy()
+        naver_config.update({
+            "client_id": self.config.get("API", "naver_client_id"),
+            "client_secret": self.config.get("API", "naver_client_secret")
+        })
         
         # 프록시 사용 여부 확인
-        use_proxies = False
-        if "NETWORK" in self.config and self.config["NETWORK"].get("USE_PROXIES") == "True":
-            use_proxies = True
+        if self.config.getboolean("SCRAPING", "use_proxy", fallback=False):
             self.logger.info("프록시 사용 모드로 네이버 크롤러를 초기화합니다.")
-            naver_config["use_proxies"] = True
+            naver_config["use_proxy"] = True
 
         self.naver_crawler = NaverShoppingCrawler(**naver_config)
 
@@ -153,7 +174,7 @@ class ProductProcessor:
         else:  # 4GB 이상
             default_batch = max(10, min(20, cpu_count * 2))
             
-        self.batch_size = self.config["PROCESSING"].get("BATCH_SIZE", default_batch)
+        self.batch_size = int(self.config.get("PROCESSING", "batch_size", fallback=default_batch))
         self.logger.info(f"배치 크기 설정: {self.batch_size}")
 
         # 유틸리티 컴포넌트 초기화

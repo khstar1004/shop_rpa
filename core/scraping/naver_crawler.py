@@ -12,6 +12,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from time import sleep
 from typing import Any, Dict, List, Optional, Tuple, Union
+import sys
+from pathlib import Path
+
+# Add the project root directory to Python path
+project_root = str(Path(__file__).parent.parent.parent.absolute())
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 import pandas as pd
 import requests
@@ -39,8 +46,8 @@ except ImportError:
 
 from utils.caching import FileCache, cache_result
 
-from ..data_models import Product
-from . import BaseMultiLayerScraper
+from core.data_models import Product
+from core.scraping.base_multi_layer_scraper import BaseMultiLayerScraper
 
 
 class NaverShoppingAPI(BaseMultiLayerScraper):
@@ -48,25 +55,34 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
     네이버 쇼핑 API - 공식 API 활용 엔진
 
     특징:
-    - 네이버 검색 API 활용
-    - 비동기 작업 처리
-    - 메모리 효율적 데이터 구조
-    - 캐싱 지원
+    - 공식 API를 사용하여 상품 정보를 가져옵니다.
+    - 비동기 처리를 지원합니다.
+    - 캐싱을 지원합니다.
     """
 
     def __init__(
         self,
-        client_id: str,
-        client_secret: str,
-        max_retries: int = 5,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        max_retries: Optional[int] = None,
         cache: Optional[FileCache] = None,
-        timeout: int = 30,
+        timeout: Optional[int] = None,
     ):
         super().__init__(max_retries=max_retries, cache=cache, timeout=timeout)
-
-        # 네이버 API 인증 정보
-        self.client_id = client_id
-        self.client_secret = client_secret
+        
+        # Load configuration
+        self.config = self._load_config()
+        
+        # Use provided values or fall back to config values
+        self.client_id = client_id or self.config.get('API', 'naver_client_id')
+        self.client_secret = client_secret or self.config.get('API', 'naver_client_secret')
+        
+        if not self.client_id or not self.client_secret:
+            raise ValueError("Naver API credentials (client_id and client_secret) must be provided either through constructor or config.ini")
+            
+        self.api_timeout = timeout or int(self.config.get('SCRAPING', 'extraction_timeout', fallback='30'))
+        self.api_max_retries = max_retries or int(self.config.get('SCRAPING', 'max_retries', fallback='5'))
+        self.headless = self.config.getboolean('SCRAPING', 'headless', fallback=True)
 
         # API 기본 URL 및 설정
         self.api_url = "https://openapi.naver.com/v1/search/shop.json"
@@ -132,9 +148,7 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
         self.logger = logging.getLogger(__name__)
 
         # Setup image comparison parameters
-        self.require_image_match = (
-            True  # 매뉴얼 요구사항: 이미지와 규격이 동일한 경우만 동일상품으로 판단
-        )
+        self.require_image_match = True  # 매뉴얼 요구사항: 이미지와 규격이 동일한 경우만 동일상품으로 판단
 
         # Setup price filter
         self.min_price_diff_percent = 10  # 매뉴얼 요구사항: 10% 이하 가격차이 제품 제외
@@ -146,20 +160,20 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
 
         # DNS 캐시 설정
         self.session = requests.Session()
-        self.session.verify = False  # SSL 인증서 검증 비활성화
+        self.session.verify = self.config.getboolean('SCRAPING', 'ssl_verification', fallback=True)
         self.session.mount('http://', requests.adapters.HTTPAdapter(
-            max_retries=3,
-            pool_connections=100,
-            pool_maxsize=100
+            max_retries=int(self.config.get('SCRAPING', 'max_retries', fallback='3')),
+            pool_connections=int(self.config.get('SCRAPING', 'connection_pool_size', fallback='100')),
+            pool_maxsize=int(self.config.get('SCRAPING', 'connection_pool_size', fallback='100'))
         ))
         self.session.mount('https://', requests.adapters.HTTPAdapter(
-            max_retries=3,
-            pool_connections=100,
-            pool_maxsize=100
+            max_retries=int(self.config.get('SCRAPING', 'max_retries', fallback='3')),
+            pool_connections=int(self.config.get('SCRAPING', 'connection_pool_size', fallback='100')),
+            pool_maxsize=int(self.config.get('SCRAPING', 'connection_pool_size', fallback='100'))
         ))
 
         # ThreadPoolExecutor 초기화
-        self.executor = ThreadPoolExecutor(max_workers=10)  # 적절한 워커 수 설정
+        self.executor = ThreadPoolExecutor(max_workers=int(self.config.get('PROCESSING', 'max_workers', fallback='10')))
 
     def __del__(self):
         """소멸자: 자원 정리"""
@@ -183,24 +197,26 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
     ) -> List[Product]:
         """
         네이버 쇼핑 API를 사용하여 제품 검색
-
-        Args:
-            query: 검색어
-            max_items: 최대 검색 결과 수
-            reference_price: 참조 가격 (10% 룰 적용용)
-
-        Returns:
-            List[Product]: 검색된 제품 목록
         """
-        if self.cache:
-
-            @cache_result(self.cache, key_prefix="naver_api_search")
-            def cached_search(q, m, p):
-                return self._search_product_logic(q, m, p)
-
-            return cached_search(query, max_items, reference_price)
-        else:
-            return self._search_product_logic(query, max_items, reference_price)
+        try:
+            self.logger.info(f"Starting search for query: {query}")
+            
+            # 비동기 함수를 동기적으로 실행하되, 새로운 이벤트 루프 생성
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            results = loop.run_until_complete(
+                self._search_product_async(query, max_items, reference_price)
+            )
+            
+            self.logger.info(f"Search completed. Found {len(results)} results")
+            return results
+        except Exception as e:
+            self.logger.error(f"Error during search: {str(e)}")
+            raise
 
     def _search_product_logic(
         self, query: str, max_items: int = 50, reference_price: float = 0
@@ -225,47 +241,37 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
 
             # 최대 3페이지까지 검색 (매뉴얼 요구사항)
             for page in range(1, self.max_pages + 1):
+                self.logger.info(f"Processing page {page} for query: {query}")
                 page_products = await self._fetch_api_results(query, page, sort)
 
                 if not page_products:
+                    self.logger.info(f"No more results found on page {page}")
                     break
 
                 # Apply 10% rule if reference price is provided
                 if reference_price > 0:
                     filtered_products = []
                     for product in page_products:
-                        # Skip products with no price
                         if not product.price:
                             continue
 
-                        # Calculate price difference percentage
                         price_diff_percent = (
                             (product.price - reference_price) / reference_price
                         ) * 100
 
-                        # Include product if price difference is significant enough
-                        # (either lower price or at least min_price_diff_percent higher)
                         if (
                             price_diff_percent < 0
                             or price_diff_percent >= self.min_price_diff_percent
                         ):
                             filtered_products.append(product)
-
                     page_products = filtered_products
 
                 products.extend(page_products)
+                self.logger.info(f"Added {len(page_products)} products from page {page}")
 
-                # Stop if we have enough products or no more pages
                 if len(products) >= max_items:
                     products = products[:max_items]
                     break
-
-                # 페이지 간 지연 시간 (API 호출 제한 고려)
-                wait_time = 0.5 + random.uniform(0.2, 0.5)
-                self.logger.debug(
-                    f"Waiting {wait_time:.2f} seconds before fetching next page"
-                )
-                await asyncio.sleep(wait_time)
 
             if not products:
                 self.logger.info(
@@ -318,7 +324,7 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
 
         loop = asyncio.get_running_loop()
         retry_count = 0
-        max_retries = self.max_retries
+        max_retries = self.api_max_retries
         retry_delay = 1.0
 
         while retry_count <= max_retries:
@@ -330,7 +336,7 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
                         self.api_url,
                         headers=self.headers,
                         params=params,
-                        timeout=self.timeout,
+                        timeout=self.api_timeout,
                     ),
                 )
 
@@ -448,6 +454,7 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
 
             # 이미지 URL 처리
             image_url = item.get("image", "")
+            image_gallery = []
             
             # 이미지 URL 정규화
             if image_url:
@@ -457,6 +464,8 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
                 # 프로토콜이 없는 경우 https: 추가
                 elif image_url.startswith('//'):
                     image_url = 'https:' + image_url
+                # 이미지 갤러리에 추가
+                image_gallery.append(image_url)
             else:
                 # 이미지가 없는 경우 기본 네이버 이미지 사용
                 image_url = "https://ssl.pstatic.net/static/shop/front/techreview/web/resource/images/naver.png"
@@ -475,9 +484,15 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
                 image_url=image_url,
                 brand=mall_name,
                 category=category,
-                is_promotional_site=is_promotional,
-                original_input_data=item,
+                is_promotional_site=is_promotional
             )
+            
+            # Set image gallery
+            if image_gallery:
+                product.image_gallery = image_gallery
+            
+            # Set original input data using the property
+            product.original_input_data = item
 
             return product
         except Exception as e:
@@ -649,6 +664,15 @@ class NaverShoppingAPI(BaseMultiLayerScraper):
         # 여기서는 캐시된 상품 정보만 반환
         cache_key = f"naver_product_{product_id}"
         return self.get_sparse_data(cache_key)
+
+    def _load_config(self) -> configparser.ConfigParser:
+        """Load configuration from config.ini"""
+        config = configparser.ConfigParser()
+        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config.ini')
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Configuration file not found at {config_path}")
+        config.read(config_path, encoding='utf-8')
+        return config
 
 
 class NaverPriceTableCrawler:
@@ -899,15 +923,35 @@ class NaverShoppingCrawler(BaseMultiLayerScraper):
         timeout: int = 30,
         cache: Optional[FileCache] = None,
         headless: bool = True,  # 기본값을 True로 변경하여 프로덕션 환경에 적합하게 설정
+        connect_timeout: Optional[int] = None,
+        read_timeout: Optional[int] = None,
+        user_agent: Optional[str] = None,
+        debug: bool = False,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        use_proxy: bool = False
     ):
         super().__init__(max_retries, timeout, cache)
         self.logger = logging.getLogger(__name__)
         self.max_retries = max_retries
         self.timeout = timeout
         self.headless = headless  # headless 모드 설정 저장
+        self.connect_timeout = connect_timeout
+        self.read_timeout = read_timeout
+        self.user_agent = user_agent
+        self.debug = debug
+        self.use_proxy = use_proxy
+        
+        if debug:
+            self.logger.setLevel(logging.DEBUG)
 
-        # API 키 로드
-        self.api_keys = self._load_api_keys()
+        # API 키 로드 (직접 제공된 키 우선 사용)
+        if client_id and client_secret:
+            self.api_keys = {"client_id": client_id, "client_secret": client_secret}
+            self.logger.info("외부에서 제공된 API 키를 사용합니다.")
+        else:
+            # 설정 파일에서 로드
+            self.api_keys = self._load_api_keys()
 
         # Naver Shopping API 인스턴스 생성
         self.api = NaverShoppingAPI(

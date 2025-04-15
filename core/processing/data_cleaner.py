@@ -20,8 +20,18 @@ class DataCleaner:
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
 
-        # 설정에서 검증 규칙 추출
-        self.excel_settings = config.get("EXCEL", {})
+        # config 객체 타입 확인 및 설정값 추출
+        if hasattr(config, 'sections') and callable(getattr(config, 'get', None)):
+            # ConfigParser 객체인 경우
+            try:
+                self.excel_settings = dict(config["EXCEL"]) if "EXCEL" in config.sections() else {}
+            except Exception as e:
+                self.logger.warning(f"Excel 설정을 불러오는 중 오류 발생: {str(e)}")
+                self.excel_settings = {}
+        else:
+            # dict 객체인 경우
+            self.excel_settings = config.get("EXCEL", {})
+            
         self._ensure_validation_rules()
 
     def _ensure_validation_rules(self):

@@ -131,8 +131,9 @@ class PerformanceMonitor(QObject):
 class PerformanceMonitorWidget(QWidget):
     """Performance monitor widget"""
     
-    def __init__(self, parent=None):
+    def __init__(self, config, parent=None):
         super().__init__(parent)
+        self.config = config
         self.monitor = PerformanceMonitor()
         self.monitor.data_updated.connect(self.update_display)
         self.monitor.warning.connect(self.show_warning)
@@ -149,7 +150,7 @@ class PerformanceMonitorWidget(QWidget):
         # Memory threshold
         self.memory_threshold = QSpinBox()
         self.memory_threshold.setRange(100, 10000)
-        self.memory_threshold.setValue(1000)
+        self.memory_threshold.setValue(int(self.config.get("PROCESSING", "memory_limit_mb", fallback=2048)))
         self.memory_threshold.setSuffix(" MB")
         self.memory_threshold.valueChanged.connect(
             lambda v: self.monitor.set_memory_threshold(v))
@@ -157,7 +158,7 @@ class PerformanceMonitorWidget(QWidget):
         # CPU threshold
         self.cpu_threshold = QSpinBox()
         self.cpu_threshold.setRange(10, 100)
-        self.cpu_threshold.setValue(80)
+        self.cpu_threshold.setValue(int(self.config.get("PROCESSING", "cpu_threshold", fallback=80)))
         self.cpu_threshold.setSuffix(" %")
         self.cpu_threshold.valueChanged.connect(
             lambda v: self.monitor.set_cpu_threshold(v))
@@ -165,7 +166,7 @@ class PerformanceMonitorWidget(QWidget):
         # Disk threshold
         self.disk_threshold = QSpinBox()
         self.disk_threshold.setRange(10, 100)
-        self.disk_threshold.setValue(80)
+        self.disk_threshold.setValue(int(self.config.get("PROCESSING", "disk_threshold", fallback=80)))
         self.disk_threshold.setSuffix(" %")
         self.disk_threshold.valueChanged.connect(
             lambda v: self.monitor.set_disk_threshold(v))
@@ -173,7 +174,7 @@ class PerformanceMonitorWidget(QWidget):
         # Update interval
         self.update_interval = QSpinBox()
         self.update_interval.setRange(1, 60)
-        self.update_interval.setValue(1)
+        self.update_interval.setValue(int(self.config.get("PROCESSING", "monitor_interval", fallback=1)))
         self.update_interval.setSuffix(" s")
         self.update_interval.valueChanged.connect(
             lambda v: self.monitor.set_interval(v))
@@ -182,6 +183,7 @@ class PerformanceMonitorWidget(QWidget):
         self.auto_start = QCheckBox("Start monitoring on launch")
         self.auto_start.setChecked(True)
         
+        # Add settings to layout
         settings_layout.addRow("Memory Threshold:", self.memory_threshold)
         settings_layout.addRow("CPU Threshold:", self.cpu_threshold)
         settings_layout.addRow("Disk Threshold:", self.disk_threshold)
@@ -190,9 +192,23 @@ class PerformanceMonitorWidget(QWidget):
         
         layout.addWidget(settings_group)
         
-        # Resource graphs
-        self.resource_graph = ResourceUsageGraph()
-        layout.addWidget(self.resource_graph)
+        # Add resource graphs
+        self.cpu_graph = ResourceUsageGraph("CPU Usage")
+        self.memory_graph = ResourceUsageGraph("Memory Usage")
+        self.disk_graph = ResourceUsageGraph("Disk Usage")
+        
+        layout.addWidget(self.cpu_graph)
+        layout.addWidget(self.memory_graph)
+        layout.addWidget(self.disk_graph)
+        
+        # Add warning label
+        self.warning_label = QLabel()
+        self.warning_label.setStyleSheet("color: red;")
+        self.warning_label.setVisible(False)
+        layout.addWidget(self.warning_label)
+        
+        # Start monitoring
+        self.monitor.start()
         
         # Log area
         log_group = QGroupBox("Performance Log")
@@ -230,7 +246,9 @@ class PerformanceMonitorWidget(QWidget):
     def update_display(self, data):
         """Update display with performance data"""
         # Update resource graph
-        self.resource_graph.update_data(data["memory"], data["cpu"])
+        self.cpu_graph.update_data(data["cpu"])
+        self.memory_graph.update_data(data["memory"])
+        self.disk_graph.update_data(data["disk"])
         
         # Update log
         log_text = (f"Memory: {data['memory']:.1f} MB | "
@@ -246,6 +264,8 @@ class PerformanceMonitorWidget(QWidget):
         """Show performance warning"""
         warning_text = f"[{warning_type.upper()}] {message}"
         self.log_area.append(f"<span style='color: red;'>{warning_text}</span>")
+        self.warning_label.setText(warning_text)
+        self.warning_label.setVisible(True)
     
     def closeEvent(self, event):
         """Handle close event"""

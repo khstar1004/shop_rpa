@@ -84,7 +84,8 @@ class Settings:
             "appearance": SettingsCategory("appearance", "모양 및 테마", "theme.svg"),
             "processing": SettingsCategory("processing", "처리 설정", "processing.svg"),
             "file": SettingsCategory("file", "파일 설정", "file.svg"),
-            "advanced": SettingsCategory("advanced", "고급 설정", "advanced.svg")
+            "advanced": SettingsCategory("advanced", "고급 설정", "advanced.svg"),
+            "gui": SettingsCategory("gui", "GUI 설정", "gui.svg")
         }
         
         # 카테고리별 기본 설정 정의
@@ -131,14 +132,38 @@ class Settings:
             "로그 상세 수준", ["DEBUG", "INFO", "WARNING", "ERROR"]
         )
         
-        # 모양 및 테마 설정
-        self.categories["appearance"].add_setting(
-            "dark_mode", False, "다크 모드", "bool",
-            "어두운 색상 테마 사용"
+        # GUI 설정
+        self.categories["gui"].add_setting(
+            "window_width", 1200, "창 너비", "int",
+            "메인 창의 너비", [800, 1000, 1200, 1400, 1600]
         )
-        self.categories["appearance"].add_setting(
+        self.categories["gui"].add_setting(
+            "window_height", 1400, "창 높이", "int",
+            "메인 창의 높이", [600, 800, 1000, 1200, 1400, 1600]
+        )
+        self.categories["gui"].add_setting(
             "max_log_lines", 1000, "최대 로그 라인 수", "int",
             "화면에 표시할 최대 로그 라인 수", [100, 500, 1000, 5000]
+        )
+        self.categories["gui"].add_setting(
+            "enable_dark_mode", False, "다크 모드", "bool",
+            "어두운 색상 테마 사용"
+        )
+        self.categories["gui"].add_setting(
+            "show_progress_bar", True, "진행 상태 표시", "bool",
+            "작업 진행 상태 표시줄 보이기"
+        )
+        self.categories["gui"].add_setting(
+            "auto_save_interval", 300, "자동 저장 간격", "int",
+            "자동 저장 간격 (초)", [60, 180, 300, 600]
+        )
+        self.categories["gui"].add_setting(
+            "debug_mode", False, "디버그 모드", "bool",
+            "디버그 정보 표시"
+        )
+        self.categories["gui"].add_setting(
+            "show_column_mapping", True, "컬럼 매핑 표시", "bool",
+            "엑셀 파일의 컬럼 매핑 정보 표시"
         )
         
         # 처리 설정

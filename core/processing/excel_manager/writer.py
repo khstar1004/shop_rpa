@@ -11,7 +11,14 @@ class ExcelWriter:
     def __init__(self, config: dict, logger: logging.Logger = None):
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
-        self.excel_settings = config.get("EXCEL", {})
+        if hasattr(config, 'get') and callable(config.get) and hasattr(config, 'sections'):
+            try:
+                self.excel_settings = dict(config["EXCEL"]) if "EXCEL" in config.sections() else {}
+            except Exception as e:
+                self.logger.warning(f"Excel 설정을 불러오는 중 오류 발생: {str(e)}")
+                self.excel_settings = {}
+        else:
+            self.excel_settings = config.get("EXCEL", {})
 
     def generate_enhanced_output(self, results: list, input_file: str, output_dir: str = None) -> str:
         try:

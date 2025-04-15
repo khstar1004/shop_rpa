@@ -22,7 +22,14 @@ def extract_main_image(soup: BeautifulSoup, source: str, base_url: str = '') -> 
     # 사이트별 메인 이미지 선택자 정의
     selectors = {
         'koryo': ['.product .pic a img', '.goods-view-image img', '.goods_image img'],
-        'haeoreum': ['img#target_img', 'td[height="340"] img', 'img[width="330"]', 'img[height="330"]']
+        'haeoreum': [
+            'img#target_img', 
+            'img[style*="cursor:hand"][onclick*="view_big"]',
+            'img[width="330"][height="330"]',
+            'td[height="340"] img', 
+            'img[width="330"]', 
+            'img[height="330"]'
+        ]
     }
     
     # 이미지 경로 패턴 정의
@@ -39,6 +46,17 @@ def extract_main_image(soup: BeautifulSoup, source: str, base_url: str = '') -> 
             # 상대 경로를 절대 경로로 변환
             if img_url and not img_url.startswith(('http://', 'https://')):
                 img_url = urljoin(base_url, img_url)
+                
+            # 해오름 기프트의 경우 onclick 속성에서 큰 이미지 추출 시도
+            if source == 'haeoreum' and img.get('onclick') and 'view_big' in img.get('onclick'):
+                import re
+                big_img_match = re.search(r"view_big\('([^']+)'", img.get('onclick'))
+                if big_img_match:
+                    big_img_url = big_img_match.group(1)
+                    if not big_img_url.startswith(('http://', 'https://')):
+                        big_img_url = urljoin(base_url, big_img_url)
+                    return big_img_url
+                
             return img_url
     
     # 선택자로 찾지 못한 경우 경로 패턴으로 검색

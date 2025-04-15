@@ -3,17 +3,95 @@ import os
 import re
 from pathlib import Path
 from datetime import datetime
+from configparser import ConfigParser
+from typing import Optional, Dict, Union, Any
 
 import pandas as pd
 from openpyxl import load_workbook
 
 
 class ExcelReader:
-    def __init__(self, config: dict, logger: logging.Logger = None):
-        self.config = config
+    def __init__(self, config: Union[ConfigParser, Dict[str, Any]], logger: Optional[logging.Logger] = None):
+        """
+        Excel 리더 초기화
+        
+        Args:
+            config: 설정 객체 (ConfigParser 또는 Dict)
+            logger: 로거 객체
+        """
         self.logger = logger or logging.getLogger(__name__)
-        self.excel_settings = config.get("EXCEL", {})
-        self._ensure_default_excel_settings()
+        self.config = config
+        
+        # config가 ConfigParser인지 dict인지 확인하고 적절한 방식으로 값을 얻음
+        self._get_config_value = self._make_config_getter(config)
+        
+        # Excel 설정
+        self.excel_settings = {
+            "header_row": int(self._get_config_value("EXCEL", "header_row", 1)),
+            "data_start_row": int(self._get_config_value("EXCEL", "data_start_row", 2)),
+            "max_rows": int(self._get_config_value("EXCEL", "max_rows", 1000)),
+            "max_file_size_mb": int(self._get_config_value("EXCEL", "max_file_size_mb", 200)),
+            "validation_rules": self._get_bool_config_value("EXCEL", "validation_rules", True),
+            "enable_data_quality_metrics": self._get_bool_config_value("EXCEL", "enable_data_quality_metrics", True),
+            "enable_duplicate_detection": self._get_bool_config_value("EXCEL", "enable_duplicate_detection", True),
+            "enable_auto_correction": self._get_bool_config_value("EXCEL", "enable_auto_correction", True),
+            "attempt_all_sheets": self._get_bool_config_value("EXCEL", "attempt_all_sheets", True),
+            "flexible_column_mapping": self._get_bool_config_value("EXCEL", "flexible_column_mapping", True),
+            "create_missing_columns": self._get_bool_config_value("EXCEL", "create_missing_columns", True),
+            "enable_formatting": self._get_bool_config_value("EXCEL", "enable_formatting", True),
+            "date_format": self._get_config_value("EXCEL", "date_format", "YYYY-MM-DD"),
+            "number_format": self._get_config_value("EXCEL", "number_format", "#,##0")
+        }
+        
+        # 컬럼 매핑 설정
+        self.column_mapping = {
+            "name": self._get_config_value("EXCEL", "name_column", "상품명"),
+            "price": self._get_config_value("EXCEL", "price_column", "판매단가(V포함)"),
+            "code": self._get_config_value("EXCEL", "code_column", "상품Code"),
+            "url": self._get_config_value("EXCEL", "url_column", "본사상품링크"),
+            "image": self._get_config_value("EXCEL", "image_column", "본사 이미지")
+        }
+        
+        # 필수 컬럼 설정
+        self.required_columns = [
+            self.column_mapping["name"],
+            self.column_mapping["price"],
+            self.column_mapping["code"],
+            self.column_mapping["url"],
+            self.column_mapping["image"]
+        ]
+        
+        # 가격 유효성 검사 설정
+        self.price_validation = {
+            "min": float(self._get_config_value("EXCEL", "price_min", 0)),
+            "max": float(self._get_config_value("EXCEL", "price_max", 10000000000))
+        }
+        
+        self.logger.info(f"Excel 설정: {self.excel_settings}")
+        self.logger.info(f"컬럼 매핑: {self.column_mapping}")
+        self.logger.info(f"필수 컬럼: {self.required_columns}")
+        self.logger.info(f"가격 유효성 검사 설정: {self.price_validation}")
+
+    def _make_config_getter(self, config):
+        """config 객체에 따라 적절한 getter 함수 반환"""
+        if hasattr(config, 'get') and hasattr(config, 'sections'):
+            # ConfigParser 객체인 경우
+            return lambda section, option, fallback=None: config.get(section, option, fallback=fallback)
+        else:
+            # dict 객체인 경우
+            return lambda section, option, fallback=None: config.get(section, {}).get(option, fallback)
+    
+    def _get_bool_config_value(self, section, option, fallback=False):
+        """ConfigParser 또는 dict에서 불리언 값 얻기"""
+        if hasattr(self.config, 'getboolean'):
+            return self.config.getboolean(section, option, fallback=fallback)
+        else:
+            value = self._get_config_value(section, option, fallback)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.lower() in ('true', 'yes', '1', 'on')
+            return bool(value)
 
     def _ensure_default_excel_settings(self) -> None:
         defaults = {

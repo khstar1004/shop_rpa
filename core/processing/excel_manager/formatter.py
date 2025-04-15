@@ -4,12 +4,22 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from typing import Union, Dict, Any
 
 
 class ExcelFormatter:
-    def __init__(self, config: dict, logger: logging.Logger = None):
+    def __init__(self, config: Union[Dict[str, Any], object], logger: logging.Logger = None):
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
+        
+        # config 객체의 타입 확인
+        if hasattr(config, 'sections') and callable(getattr(config, 'get', None)):
+            # ConfigParser 객체인 경우 설정값 가져오기
+            self._get_config = lambda section, key, default=None: config.get(section, key, fallback=default)
+        else:
+            # dict 객체인 경우 설정값 가져오기
+            self._get_config = lambda section, key, default=None: config.get(section, {}).get(key, default)
+        
         self.bold_font = Font(bold=True)
         self.center_align = Alignment(horizontal="center", vertical="center")
         self.header_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")

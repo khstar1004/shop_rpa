@@ -3,6 +3,7 @@ import hashlib
 import io
 import logging
 import os
+import threading
 from collections import Counter
 from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -14,40 +15,36 @@ import requests
 import torch
 import torch.nn as nn
 from efficientnet_pytorch import EfficientNet
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from rembg import remove
 from torchvision import models, transforms
 
 from utils.caching import FileCache, cache_result
 
-from ..data_models import Product
+from ..data_models import Product, MatchResult
+from core.matching.base_matcher import BaseMatcher
 
 
-class ImageMatcher:
-    def __init__(
-        self, cache: Optional[FileCache] = None, similarity_threshold: float = 0.8,
-        max_image_dimension: Optional[int] = None
-    ):
-        self.logger = logging.getLogger(__name__)
-        self.cache = cache
-        self.similarity_threshold = similarity_threshold
-        self.remove_background = False  # 기본값은 배경 제거 비활성화
-        self.max_image_dimension = max_image_dimension  # 최대 이미지 해상도 설정
+class ImageMatcher(BaseMatcher):
+    """Image-based product matching implementation"""
+    
+    def __init__(self, config: Dict, logger: Optional[logging.Logger] = None):
+        super().__init__(config, logger)
+        self.matching_settings = config.get("IMAGE_MATCHER", {})
+        self.image_similarity_threshold = float(self.matching_settings.get("image_similarity_threshold", 0.70))
+        self.image_weight = float(self.matching_settings.get("image_weight", 0.3))
+        
+        self.cache = config.get("cache", None)
+        self.remove_background = bool(self.matching_settings.get("remove_background", False))
+        self.max_image_dimension = self.matching_settings.get("max_image_dimension", None)
+        if self.max_image_dimension:
+            self.max_image_dimension = int(self.max_image_dimension)
 
-        # 더 최신 모델로 업그레이드 (b0 → b3)
-        try:
-            self.model = EfficientNet.from_pretrained("efficientnet-b3")
-        except Exception as e:
-            self.logger.warning(
-                f"Failed to load EfficientNet-b3, falling back to b0: {e}"
-            )
-            self.model = EfficientNet.from_pretrained("efficientnet-b0")
-
-        self.model.eval()
-
-        # 백업 모델로 ResNet 사용 (오픈소스)
-        self.backup_model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-        self.backup_model.eval()
+        # Initialize models to None for lazy loading
+        self._model = None
+        self._backup_model = None
+        self._model_lock = threading.Lock()
+        self._backup_model_lock = threading.Lock()
 
         # SIFT 및 AKAZE 특징 추출기 초기화
         self.sift = cv2.SIFT_create()
@@ -65,8 +62,6 @@ class ImageMatcher:
 
         # GPU 사용 (가능한 경우)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = self.model.to(self.device)
-        self.backup_model = self.backup_model.to(self.device)
 
         # 이미지 전처리 파이프라인 (224x224 → 300x300)
         self.transform = transforms.Compose(
@@ -94,6 +89,69 @@ class ImageMatcher:
             "black": ([0, 0, 0], [180, 30, 70]),  # 검정
         }
 
+    @property
+    def model(self):
+        """Lazy load the EfficientNet model."""
+        if self._model is None:
+            with self._model_lock:
+                if self._model is None: # Double-check locking
+                    try:
+                        self.logger.info("Lazy loading EfficientNet-b3 model...")
+                        model_instance = EfficientNet.from_pretrained("efficientnet-b3")
+                        model_instance.eval()
+                        self._model = model_instance.to(self.device)
+                        self.logger.info("EfficientNet-b3 model loaded successfully.")
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to load EfficientNet-b3, falling back to b0: {e}"
+                        )
+                        try:
+                            model_instance = EfficientNet.from_pretrained("efficientnet-b0")
+                            model_instance.eval()
+                            self._model = model_instance.to(self.device)
+                            self.logger.info("EfficientNet-b0 model loaded successfully.")
+                        except Exception as fallback_e:
+                             self.logger.error(f"Failed to load even EfficientNet-b0: {fallback_e}", exc_info=True)
+                             # Set to a dummy value or raise an error depending on desired behavior
+                             self._model = None # Or raise RuntimeError("Could not load any EfficientNet model")
+        return self._model
+
+    @property
+    def backup_model(self):
+        """Lazy load the ResNet backup model."""
+        if self._backup_model is None:
+            with self._backup_model_lock:
+                 if self._backup_model is None: # Double-check locking
+                    try:
+                        self.logger.info("Lazy loading ResNet50 backup model...")
+                        model_instance = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+                        model_instance.eval()
+                        self._backup_model = model_instance.to(self.device)
+                        self.logger.info("ResNet50 backup model loaded successfully.")
+                    except Exception as e:
+                        self.logger.error(f"Failed to load ResNet50 backup model: {e}", exc_info=True)
+                        self._backup_model = None # Or raise
+        return self._backup_model
+
+    def match(self, source_image: str, target_image: str) -> float:
+        """Calculate image similarity score between source and target images"""
+        try:
+            # Preprocess images
+            source_features = self._extract_features(source_image)
+            target_features = self._extract_features(target_image)
+            
+            # Calculate similarity score
+            similarity = self._calculate_similarity(source_features, target_features)
+            
+            # Apply threshold and weight
+            if similarity >= self.image_similarity_threshold:
+                return similarity * self.image_weight
+            return 0.0
+            
+        except Exception as e:
+            self.logger.error(f"Error in image matching: {str(e)}")
+            return 0.0
+
     def calculate_similarity(
         self, url1: Optional[str], url2: Optional[str], max_dimension: int = None
     ) -> float:
@@ -109,34 +167,39 @@ class ImageMatcher:
             유사도 점수 (0.0 ~ 1.0)
         """
         if not url1 or not url2:
+            self.logger.debug(f"Cannot calculate similarity, one or both URLs are missing: {url1}, {url2}")
             return 0.0
 
-        # Ensure consistent key order
+        # Ensure consistent key order for caching
         if url1 > url2:
             url1, url2 = url2, url1
 
-        # 캐시 키에 해상도 정보 포함
-        resolution_suffix = f"_res{max_dimension}" if max_dimension else ""
+        # 캐시 키 생성 (해시 사용)
+        cache_key_string = f"{url1}|{url2}|{max_dimension}"
+        cache_key = hashlib.md5(cache_key_string.encode()).hexdigest()
 
         if self.cache:
-            return self._cached_calculate_similarity(
-                url1, url2, max_dimension, resolution_suffix
-            )
+            # Pass the generated key directly
+            return self._cached_calculate_similarity(url1, url2, max_dimension, cache_key)
         else:
+            # Calculate directly if no cache
             return self._calculate_similarity_logic(url1, url2, max_dimension)
 
     def _cached_calculate_similarity(
         self,
         url1: str,
         url2: str,
-        max_dimension: int = None,
-        resolution_suffix: str = "",
+        max_dimension: int,
+        cache_key: str, # Accept pre-generated key
     ) -> float:
         """캐시를 활용한 이미지 유사도 계산"""
 
-        @cache_result(self.cache, key_prefix=f"image_sim{resolution_suffix}")
-        def cached_logic(u1, u2, max_dim):
+        # Define the logic function separately
+        def logic_to_cache(u1, u2, max_dim):
             return self._calculate_similarity_logic(u1, u2, max_dim)
+
+        # Apply the cache decorator using the provided key
+        cached_logic = cache_result(self.cache, key=cache_key)(logic_to_cache)
 
         return cached_logic(url1, url2, max_dimension)
 
@@ -146,6 +209,7 @@ class ImageMatcher:
         """Core logic for calculating image similarity"""
         try:
             # 병렬로 이미지 다운로드 및 전처리
+            img1, img2 = None, None
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 future1 = executor.submit(
                     self._get_processed_image, url1, max_dimension
@@ -153,23 +217,26 @@ class ImageMatcher:
                 future2 = executor.submit(
                     self._get_processed_image, url2, max_dimension
                 )
-
                 img1 = future1.result()
                 img2 = future2.result()
 
             if img1 is None or img2 is None:
+                self.logger.warning(f"Could not process one or both images for similarity calculation: {url1}, {url2}")
                 return 0.0
 
             # 높은 성능: 이미지가 너무 유사한 경우 (동일한 이미지) - 빠른 체크
             if self._check_exact_match(img1, img2):
-                return 1.0
+                 self.logger.debug(f"Exact match detected for {url1} and {url2}")
+                 return 1.0
 
             # 1. 퍼셉추얼 해시 유사도 (15%)
             hash_sim = self._get_hash_similarity(img1, img2)
 
             # 높은 해시 유사도면 빠른 리턴 - 성능 최적화
             if hash_sim > 0.95:
-                return 0.95 + (hash_sim - 0.95) * 0.05  # 0.95 ~ 1.0 사이 값 매핑
+                adjusted_sim = 0.95 + (hash_sim - 0.95) * 0.5 # Map 0.95-1.0 to 0.95-0.975 for slight diff
+                self.logger.debug(f"High hash similarity ({hash_sim:.3f}), returning early: {adjusted_sim:.3f}")
+                return adjusted_sim
 
             # 2. 딥 특징 유사도 (25%)
             feature_sim = self._get_feature_similarity(img1, img2)
@@ -178,7 +245,6 @@ class ImageMatcher:
             color_sim = self._get_color_similarity(img1, img2)
 
             # 4. SIFT + RANSAC 유사도 (30%)
-            # RANSAC을 사용한 SIFT 매칭
             sift_ransac_sim = self._get_sift_ransac_similarity(img1, img2)
 
             # 5. AKAZE 유사도 (10%)
@@ -186,28 +252,40 @@ class ImageMatcher:
 
             # 6. 백업 모델 유사도 (ResNet) (10%)
             # 성능 최적화: 앞의 유사도가 낮으면 생략
-            if (
-                hash_sim + feature_sim + color_sim + sift_ransac_sim + akaze_sim
-            ) / 5 < 0.3:
-                resnet_sim = 0.0  # 앞의 유사도가 너무 낮으면 무거운 ResNet 계산 생략
+            current_avg_sim = (hash_sim + feature_sim + color_sim + sift_ransac_sim + akaze_sim) / 5
+            if current_avg_sim < 0.3: # Threshold to skip heavy backup model
+                resnet_sim = 0.0
+                self.logger.debug(f"Skipping ResNet similarity calculation due to low current avg sim ({current_avg_sim:.3f}) for {url1}, {url2}")
             else:
                 resnet_sim = self._get_resnet_similarity(img1, img2)
 
-            # 결합 유사도 계산 (가중치 조정)
+            # 결합 유사도 계산 (가중치 확인 및 조정 필요)
+            weights = {
+                'hash': 0.15, 'feature': 0.25, 'color': 0.10,
+                'sift': 0.30, 'akaze': 0.10, 'resnet': 0.10
+            }
+            # Ensure weights sum to 1
+            assert abs(sum(weights.values()) - 1.0) < 1e-6, "Similarity weights do not sum to 1"
+
             combined_sim = (
-                0.15 * hash_sim
-                + 0.25 * feature_sim
-                + 0.10 * color_sim
-                + 0.30 * sift_ransac_sim
-                + 0.10 * akaze_sim
-                + 0.10 * resnet_sim
+                weights['hash'] * hash_sim
+                + weights['feature'] * feature_sim
+                + weights['color'] * color_sim
+                + weights['sift'] * sift_ransac_sim
+                + weights['akaze'] * akaze_sim
+                + weights['resnet'] * resnet_sim
             )
+
+            self.logger.debug(f"Similarity details for ({url1}, {url2}): "
+                             f"Hash={hash_sim:.3f}, Feature={feature_sim:.3f}, Color={color_sim:.3f}, "
+                             f"SIFT={sift_ransac_sim:.3f}, AKAZE={akaze_sim:.3f}, ResNet={resnet_sim:.3f}, "
+                             f"Combined={combined_sim:.3f}")
 
             return float(combined_sim)
 
         except Exception as e:
             self.logger.error(
-                f"Error calculating image similarity between {url1} and {url2}: {str(e)}",
+                f"Error calculating image similarity logic between {url1} and {url2}: {str(e)}",
                 exc_info=True,
             )
             return 0.0
@@ -378,87 +456,48 @@ class ImageMatcher:
     def _get_processed_image(
         self, url: str, max_dimension: Optional[int] = None
     ) -> Optional[Image.Image]:
-        """Download and preprocess an image from a URL"""
+        """Downloads, preprocesses, and optionally removes background from an image."""
+        img_content = None
         try:
-            # URL 유효성 검사 추가
-            if not url or not isinstance(url, str) or len(url) < 10:
-                self.logger.warning(f"Invalid image URL: {url}")
-                return None
-                
-            # URL 프로토콜 확인 및 표준화
-            if not url.startswith(('http://', 'https://')):
-                if url.startswith('//'):
-                    url = 'https:' + url
-                else:
-                    self.logger.warning(f"URL missing protocol: {url}")
-                    # 로컬 파일인지 확인
-                    if os.path.exists(url):
-                        self.logger.info(f"Loading local image file: {url}")
-                    else:
-                        self.logger.error(f"Cannot process URL without protocol: {url}")
-                        return None
-            
-            # 캐시에서 이미지 조회
-            cache_key = f"image_data_{hashlib.md5(url.encode()).hexdigest()}"
-            if self.cache:
-                cached_img = self.cache.get(cache_key)
-                if cached_img and isinstance(cached_img, bytes):
-                    try:
-                        img = Image.open(io.BytesIO(cached_img))
-                        # 메모리에서 이미지 로드 확인
-                        img.load()
-                        self.logger.debug(f"Retrieved image from cache: {url}")
-                        return self._resize_image(img, max_dimension)
-                    except Exception as e:
-                        self.logger.warning(f"Error loading cached image for {url}: {e}")
-                        # 캐시에서 로드 실패 시 다시 다운로드 시도
-            
-            # User-Agent 설정
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }
-            
-            # 로컬 파일인지 URL인지 확인
-            if os.path.exists(url):
-                try:
-                    img = Image.open(url)
-                    img.load()  # 메모리에 로드
-                    return self._resize_image(img, max_dimension)
-                except Exception as e:
-                    self.logger.error(f"Error loading local image from {url}: {e}")
-                    return None
-                    
-            # URL에서 이미지 다운로드
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
-            
-            if response.status_code != 200:
-                self.logger.warning(f"Failed to download image from {url}: HTTP {response.status_code}")
-                return None
-                
-            # 이미지 데이터 검증
-            content_type = response.headers.get('Content-Type', '')
-            if not content_type.startswith('image/'):
-                self.logger.warning(f"URL does not return an image: {url} (Content-Type: {content_type})")
-                # 이미지가 아닌 경우 진행 시도 (일부 서버는 Content-Type을 잘못 설정하기도 함)
-            
-            try:
-                img = Image.open(io.BytesIO(response.content))
-                img.load()  # 메모리에 로드하여 이미지 검증
-                
-                # 캐시에 저장
-                if self.cache:
-                    self.cache.set(cache_key, response.content, ttl=86400*7)  # 7일 캐싱
-                
-                return self._resize_image(img, max_dimension)
-            except Exception as e:
-                self.logger.error(f"Error processing image from {url}: {e}")
-                return None
-                
-        except requests.RequestException as e:
-            self.logger.warning(f"Error downloading image from {url}: {e}")
+            # Download image with timeout
+            response = requests.get(url, timeout=10) # Added timeout
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+            img_content = response.content
+
+        except requests.exceptions.Timeout:
+            self.logger.warning(f"Timeout downloading image: {url}")
+            return None
+        except requests.exceptions.RequestException as e:
+            self.logger.warning(f"Failed to download image {url}: {str(e)}")
             return None
         except Exception as e:
-            self.logger.error(f"Unexpected error processing image from {url}: {e}", exc_info=True)
+            self.logger.error(f"Unexpected error downloading image {url}: {str(e)}", exc_info=True)
+            return None
+
+        if not img_content:
+            return None
+
+        try:
+            img = Image.open(BytesIO(img_content)).convert("RGB")
+
+            # Resize if needed
+            img = self._resize_image(img, max_dimension or self.max_image_dimension)
+
+            # Remove background if configured
+            if self.remove_background:
+                try:
+                    img = self._remove_background(img)
+                except Exception as bg_err:
+                     self.logger.warning(f"Failed to remove background for {url}: {bg_err}")
+                     # Continue with original image if background removal fails
+
+            return img
+
+        except UnidentifiedImageError:
+            self.logger.warning(f"Cannot identify image file from {url}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Error processing image data from {url}: {str(e)}", exc_info=True)
             return None
 
     def _resize_image(self, img: Image.Image, max_dimension: Optional[int] = None) -> Image.Image:
@@ -548,17 +587,27 @@ class ImageMatcher:
 
     def _get_feature_similarity(self, img1: Image.Image, img2: Image.Image) -> float:
         """Calculates feature similarity, potentially using cached features."""
-        features1 = self._get_image_features(img1)
-        features2 = self._get_image_features(img2)
+        # Ensure models are loaded via property access
+        if self.model is None:
+             self.logger.error("EfficientNet model is not available for feature similarity.")
+             return 0.0
 
-        if features1 is None or features2 is None:
+        feat1 = self._get_image_features(img1)
+        feat2 = self._get_image_features(img2)
+
+        if feat1 is None or feat2 is None:
             return 0.0
 
-        similarity = torch.nn.functional.cosine_similarity(features1, features2)
+        similarity = torch.nn.functional.cosine_similarity(feat1, feat2)
         return float(similarity.cpu().numpy())
 
     def _get_image_features(self, img: Image.Image) -> Optional[torch.Tensor]:
         """Extracts deep features from an image, using cache if available."""
+        # Ensure model is loaded via property access
+        if self.model is None:
+            self.logger.error("EfficientNet model is not available for feature extraction.")
+            return None
+
         try:
             img_tensor = self.transform(img).unsqueeze(0).to(self.device)
             with torch.no_grad():
@@ -624,139 +673,165 @@ class ImageMatcher:
         return color_distribution
 
     def _get_resnet_similarity(self, img1: Image.Image, img2: Image.Image) -> float:
-        """ResNet을 사용한 특징 유사도 계산 (백업 모델)"""
-        try:
-            # 이미지 변환
-            img1_tensor = self.transform(img1).unsqueeze(0).to(self.device)
-            img2_tensor = self.transform(img2).unsqueeze(0).to(self.device)
+        """Calculates similarity based on ResNet features (backup)."""
+         # Ensure model is loaded via property access
+        if self.backup_model is None:
+             self.logger.warning("ResNet backup model is not available.")
+             return 0.0
 
+        feat1 = self._get_backup_features(img1)
+        feat2 = self._get_backup_features(img2)
+
+        if feat1 is None or feat2 is None:
+            return 0.0
+
+        similarity = torch.nn.functional.cosine_similarity(feat1, feat2, dim=0).item()
+        return max(0.0, float(similarity))
+
+    def _get_backup_features(self, img: Image.Image) -> Optional[torch.Tensor]:
+        """Extracts features using the backup ResNet model."""
+         # Ensure model is loaded via property access
+        if self.backup_model is None:
+            self.logger.warning("ResNet backup model is not available for feature extraction.")
+            return None
+        try:
+            # Use the same transform as the primary model for consistency? Or ResNet specific?
+            # Using same transform for now.
+            img_tensor = self.transform(img).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                # ResNet 특징 추출
-                features1 = self.backup_model.avgpool(
-                    self.backup_model.layer4(
-                        self.backup_model.layer3(
-                            self.backup_model.layer2(
-                                self.backup_model.layer1(
-                                    self.backup_model.maxpool(
-                                        self.backup_model.relu(
-                                            self.backup_model.bn1(
-                                                self.backup_model.conv1(img1_tensor)
-                                            )
-                                        )
-                                    )
-                                )
-                            )
-                        )
-                    )
-                )
+                # ResNet feature extraction logic might differ slightly
+                # Typically use penultimate layer output
+                x = self.backup_model.conv1(img_tensor)
+                x = self.backup_model.bn1(x)
+                x = self.backup_model.relu(x)
+                x = self.backup_model.maxpool(x)
 
-                features2 = self.backup_model.avgpool(
-                    self.backup_model.layer4(
-                        self.backup_model.layer3(
-                            self.backup_model.layer2(
-                                self.backup_model.layer1(
-                                    self.backup_model.maxpool(
-                                        self.backup_model.relu(
-                                            self.backup_model.bn1(
-                                                self.backup_model.conv1(img2_tensor)
-                                            )
-                                        )
-                                    )
-                                )
-                            )
-                        )
-                    )
-                )
+                x = self.backup_model.layer1(x)
+                x = self.backup_model.layer2(x)
+                x = self.backup_model.layer3(x)
+                x = self.backup_model.layer4(x)
 
-                # 특징 평탄화
-                features1 = torch.flatten(features1, 1)
-                features2 = torch.flatten(features2, 1)
-
-                # 코사인 유사도 계산
-                similarity = torch.nn.functional.cosine_similarity(features1, features2)
-
-            return float(similarity.cpu().numpy())
-
+                x = self.backup_model.avgpool(x)
+                features = torch.flatten(x, 1)
+                features = features.squeeze()
+            return features
         except Exception as e:
-            self.logger.error(
-                f"Error calculating ResNet similarity: {e}", exc_info=True
-            )
-            return 0.5  # 오류 발생 시 중간값 반환
-
-    def _download_and_preprocess(
-        self, url: str, max_dimension: int = None
-    ) -> Optional[Image.Image]:
-        """이미지 다운로드 및 전처리"""
-        try:
-            # 이미지 URL 유효성 확인
-            if not url or not url.strip():
-                self.logger.warning(f"Empty or invalid image URL")
-                return None
-
-            # 파일 확장자 확인
-            if not url.lower().endswith(
-                (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
-            ):
-                self.logger.warning(f"Unsupported file type: {url}")
-                # 일부 URL은 확장자가 없을 수 있으므로 계속 진행
-
-            # 요청 헤더 설정
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Referer": "https://google.com",
-                "Connection": "keep-alive",
-            }
-
-            # 이미지 다운로드 (타임아웃 설정)
-            response = requests.get(url, headers=headers, timeout=5)
-            response.raise_for_status()
-
-            # 이미지 열기
-            img = Image.open(BytesIO(response.content))
-
-            # 이미지 모드 확인 및 RGB로 변환
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-
-            # 해상도 제한 (성능 최적화)
-            if max_dimension and (
-                img.width > max_dimension or img.height > max_dimension
-            ):
-                # 큰 쪽에 맞춰 비율 유지하며 리사이즈
-                if img.width > img.height:
-                    new_width = max_dimension
-                    new_height = int(img.height * (max_dimension / img.width))
-                else:
-                    new_height = max_dimension
-                    new_width = int(img.width * (max_dimension / img.height))
-
-                img = img.resize((new_width, new_height), Image.LANCZOS)
-
-            # 이미지 전처리 (필요시)
-            # 배경 제거는 선택적으로 수행
-            if (
-                self.remove_background and img.size[0] * img.size[1] <= 1000000
-            ):  # 백만 픽셀 이하 이미지만
-                try:
-                    img = self._remove_background(img)
-                except Exception as e:
-                    self.logger.warning(f"Background removal failed: {e}")
-                    # 실패해도 원본 이미지 사용
-
-            return img
-
-        except Exception as e:
-            self.logger.warning(f"Image download/preprocessing failed: {str(e)}")
+            self.logger.error(f"Error extracting features with ResNet: {e}", exc_info=True)
             return None
 
     def _remove_background(self, img: Image.Image) -> Image.Image:
-        """배경을 제거한 이미지 반환"""
+        """이미지 배경 제거"""
         try:
-            # 배경 제거 후 이미지 반환
-            img = remove(img)
-            return img
+            # rembg 사용 시 RGB 모드로 변환 (RGBA 입력 필요)
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+                
+            output = remove(img)
+            
+            # 후처리: 투명 배경을 흰색으로 변환 (필요한 경우)
+            # bg_removed = Image.new(\"RGBA\", output.size, (255, 255, 255, 255))
+            # bg_removed.paste(output, mask=output)
+            # return bg_removed.convert('RGB') 
+            
+            return output.convert('RGB') # rembg는 RGBA 반환, RGB로 변환
         except Exception as e:
             self.logger.error(f"Error removing background: {e}", exc_info=True)
-            return img
+            return img.convert('RGB') if img.mode != 'RGB' else img
+
+    # --- BaseMatcher 추상 메서드 구현 ---
+
+    def find_matches(
+        self,
+        source_product: Product,
+        candidate_products: List[Product],
+        min_text_similarity: float = None,
+        min_image_similarity: float = None,
+        min_combined_similarity: float = None,
+        max_matches: int = None,
+    ) -> List[MatchResult]:
+        """Find best matches among candidates based on image similarity."""
+        # TODO: Implement image-based matching logic
+        self.logger.warning("find_matches method is not fully implemented in ImageMatcher.")
+        
+        results = []
+        if not source_product.image_url:
+            self.logger.debug(f"Source product {source_product.id} has no image URL. Skipping image matching.")
+            return []
+            
+        for target_product in candidate_products:
+            if not target_product.image_url:
+                self.logger.debug(f"Target product {target_product.id} has no image URL. Skipping.")
+                continue
+
+            similarity_score = self.calculate_similarity(
+                source_product.image_url, 
+                target_product.image_url, 
+                self.max_image_dimension
+            )
+
+            if min_image_similarity is None:
+                min_image_similarity = self.image_similarity_threshold
+
+            if similarity_score >= min_image_similarity:
+                results.append(MatchResult(
+                    source_product=source_product,
+                    matched_product=target_product,
+                    similarity_score=similarity_score,
+                    match_type="image" 
+                ))
+
+        # Sort results by similarity
+        results.sort(key=lambda x: x.similarity_score, reverse=True)
+
+        # Limit results if max_matches is set
+        if max_matches is not None:
+            results = results[:max_matches]
+            
+        return results
+
+    def find_best_match(
+        self,
+        source_product: Product,
+        candidate_products: List[Product],
+        min_text_similarity: float = None,
+        min_image_similarity: float = None,
+        min_combined_similarity: float = None,
+    ) -> Optional[MatchResult]:
+        """Find the single best match based on image similarity."""
+        # TODO: Optimize this if possible (e.g., avoid recalculating all matches)
+        self.logger.warning("find_best_match method relies on find_matches in ImageMatcher.")
+        
+        matches = self.find_matches(
+            source_product=source_product,
+            candidate_products=candidate_products,
+            min_image_similarity=min_image_similarity,
+            max_matches=1 # We only need the best one
+        )
+        
+        return matches[0] if matches else None
+
+    def batch_find_matches(
+        self,
+        query_products: List[Product],
+        candidate_products: List[Product],
+        max_results_per_query: int = None,
+        min_similarity: float = None,
+    ) -> Dict[str, List[Tuple[Product, float]]]:
+        """Batch find image matches for multiple products."""
+        # TODO: Implement efficient batch processing
+        self.logger.warning("batch_find_matches method is not fully implemented efficiently in ImageMatcher.")
+        
+        results = {}
+        for query_product in query_products:
+            # Use find_matches for each query product (can be optimized)
+            matches = self.find_matches(
+                source_product=query_product,
+                candidate_products=candidate_products,
+                min_image_similarity=min_similarity, 
+                max_matches=max_results_per_query
+            )
+            
+            # Format results as required: Dict[str, List[Tuple[Product, float]]]
+            results[query_product.id] = [(match.matched_product, match.similarity_score) for match in matches]
+            
+        return results

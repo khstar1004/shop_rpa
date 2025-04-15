@@ -52,7 +52,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self, config):
         super().__init__()
-        self.config = config
+        self.config = config["gui_config"]  # Use the ConfigParser object for GUI settings
+        self.processed_config = config  # Store the processed config for other uses
         self.logger = logging.getLogger(__name__)
         self.program_root = Path(__file__).parent.parent.absolute()
 
@@ -60,7 +61,7 @@ class MainWindow(QMainWindow):
         self.settings = Settings()
 
         # Set debug mode based on config
-        if self.config["GUI"]["DEBUG_MODE"]:
+        if self.config.getboolean("GUI", "debug_mode", fallback=False):
             self.logger.setLevel(logging.DEBUG)
         else:
             self.logger.setLevel(logging.INFO)
@@ -87,9 +88,7 @@ class MainWindow(QMainWindow):
         # Initialize processor with config
         try:
             from core.processing.main_processor import ProductProcessor
-
             self.processor = ProductProcessor(self.config)
-
         except Exception as e:
             self.logger.error(f"프로세서 초기화 중 오류 발생: {str(e)}", exc_info=True)
             QMessageBox.critical(
@@ -98,10 +97,10 @@ class MainWindow(QMainWindow):
 
         # Set window properties
         self.setWindowTitle(tr.get_text("window_title", "상품 가격 비교 시스템"))
-        self.setMinimumSize(800, 600)  # Keep minimum size for compatibility
+        self.setMinimumSize(800, 600)
         self.resize(
-            int(self.config["GUI"]["WINDOW_WIDTH"]),
-            int(self.config["GUI"]["WINDOW_HEIGHT"])
+            int(self.config.get("GUI", "window_width", fallback=1200)),
+            int(self.config.get("GUI", "window_height", fallback=1400))
         )
 
         # Set application icon
@@ -157,8 +156,8 @@ class MainWindow(QMainWindow):
         # Use config values for window size
         self.setMinimumSize(800, 600)  # Keep minimum size for compatibility
         self.resize(
-            int(self.config["GUI"]["WINDOW_WIDTH"]),
-            int(self.config["GUI"]["WINDOW_HEIGHT"])
+            int(self.config.get("GUI", "window_width", fallback=1200)),
+            int(self.config.get("GUI", "window_height", fallback=1400))
         )
 
         # Create central widget and main layout
@@ -180,19 +179,21 @@ class MainWindow(QMainWindow):
         status_bar = self.statusBar()
         status_bar.addPermanentWidget(self.memory_label)
 
-        # Apply theme
+        # Apply theme based on config
         self.apply_theme()
 
-        # Setup auto-save
-        self.setup_auto_save()
+        # Setup auto-save based on config
+        auto_save_interval = int(self.config.get("GUI", "auto_save_interval", fallback=300))
+        if auto_save_interval > 0:
+            self.setup_auto_save()
 
-        # Setup GUI logging
+        # Setup GUI logging with config
         self._setup_gui_logging()
 
         # Connect signals
         self.connect_signals()
 
-        # Initialize settings
+        # Initialize settings from config
         self.initialize_settings()
 
         # Show the window
@@ -283,7 +284,7 @@ class MainWindow(QMainWindow):
         # --- End Refactor ---
 
         # Add progress bar only if enabled in config
-        if self.config["GUI"]["SHOW_PROGRESS_BAR"]:
+        if self.config.getboolean("GUI", "show_progress_bar", fallback=True):
             self.progress_group, self.progress_bar, self.status_label, self.step_indicator, self.resource_graph = (
                 WidgetFactory.create_progress_group()
             )
@@ -322,7 +323,6 @@ class MainWindow(QMainWindow):
     def create_settings_tab(self):
         """Create settings tab"""
         tab = QWidget()
-        tab_layout = QVBoxLayout(tab)
         layout = QVBoxLayout(tab)
         layout.setSpacing(20)
 
@@ -439,9 +439,6 @@ class MainWindow(QMainWindow):
         button_layout.addStretch()
         button_layout.addWidget(apply_button)
         layout.addLayout(button_layout)
-
-        # Add stretch to push everything to the top
-        layout.addStretch()
 
         # Add tab to tab widget
         self.tab_widget.addTab(tab, tr.get_text("settings"))
@@ -576,10 +573,8 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self):
         """Apply current theme based on settings"""
-        is_dark = self.config.get("GUI", {}).get("ENABLE_DARK_MODE", False)
-        if isinstance(is_dark, str):
-            is_dark = is_dark.lower() == "true"
-            
+        is_dark = self.config.getboolean("GUI", "enable_dark_mode", fallback=False)
+        
         # Apply the right theme
         if is_dark:
             Styles.apply_dark_mode(self)
@@ -608,27 +603,31 @@ class MainWindow(QMainWindow):
 
     def setup_auto_save(self):
         """Setup auto-save functionality"""
-        interval = int(self.config["GUI"]["AUTO_SAVE_INTERVAL"])
+        interval = int(self.config.get("GUI", "auto_save_interval", fallback=300))
         if interval > 0:
-            self.auto_save_timer = QTimer()
-            self.auto_save_timer.timeout.connect(self.auto_save)
-            self.auto_save_timer.start(interval * 1000)
+            if self.auto_save_timer is None:
+                self.auto_save_timer = QTimer()
+                self.auto_save_timer.timeout.connect(self.auto_save)
+            self.auto_save_timer.start(interval * 1000)  # Convert to milliseconds
+        elif self.auto_save_timer is not None:
+            self.auto_save_timer.stop()
+            self.auto_save_timer = None
 
     def _setup_gui_logging(self):
-        """Setup logging handler for GUI"""
-        self.gui_handler = GUILogHandler()  # Initialize GUILogHandler correctly
-        self.gui_handler.setFormatter(
-            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-        )
-        # Connect the handler's signal to the main window's slot
-        self.gui_handler.log_signal.connect(self.append_log_message)
+        """Setup GUI logging"""
+        # Remove existing handlers
+        for handler in self.logger.handlers[:]:
+            if isinstance(handler, GUILogHandler):
+                self.logger.removeHandler(handler)
+                handler.close()
 
-        root_logger = logging.getLogger()
-        root_logger.addHandler(self.gui_handler)
-        root_logger.setLevel(self.settings.get_log_level())
+        # Create and add new handler
+        gui_handler = GUILogHandler(self.log_area)
+        gui_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.logger.addHandler(gui_handler)
 
-        # Set max log lines from config
-        self.max_log_lines = int(self.config["GUI"]["MAX_LOG_LINES"])
+        # Store handler reference for cleanup
+        self.gui_handler = gui_handler
 
     def connect_signals(self):
         """Connect all signals to their slots"""
@@ -641,32 +640,40 @@ class MainWindow(QMainWindow):
     def initialize_settings(self):
         """Initialize UI elements with current settings"""
         # Dark mode setting
-        self.dark_mode_check.setChecked(self.settings.get("dark_mode", False))
+        self.dark_mode_check.setChecked(self.config.getboolean("GUI", "enable_dark_mode", fallback=False))
 
         # Auto-save setting
         self.auto_save_check.setChecked(self.settings.get("auto_save", True))
 
         # Thread count settings
-        default_threads = self.settings.get("thread_count", 4)
+        default_threads = int(self.config.get("PROCESSING", "max_workers", fallback=4))
         self.threads_spinbox.setValue(default_threads)
         self.thread_spinbox.setValue(default_threads)
 
         # Timeout setting
-        if (
-            "PROCESSING" in self.config
-            and "REQUEST_TIMEOUT" in self.config["PROCESSING"]
-        ):
-            self.timeout_spinbox.setValue(
-                int(self.config["PROCESSING"]["REQUEST_TIMEOUT"])
-            )
-        else:
-            self.timeout_spinbox.setValue(30)  # Default timeout
+        self.timeout_spinbox.setValue(int(self.config.get("PROCESSING", "request_timeout", fallback=30)))
+
+        # Similarity threshold setting
+        self.similarity_spinbox.setValue(float(self.config.get("MATCHING", "text_similarity_threshold", fallback=0.75)))
 
         # Language setting
         current_lang = self.settings.get("language", "ko_KR")
         index = self.language_combo.findData(current_lang)
         if index >= 0:
             self.language_combo.setCurrentIndex(index)
+
+        # Max log lines setting
+        self.max_log_lines = int(self.config.get("GUI", "max_log_lines", fallback=1000))
+
+        # Show progress bar setting
+        if not self.config.getboolean("GUI", "show_progress_bar", fallback=True):
+            self.progress_bar.hide()
+
+        # Debug mode setting
+        if self.config.getboolean("GUI", "debug_mode", fallback=False):
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.INFO)
 
     def on_tab_changed(self, index):
         """Handle tab changes"""
@@ -1068,9 +1075,9 @@ class MainWindow(QMainWindow):
 
     def toggle_dark_mode(self, enabled):
         """Toggle dark mode and save setting"""
-        if 'GUI' not in self.config:
-            self.config['GUI'] = {}
-        self.config['GUI']['ENABLE_DARK_MODE'] = str(enabled).lower()
+        if 'gui' not in self.config:
+            self.config['gui'] = {}
+        self.config['gui']['enable_dark_mode'] = str(enabled).lower()
         self.settings.set("dark_mode", enabled)
         
         # Apply theme update with CSS transition cleanup
@@ -1081,9 +1088,9 @@ class MainWindow(QMainWindow):
         # 먼저 기존 config 파일을 읽습니다
         config_parser.read("config.ini", encoding="utf-8")
         # 새로운 설정을 업데이트합니다
-        if 'GUI' not in config_parser:
-            config_parser['GUI'] = {}
-        config_parser['GUI']['ENABLE_DARK_MODE'] = str(enabled).lower()
+        if 'gui' not in config_parser:
+            config_parser['gui'] = {}
+        config_parser['gui']['enable_dark_mode'] = str(enabled).lower()
         # 변경된 설정을 파일에 저장합니다
         with open("config.ini", "w", encoding="utf-8") as f:
             config_parser.write(f)
@@ -1140,6 +1147,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Handle window close event"""
+        # Cleanup GUI log handler
+        if hasattr(self, 'gui_handler'):
+            self.logger.removeHandler(self.gui_handler)
+            self.gui_handler.close()
         if self.processing_thread and self.processing_thread.isRunning():
             reply = QMessageBox.question(
                 self,
@@ -1163,7 +1174,7 @@ class MainWindow(QMainWindow):
         """Apply current settings"""
         try:
             # Save dark mode setting
-            self.settings.set("dark_mode", self.dark_mode_check.isChecked())
+            self.config["GUI"]["enable_dark_mode"] = str(self.dark_mode_check.isChecked())
             self.apply_theme()
 
             # Save auto-save setting
@@ -1184,21 +1195,21 @@ class MainWindow(QMainWindow):
                 )
 
             # Save thread count and sync with analysis tab
-            self.settings.set("thread_count", self.thread_spinbox.value())
+            self.config["PROCESSING"]["max_workers"] = str(self.thread_spinbox.value())
             self.threads_spinbox.setValue(self.thread_spinbox.value())
             
             # Save timeout and update config
-            self.settings.set("timeout", self.timeout_spinbox.value())
-            if "PROCESSING" in self.config:
-                self.config["PROCESSING"]["REQUEST_TIMEOUT"] = str(
-                    self.timeout_spinbox.value()
-                )
+            self.config["PROCESSING"]["request_timeout"] = str(self.timeout_spinbox.value())
             
             # Save similarity threshold
-            self.settings.set("similarity_threshold", self.similarity_spinbox.value())
+            self.config["MATCHING"]["text_similarity_threshold"] = str(self.similarity_spinbox.value())
 
             # Save settings
             self.settings.save_settings()
+
+            # Save config to file
+            with open("config.ini", "w", encoding="utf-8") as f:
+                self.config.write(f)
 
             # Show success message
             QMessageBox.information(
@@ -1423,7 +1434,7 @@ class MainWindow(QMainWindow):
         """Clear cache button clicked handler"""
         try:
             # Get cache directory from config
-            cache_dir = self.config["PATHS"]["CACHE_DIR"]
+            cache_dir = self.config["paths"]["cache_dir"]
             
             # Show confirmation dialog
             reply = QMessageBox.question(

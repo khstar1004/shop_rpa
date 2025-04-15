@@ -1,5 +1,6 @@
 import logging
 import re
+import hashlib
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,6 +12,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from utils.caching import FileCache, cache_result
+from core.matching.base_matcher import BaseMatcher
+from core.data_models import Product, MatchResult
 
 # Add transformers for tokenization support
 try:
@@ -21,64 +24,49 @@ except ImportError:
     TRANSFORMERS_AVAILABLE = False
 
 
-class TextMatcher:
-    def __init__(self, cache: Optional[FileCache] = None, use_ko_sbert: bool = True, use_stemming: bool = False, similarity_threshold: float = 0.7):
-        # 로거 초기화
-        self.logger = logging.getLogger(__name__)
-
-        # 한국어 특화 모델 사용 여부 선택
-        self.use_ko_sbert = use_ko_sbert
+class TextMatcher(BaseMatcher):
+    """Text-based product matching implementation"""
+    
+    def __init__(self, config: Dict, logger: Optional[logging.Logger] = None, cache: Optional[FileCache] = None):
+        # Initialize parent class first
+        super().__init__(config, logger)
         
-        # 스테밍 사용 여부
-        self.use_stemming = use_stemming
-        
-        # 유사도 임계값
-        self.similarity_threshold = similarity_threshold
-
-        # 한국어에 특화된 Ko-SBERT 모델 (Ko-SRoBERTa-multitask)
-        if self.use_ko_sbert:
-            try:
-                self.model = SentenceTransformer("jhgan/ko-sroberta-multitask")
-                self.logger.info("Using Ko-SBERT model: jhgan/ko-sroberta-multitask")
-
-                # Initialize tokenizer if transformers available
-                if TRANSFORMERS_AVAILABLE:
-                    try:
-                        self.tokenizer = AutoTokenizer.from_pretrained(
-                            "jhgan/ko-sroberta-multitask"
-                        )
-                        self.logger.info(
-                            "Using ko-sroberta tokenizer for enhanced text processing"
-                        )
-                    except Exception as e:
-                        self.logger.warning(f"Failed to load tokenizer: {e}")
-                        self.tokenizer = None
-                else:
-                    self.tokenizer = None
-            except Exception as e:
-                # 모델 로드 실패시 다국어 모델로 폴백
-                self.model = SentenceTransformer(
-                    "paraphrase-multilingual-MiniLM-L12-v2"
-                )
-                self.use_ko_sbert = False
-                self.logger.warning(
-                    f"Failed to load Ko-SBERT, falling back to multilingual model: {e}"
-                )
-                self.tokenizer = None
-        else:
-            # 기존 다국어 모델 (영어, 한국어 둘 다 사용 가능)
-            self.model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
-            self.tokenizer = None
-
+        # Get text settings with default values
+        self.text_settings = config.get("TEXT_MATCHER", {}) if isinstance(config, dict) else {}
         self.cache = cache
+        
+        # Set default values for settings
+        self.similarity_threshold = float(self.text_settings.get("similarity_threshold", 0.75))
+        self.text_similarity_threshold = float(self.text_settings.get("text_similarity_threshold", 0.75))
+        self.text_weight = float(self.text_settings.get("text_weight", 0.7))
+        self.use_ko_sbert = bool(self.text_settings.get("use_ko_sbert", True))
+        self.use_stemming = bool(self.text_settings.get("use_stemming", False))
 
-        # TF-IDF 벡터라이저 추가
-        self.tfidf_vectorizer = TfidfVectorizer(
-            analyzer="word", ngram_range=(1, 2), min_df=2, max_df=0.9
-        )
+        # Model and Tokenizer Initialization
+        self.model = None
+        self.tokenizer = None
+        self._load_models()
 
-        # 한국어 형태소 분석기 추가
-        self.okt = Okt()
+        # TF-IDF Vectorizer
+        try:
+            self.tfidf_vectorizer = TfidfVectorizer(
+                max_features=10000,
+                stop_words=None,
+                ngram_range=(1, 2)
+            )
+        except Exception as e:
+            self.logger.error(f"TF-IDF Vectorizer initialization failed: {e}")
+            self.tfidf_vectorizer = None
+
+        # Korean Morphological Analyzer (Okt)
+        try:
+            self.okt = Okt()
+            # Test Okt initialization
+            _ = self.okt.morphs("테스트")
+            self.logger.info("Okt initialized successfully.")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Okt: {e}. Check Java/JDK installation.", exc_info=True)
+            self.okt = None
 
         # Brand aliases 확장
         self.brand_aliases = {
@@ -161,70 +149,309 @@ class TextMatcher:
         self.number_pattern = re.compile(r"\d+")
         self.special_char_pattern = re.compile(r"[^\w\s]")
 
-    def calculate_similarity(self, text1: str, text2: str) -> float:
-        if self.cache:
-            # Wrap the core logic in a cached method
-            return self._cached_calculate_similarity(text1, text2)
+    def _load_models(self):
+        """Loads the SentenceTransformer model and tokenizer."""
+        sbert_model_name = "jhgan/ko-sroberta-multitask"
+        fallback_model_name = "paraphrase-multilingual-MiniLM-L12-v2"
+
+        if self.use_ko_sbert:
+            try:
+                self.logger.info(f"Loading Ko-SBERT model: {sbert_model_name}")
+                self.model = SentenceTransformer(sbert_model_name)
+                self.logger.info("Ko-SBERT model loaded successfully.")
+
+                if TRANSFORMERS_AVAILABLE:
+                    try:
+                        self.tokenizer = AutoTokenizer.from_pretrained(sbert_model_name)
+                        self.logger.info(f"Using tokenizer from {sbert_model_name}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to load tokenizer for {sbert_model_name}: {e}")
+                        self.tokenizer = None
+                else:
+                    self.tokenizer = None
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to load Ko-SBERT model ({sbert_model_name}), falling back to {fallback_model_name}: {e}",
+                    exc_info=True
+                )
+                try:
+                    self.model = SentenceTransformer(fallback_model_name)
+                    self.use_ko_sbert = False
+                    self.logger.info(f"Loaded fallback multilingual model: {fallback_model_name}")
+                    self.tokenizer = None
+                except Exception as fallback_e:
+                    self.logger.error(f"Failed to load even the fallback SBERT model: {fallback_e}", exc_info=True)
+                    self.model = None
+                    self.tokenizer = None
         else:
-            return self._calculate_similarity_logic(text1, text2)
+            try:
+                self.logger.info(f"Loading multilingual SBERT model: {fallback_model_name}")
+                self.model = SentenceTransformer(fallback_model_name)
+                self.logger.info(f"Multilingual model loaded successfully.")
+                self.tokenizer = None
+            except Exception as e:
+                self.logger.error(f"Failed to load multilingual SBERT model: {e}", exc_info=True)
+                self.model = None
+                self.tokenizer = None
 
-    def _cached_calculate_similarity(self, text1: str, text2: str) -> float:
-        # Use a wrapper function to apply the decorator easily
-        @cache_result(self.cache, key_prefix="text_sim")
-        def cached_logic(t1, t2):
-            return self._calculate_similarity_logic(t1, t2)
+    def match(self, source_product: Product, target_product: Product) -> float:
+        """Calculate similarity score between source and target products.
+        
+        Args:
+            source_product: Source product to match from
+            target_product: Target product to match against
+            
+        Returns:
+            Similarity score between 0.0 and 1.0
+        """
+        return self.calculate_similarity(source_product.name, target_product.name)
 
-        # Ensure consistent key order regardless of input order
+    def find_matches(
+        self,
+        source_product: Product,
+        candidate_products: List[Product],
+        min_text_similarity: float = None,
+        min_image_similarity: float = None,
+        min_combined_similarity: float = None,
+        max_matches: int = None,
+    ) -> List[MatchResult]:
+        """Find best matches among candidates according to similarity.
+        
+        Args:
+            source_product: Source product to match from
+            candidate_products: List of candidate products to match against
+            min_text_similarity: Minimum text similarity threshold
+            min_image_similarity: Minimum image similarity threshold (ignored for text matcher)
+            min_combined_similarity: Minimum combined similarity threshold (ignored for text matcher)
+            max_matches: Maximum number of matches to return
+            
+        Returns:
+            List of match results sorted by similarity (descending)
+        """
+        threshold = min_text_similarity or self.similarity_threshold
+        similarities = []
+        
+        for candidate in candidate_products:
+            similarity = self.match(source_product, candidate)
+            if similarity >= threshold:
+                similarities.append((candidate, similarity))
+        
+        # Sort by similarity in descending order
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        
+        # Apply max_matches limit if specified
+        if max_matches is not None:
+            similarities = similarities[:max_matches]
+        
+        # Convert to MatchResult objects
+        results = [
+            MatchResult(
+                source_product=source_product,
+                matched_product=candidate,
+                similarity_score=similarity,
+                match_type="text"
+            )
+            for candidate, similarity in similarities
+        ]
+        
+        return results
+
+    def find_best_match(
+        self,
+        source_product: Product,
+        candidate_products: List[Product],
+        min_text_similarity: float = None,
+        min_image_similarity: float = None,
+        min_combined_similarity: float = None,
+    ) -> Optional[MatchResult]:
+        """Find the best matching product among candidates.
+        
+        Args:
+            source_product: Source product to match from
+            candidate_products: List of candidate products to match against
+            min_text_similarity: Minimum text similarity threshold
+            min_image_similarity: Minimum image similarity threshold (ignored for text matcher)
+            min_combined_similarity: Minimum combined similarity threshold (ignored for text matcher)
+            
+        Returns:
+            Best match result or None if no match meets the threshold
+        """
+        matches = self.find_matches(
+            source_product,
+            candidate_products,
+            min_text_similarity=min_text_similarity,
+            max_matches=1
+        )
+        
+        return matches[0] if matches else None
+
+    def batch_find_matches(
+        self,
+        query_products: List[Product],
+        candidate_products: List[Product],
+        max_results_per_query: int = None,
+        min_similarity: float = None,
+    ) -> Dict[str, List[Tuple[Product, float]]]:
+        """Find matches for multiple query products in batch.
+        
+        Args:
+            query_products: List of products to find matches for
+            candidate_products: List of candidate products to match against
+            max_results_per_query: Maximum number of matches to return per query
+            min_similarity: Minimum similarity threshold
+            
+        Returns:
+            Dictionary mapping query product IDs to lists of (matched product, similarity) tuples
+        """
+        results = {}
+        threshold = min_similarity or self.similarity_threshold
+        
+        for query in query_products:
+            matches = self.find_matches(
+                query,
+                candidate_products,
+                min_text_similarity=threshold,
+                max_matches=max_results_per_query
+            )
+            
+            results[query.id] = [(match.matched_product, match.similarity_score) for match in matches]
+        
+        return results
+
+    def calculate_similarity(self, text1: str, text2: str) -> float:
+        """Calculates combined text similarity, using cache if available."""
+        if not text1 or not text2:
+            return 0.0
+
+        # Ensure consistent key order for caching
         if text1 > text2:
             text1, text2 = text2, text1
+
+        if self.cache:
+            # Generate cache key using hashlib
+            cache_key_string = f"{text1}|{text2}"
+            cache_key = hashlib.md5(cache_key_string.encode()).hexdigest()
+            return self._cached_calculate_similarity(text1, text2, cache_key)
+        else:
+            # Calculate directly if no cache
+            return self._calculate_similarity_logic(text1, text2)
+
+    def _cached_calculate_similarity(self, text1: str, text2: str, cache_key: str) -> float:
+        """Wrapper for cached similarity calculation using a pre-generated key."""
+
+        # Define the logic function to be cached
+        def logic_to_cache(t1, t2):
+            return self._calculate_similarity_logic(t1, t2)
+
+        # Apply the cache decorator with the provided key
+        cached_logic = cache_result(self.cache, key=cache_key)(logic_to_cache)
 
         return cached_logic(text1, text2)
 
     def _calculate_similarity_logic(self, text1: str, text2: str) -> float:
         """Core logic for calculating text similarity"""
-        # 한국어 형태소 분석을 통한 정규화
-        norm1 = self._normalize_text(text1)
-        norm2 = self._normalize_text(text2)
+        if self.model is None:
+            self.logger.error("SBERT model not available, cannot calculate text similarity.")
+            return 0.0
 
-        # 레벤슈타인 유사도 계산 (20%)
-        leven_sim = ratio(norm1, norm2)
+        try:
+            # Preprocess and normalize
+            norm1 = self._normalize_text(text1)
+            norm2 = self._normalize_text(text2)
 
-        # TF-IDF 유사도 계산 (20%)
-        tfidf_sim = self._calculate_tfidf_similarity(norm1, norm2)
+            if not norm1 or not norm2:
+                return 0.0
 
-        # 토큰화 기반 유사도 계산 (고급 토큰화 사용 시)
-        token_sim = 0.0
-        if self.tokenizer:
-            token_sim = self._calculate_token_similarity(text1, text2)
-            # 토큰 유사도가 있으면 TF-IDF 가중치 조정
-            tfidf_sim = 0.7 * tfidf_sim + 0.3 * token_sim
+            # --- Similarity Components --- #
 
-        # SBERT 임베딩 유사도 계산 (60%) - 한국어 특화 모델 적용으로 가중치 증가
-        # Cache embeddings separately for potential reuse
-        emb1 = self._get_embedding(norm1)
-        emb2 = self._get_embedding(norm2)
+            # 1. Levenshtein Similarity (Weight: 0.15)
+            leven_sim = ratio(norm1, norm2)
 
-        # 코사인 유사도 계산 (PyTorch 텐서 활용)
-        if self.use_ko_sbert:
-            # Ko-SBERT 모델에 최적화된 유사도 계산 (PyTorch util 활용)
-            emb1_tensor = util.normalize_embeddings(torch.tensor([emb1]))
-            emb2_tensor = util.normalize_embeddings(torch.tensor([emb2]))
-            bert_sim = float(util.pytorch_cos_sim(emb1_tensor, emb2_tensor).item())
-        else:
-            # 일반 코사인 유사도 계산 (numpy 사용)
-            bert_sim = float(cosine_similarity([emb1], [emb2])[0, 0])
+            # 2. TF-IDF Similarity (Weight: 0.15)
+            tfidf_sim = self._calculate_tfidf_similarity(norm1, norm2)
 
-        # 규격 유사도 계산 (추가 가중치)
-        spec_sim = self._calculate_spec_similarity(text1, text2)
+            # 3. Token-based Similarity (Optional, Weight: 0.10 if used)
+            token_sim = 0.0
+            use_token_sim = bool(self.tokenizer)
+            if use_token_sim:
+                token_sim = self._calculate_token_similarity(text1, text2)
 
-        # 결합 유사도 계산 (가중치 조정)
-        combined_sim = 0.2 * leven_sim + 0.2 * tfidf_sim + 0.6 * bert_sim
+            # 4. SBERT Embedding Similarity (Weight: 0.60 or adjusted)
+            emb1 = self._get_embedding(norm1)
+            emb2 = self._get_embedding(norm2)
+            if emb1 is None or emb2 is None:
+                self.logger.warning(f"Could not get embeddings for similarity calculation.")
+                return (0.3 * leven_sim + 0.7 * tfidf_sim)
 
-        # 규격이 일치하면 유사도 보너스 부여
-        if spec_sim > 0.8:
-            combined_sim = min(1.0, combined_sim * 1.1)
+            bert_sim = self._compute_embedding_similarity(emb1, emb2)
 
-        return combined_sim
+            # 5. Specification Similarity (Bonus/Malus)
+            spec_sim_score = self._calculate_spec_similarity(text1, text2)
+
+            # --- Combine Similarities --- #
+            # Adjust weights based on token similarity availability
+            weights = {
+                'leven': 0.15,
+                'tfidf': 0.15,
+                'token': 0.10 if use_token_sim else 0.0,
+                'bert': 0.60
+            }
+            # Renormalize weights if token sim is not used
+            if not use_token_sim:
+                total_weight = weights['leven'] + weights['tfidf'] + weights['bert']
+                weights['leven'] /= total_weight
+                weights['tfidf'] /= total_weight
+                weights['bert'] /= total_weight
+
+            combined_sim = (
+                weights['leven'] * leven_sim +
+                weights['tfidf'] * tfidf_sim +
+                weights['token'] * token_sim +
+                weights['bert'] * bert_sim
+            )
+
+            # Apply specification bonus/malus
+            if spec_sim_score > 0.8:
+                bonus = (spec_sim_score - 0.8) * 0.5
+                combined_sim = min(1.0, combined_sim + bonus * combined_sim)
+                self.logger.debug(f"Applying spec similarity bonus ({bonus:.2f}) for '{text1[:30]}' vs '{text2[:30]}'")
+            elif spec_sim_score < 0.2 and combined_sim > 0.5:
+                malus = (0.2 - spec_sim_score) * 0.5
+                combined_sim = max(0.0, combined_sim - malus * combined_sim)
+                self.logger.debug(f"Applying spec similarity malus ({malus:.2f}) for '{text1[:30]}' vs '{text2[:30]}'")
+
+            # Final clipping
+            final_sim = max(0.0, min(1.0, combined_sim))
+
+            self.logger.debug(f"Text similarity details for ('{text1[:30]}...', '{text2[:30]}...'): "
+                             f"Leven={leven_sim:.3f}, TFIDF={tfidf_sim:.3f}, Token={token_sim:.3f}, "
+                             f"BERT={bert_sim:.3f}, Spec={spec_sim_score:.3f}, Combined={final_sim:.3f}")
+
+            return float(final_sim)
+
+        except Exception as e:
+            self.logger.error(f"Error in _calculate_similarity_logic for '{text1[:50]}...' and '{text2[:50]}...': {e}", exc_info=True)
+            return 0.0
+
+    def _compute_embedding_similarity(self, emb1: np.ndarray, emb2: np.ndarray) -> float:
+        """Computes cosine similarity between two embeddings."""
+        try:
+            # Ensure embeddings are numpy arrays
+            emb1 = np.asarray(emb1)
+            emb2 = np.asarray(emb2)
+
+            # Normalize embeddings for cosine similarity calculation (more stable)
+            norm_emb1 = emb1 / np.linalg.norm(emb1)
+            norm_emb2 = emb2 / np.linalg.norm(emb2)
+
+            # Calculate cosine similarity
+            similarity = np.dot(norm_emb1, norm_emb2)
+
+            # Clip similarity to [0, 1] range (cosine sim is [-1, 1])
+            return max(0.0, min(1.0, float(similarity)))
+        except Exception as e:
+            self.logger.error(f"Error computing embedding similarity: {e}", exc_info=True)
+            return 0.0
 
     def _calculate_token_similarity(self, text1: str, text2: str) -> float:
         """토큰화 기반 유사도 계산 (transformers tokenizer 활용)"""
@@ -288,62 +515,70 @@ class TextMatcher:
         spec = re.sub(r"[^0-9a-z×x]", "", spec)
         return spec
 
-    def _get_embedding(self, text: str) -> np.ndarray:
-        """텍스트 임베딩 계산 (캐시 활용)"""
-        if self.cache:
-            cache_key = (
-                f"text_embedding|{text}|{'ko_sbert' if self.use_ko_sbert else 'multi'}"
-            )
-            cached_embedding = self.cache.get(cache_key)
-            if cached_embedding is not None:
-                return cached_embedding
+    def _get_embedding(self, text: str) -> Optional[np.ndarray]:
+        """Gets the SBERT embedding for a text, using cache if available."""
+        if self.model is None:
+            self.logger.error("SBERT model not loaded, cannot get embedding.")
+            return None
+        if not text:
+            return None
 
-            embedding = self.model.encode(text, convert_to_numpy=True)
-            self.cache.set(cache_key, embedding)
-            return embedding
+        # Define the core embedding logic
+        def embedding_logic(t):
+            try:
+                embedding = self.model.encode(t, convert_to_numpy=True)
+                return embedding
+            except Exception as e:
+                self.logger.error(f"Failed to encode text for embedding: '{t[:100]}...': {e}", exc_info=True)
+                return None
+
+        if self.cache:
+            # Use cache if available
+            cache_key = f"sbert_emb_{hashlib.md5(text.encode()).hexdigest()}"
+            # Assuming cache can handle numpy arrays
+            cached_embedding = cache_result(self.cache, key=cache_key)(embedding_logic)
+            return cached_embedding(text)
         else:
-            return self.model.encode(text, convert_to_numpy=True)
+            # Calculate directly if no cache
+            return embedding_logic(text)
 
     def _normalize_text(self, text: str) -> str:
-        """한국어 특화 텍스트 정규화"""
-        # 소문자 변환
-        text = text.lower()
-
-        # 브랜드 변형 치환 (최적화된 순서)
-        for brand, aliases in self.brand_aliases.items():
-            # 가장 긴 별칭부터 처리 (부분 매칭 방지)
-            sorted_aliases = sorted(aliases, key=len, reverse=True)
-            for alias in sorted_aliases:
-                if alias in text:
-                    text = text.replace(alias, brand)
-                    break  # 한 번만 치환하고 다음 브랜드로
-
-        # 한국어 형태소 분석을 통한 정규화
+        """Normalize text by lowercasing, removing special chars, and optionally stemming/morph analysis."""
+        if not text:
+            return ""
         try:
-            # 명사, 형용사, 동사만 추출
-            pos_tags = self.okt.pos(text, norm=True, stem=True)
-            filtered_words = [
-                word for word, pos in pos_tags if pos in ["Noun", "Adjective", "Verb"]
-            ]
+            # Lowercase
+            text = text.lower()
 
-            # 불용어 제거 및 정규화된 텍스트 재구성
-            if filtered_words:
-                text = " ".join(filtered_words)
+            # Replace brand aliases
+            for brand, aliases in self.brand_aliases.items():
+                for alias in aliases:
+                    # Use word boundaries to avoid partial matches like 'samsung' in 'samsungelectronics'
+                    text = re.sub(r'\b' + re.escape(alias) + r'\b', brand, text)
+
+            # Remove special characters (keep spaces, alphanumeric, Hangul)
+            # Improved regex to keep relevant characters
+            text = re.sub(r'[^\w\s가-힣一-龥]', ' ', text)
+
+            # Optional: Korean Morphological Analysis or Stemming
+            if self.okt:
+                # Use Okt for more accurate Korean tokenization/normalization
+                # Consider using norm() or stem=True based on desired level of normalization
+                morphs = self.okt.morphs(text, norm=True, stem=self.use_stemming)
+                text = ' '.join(morphs)
+            elif self.use_stemming:
+                 # Basic stemming (less accurate for Korean) - Placeholder if needed
+                 self.logger.warning("Basic stemming requested but Okt not available. Stemming might be inaccurate.")
+                 # Add a basic stemming logic if required, e.g., using a simple stemmer
+                 pass
+
+            # Remove extra whitespace
+            text = re.sub(r'\s+', ' ', text).strip()
+
+            return text
         except Exception as e:
-            self.logger.warning(f"형태소 분석 실패: {e}")
-            # 형태소 분석 오류 시 기존 처리 방식 사용
-            pass
-
-        # 특수 문자 제거
-        text = self.special_char_pattern.sub(" ", text)
-
-        # 숫자 정규화 (숫자 시퀀스를 #으로 치환)
-        text = self.number_pattern.sub("#", text)
-
-        # 과도한 공백 제거
-        text = " ".join(text.split())
-
-        return text
+            self.logger.error(f"Error normalizing text: '{text[:100]}...': {e}", exc_info=True)
+            return text # Return original text on error
 
     def extract_key_terms(self, text: str) -> List[str]:
         """Extract key terms from product text"""

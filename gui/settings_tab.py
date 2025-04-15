@@ -14,9 +14,10 @@ class SettingsTabWidget(QWidget):
     settings_changed = pyqtSignal(str, object)  # Signal emitted when settings change
     profile_changed = pyqtSignal(str)  # Signal emitted when profile changes
     
-    def __init__(self, settings, parent=None):
+    def __init__(self, settings, config, parent=None):
         super().__init__(parent)
         self.settings = settings
+        self.config = config
         self.current_category = None
         self.current_widgets = {}  # Currently displayed setting widgets
         self.initUI()
@@ -145,16 +146,88 @@ class SettingsTabWidget(QWidget):
         for key, setting_info in category.settings.items():
             label = QLabel(setting_info["display_name"])
             
+            # Get value from config based on category
+            value = None
+            if category.name == "processing":
+                if key == "thread_count":
+                    value = int(self.config.get("PROCESSING", "max_workers", fallback=setting_info["default"]))
+                elif key == "timeout":
+                    value = int(self.config.get("PROCESSING", "request_timeout", fallback=setting_info["default"]))
+                elif key == "batch_size":
+                    value = int(self.config.get("PROCESSING", "batch_size", fallback=setting_info["default"]))
+                elif key == "memory_limit":
+                    value = int(self.config.get("PROCESSING", "memory_limit_mb", fallback=setting_info["default"]))
+                elif key == "compression":
+                    value = bool(self.config.getboolean("PROCESSING", "enable_compression", fallback=setting_info["default"]))
+                elif key == "compression_level":
+                    value = int(self.config.get("PROCESSING", "compression_level", fallback=setting_info["default"]))
+                elif key == "auto_split_files":
+                    value = bool(self.config.getboolean("PROCESSING", "auto_split_files", fallback=setting_info["default"]))
+                elif key == "split_threshold":
+                    value = int(self.config.get("PROCESSING", "split_threshold", fallback=setting_info["default"]))
+            elif category.name == "matching":
+                if key == "text_similarity":
+                    value = float(self.config.get("MATCHING", "text_similarity_threshold", fallback=setting_info["default"]))
+                elif key == "image_similarity":
+                    value = float(self.config.get("MATCHING", "image_similarity_threshold", fallback=setting_info["default"]))
+                elif key == "text_weight":
+                    value = float(self.config.get("MATCHING", "text_weight", fallback=setting_info["default"]))
+                elif key == "image_weight":
+                    value = float(self.config.get("MATCHING", "image_weight", fallback=setting_info["default"]))
+            elif category.name == "gui":
+                if key == "window_width":
+                    value = int(self.config.get("GUI", "window_width", fallback=setting_info["default"]))
+                elif key == "window_height":
+                    value = int(self.config.get("GUI", "window_height", fallback=setting_info["default"]))
+                elif key == "max_log_lines":
+                    value = int(self.config.get("GUI", "max_log_lines", fallback=setting_info["default"]))
+                elif key == "enable_dark_mode":
+                    value = bool(self.config.getboolean("GUI", "enable_dark_mode", fallback=setting_info["default"]))
+                elif key == "show_progress_bar":
+                    value = bool(self.config.getboolean("GUI", "show_progress_bar", fallback=setting_info["default"]))
+                elif key == "auto_save_interval":
+                    value = int(self.config.get("GUI", "auto_save_interval", fallback=setting_info["default"]))
+                elif key == "debug_mode":
+                    value = bool(self.config.getboolean("GUI", "debug_mode", fallback=setting_info["default"]))
+                elif key == "show_column_mapping":
+                    value = bool(self.config.getboolean("GUI", "show_column_mapping", fallback=setting_info["default"]))
+            elif category.name == "scraping":
+                if key == "max_concurrent_requests":
+                    value = int(self.config.get("SCRAPING", "max_concurrent_requests", fallback=setting_info["default"]))
+                elif key == "extraction_timeout":
+                    value = int(self.config.get("SCRAPING", "extraction_timeout", fallback=setting_info["default"]))
+                elif key == "connect_timeout":
+                    value = int(self.config.get("SCRAPING", "connect_timeout", fallback=setting_info["default"]))
+                elif key == "read_timeout":
+                    value = int(self.config.get("SCRAPING", "read_timeout", fallback=setting_info["default"]))
+                elif key == "max_retries":
+                    value = int(self.config.get("SCRAPING", "max_retries", fallback=setting_info["default"]))
+                elif key == "politeness_delay":
+                    value = int(self.config.get("SCRAPING", "politeness_delay", fallback=setting_info["default"]))
+            elif category.name == "paths":
+                if key == "cache_dir":
+                    value = self.config.get("PATHS", "cache_dir", fallback=setting_info["default"])
+                elif key == "output_dir":
+                    value = self.config.get("PATHS", "output_dir", fallback=setting_info["default"])
+                elif key == "log_dir":
+                    value = self.config.get("PATHS", "log_dir", fallback=setting_info["default"])
+                elif key == "temp_dir":
+                    value = self.config.get("PATHS", "temp_dir", fallback=setting_info["default"])
+            
+            # Use default value if not found in config
+            if value is None:
+                value = self.settings.get(key, setting_info["default"])
+            
             # Create widget based on setting type
             widget = None
             if setting_info["type"] == "bool":
                 widget = QCheckBox()
-                widget.setChecked(self.settings.get(key, setting_info["default"]))
+                widget.setChecked(value)
                 widget.stateChanged.connect(lambda state, k=key: self.on_setting_changed(k, bool(state)))
             
             elif setting_info["type"] == "int":
                 widget = QSpinBox()
-                widget.setValue(self.settings.get(key, setting_info["default"]))
+                widget.setValue(value)
                 if setting_info["options"]:
                     widget.setRange(min(setting_info["options"]), max(setting_info["options"]))
                 else:
@@ -163,7 +236,7 @@ class SettingsTabWidget(QWidget):
             
             elif setting_info["type"] == "float":
                 widget = QDoubleSpinBox()
-                widget.setValue(self.settings.get(key, setting_info["default"]))
+                widget.setValue(value)
                 widget.setDecimals(2)
                 widget.setSingleStep(0.05)
                 if setting_info["options"]:
@@ -174,14 +247,14 @@ class SettingsTabWidget(QWidget):
             
             elif setting_info["type"] == "string":
                 widget = QLineEdit()
-                widget.setText(self.settings.get(key, setting_info["default"]))
+                widget.setText(value)
                 widget.textChanged.connect(lambda value, k=key: self.on_setting_changed(k, value))
             
             elif setting_info["type"] == "choice":
                 widget = QComboBox()
                 if setting_info["options"]:
                     widget.addItems(setting_info["options"])
-                    current_value = self.settings.get(key, setting_info["default"])
+                    current_value = value
                     try:
                         index = setting_info["options"].index(current_value)
                         widget.setCurrentIndex(index)

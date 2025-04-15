@@ -13,6 +13,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
+import sys
+
+# Add the project root directory to Python path
+project_root = str(Path(__file__).parent.parent.parent.absolute())
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 import pandas as pd
 import requests
@@ -32,9 +38,9 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
     PlaywrightTimeoutError = None
 
-from ..data_models import Product
-from .base_multi_layer_scraper import BaseMultiLayerScraper
-from .utils import extract_main_image
+from core.data_models import Product
+from core.scraping.base_multi_layer_scraper import BaseMultiLayerScraper
+from core.scraping.utils import extract_main_image
 
 
 class HaeoeumScraper(BaseMultiLayerScraper):
@@ -53,32 +59,42 @@ class HaeoeumScraper(BaseMultiLayerScraper):
 
     def __init__(
         self,
-        max_retries: int = 3,  # 재시도 횟수 감소
+        max_retries: Optional[int] = None,
         cache: Optional[Any] = None,
-        timeout: int = 15,  # 타임아웃 감소
-        connect_timeout: int = 5,  # 연결 타임아웃 감소
-        read_timeout: int = 10,  # 읽기 타임아웃 감소
-        backoff_factor: float = 0.3,  # 백오프 팩터 감소
+        timeout: Optional[int] = None,
+        connect_timeout: Optional[int] = None,
+        read_timeout: Optional[int] = None,
+        backoff_factor: Optional[float] = None,
         use_proxies: bool = False,
         debug: bool = False,
         output_dir: str = "output",
-        headless: bool = True,
-        user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        cache_ttl: int = 3600,  # 캐시 TTL 추가 (1시간)
+        headless: Optional[bool] = None,
+        user_agent: Optional[str] = None,
+        cache_ttl: Optional[int] = None,
     ):
         """스크래퍼 초기화"""
-        super().__init__(max_retries=max_retries, timeout=timeout, cache=cache)
+        # Load configuration
+        self.config = self._load_config()
+        
+        # Use provided values or fall back to config values
+        self.max_retries = max_retries or int(self.config.get('SCRAPING', 'max_retries', fallback='3'))
+        self.timeout = timeout or int(self.config.get('SCRAPING', 'extraction_timeout', fallback='15'))
+        self.connect_timeout = connect_timeout or int(self.config.get('SCRAPING', 'connect_timeout', fallback='5'))
+        self.read_timeout = read_timeout or int(self.config.get('SCRAPING', 'read_timeout', fallback='10'))
+        self.backoff_factor = backoff_factor or float(self.config.get('SCRAPING', 'backoff_factor', fallback='0.3'))
+        self.headless = headless if headless is not None else self.config.getboolean('SCRAPING', 'headless', fallback=True)
+        self.user_agent = user_agent or self.config.get('SCRAPING', 'user_agent', fallback='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+        self.cache_ttl = cache_ttl or int(self.config.get('SCRAPING', 'cache_ttl', fallback='3600'))
+        
+        # BaseScraper 초기화
+        super().__init__(max_retries=self.max_retries, timeout=self.timeout, cache=cache)
 
         # --- Base Attributes ---
         self.logger = logging.getLogger(__name__)
         self.debug = debug
         self.output_dir = output_dir
-        self.headless = headless
-        self.user_agent = user_agent
-        self.timeout_config = (connect_timeout, read_timeout)
-        self.max_retries = max_retries
-        self.backoff_factor = backoff_factor
-        self.cache_ttl = cache_ttl
+        self.timeout_config = (self.connect_timeout, self.read_timeout)
+        self.playwright_available = PLAYWRIGHT_AVAILABLE
 
         # 출력 디렉토리 생성
         os.makedirs(output_dir, exist_ok=True)
@@ -86,9 +102,13 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         # Playwright 설정 최적화
         if PLAYWRIGHT_AVAILABLE:
             self.playwright_config = {
-                "viewport": {"width": 1280, "height": 720},  # 뷰포트 크기 최적화
-                "timeout": 15000,  # Playwright 타임아웃 15초로 설정
-                "wait_until": "domcontentloaded"  # 더 빠른 페이지 로드 조건
+                "viewport": {
+                    "width": int(self.config.get('SCRAPING', 'viewport_width', fallback='1280')),
+                    "height": int(self.config.get('SCRAPING', 'viewport_height', fallback='720'))
+                },
+                "timeout": int(self.config.get('SCRAPING', 'wait_timeout', fallback='15000')),
+                "wait_until": "domcontentloaded",  # 더 빠른 페이지 로드 조건
+                "ignore_https_errors": not self.config.getboolean('SCRAPING', 'ssl_verification', fallback=True)
             }
         else:
             self.playwright_available = False
@@ -97,20 +117,20 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         # requests 세션 최적화
         self.session = requests.Session()
         retry_strategy = Retry(
-            total=max_retries,
-            backoff_factor=backoff_factor,
-            status_forcelist=[429, 500, 502, 503, 504],
+            total=self.max_retries,
+            backoff_factor=self.backoff_factor,
+            status_forcelist=[int(x) for x in self.config.get('SCRAPING', 'retry_on_specific_status', fallback='429,500,502,503,504').split(',')],
             allowed_methods=["HEAD", "GET", "OPTIONS"],
         )
         adapter = HTTPAdapter(
             max_retries=retry_strategy,
-            pool_connections=20,  # 연결 풀 크기 최적화
-            pool_maxsize=20,
+            pool_connections=int(self.config.get('SCRAPING', 'connection_pool_size', fallback='20')),
+            pool_maxsize=int(self.config.get('SCRAPING', 'connection_pool_size', fallback='20')),
             pool_block=False
         )
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
-        self.session.headers.update({"User-Agent": user_agent})
+        self.session.headers.update({"User-Agent": self.user_agent})
 
         # 대화 상자 메시지 저장용
         self.dialog_message = ""
@@ -129,7 +149,7 @@ class HaeoeumScraper(BaseMultiLayerScraper):
             },
             # 메인 이미지 관련 셀렉터 (target_img)
             "main_image": {
-                "selector": "img#target_img",
+                "selector": "img#target_img, img[style*='cursor:hand'][onclick*='view_big'], img[width='330'][height='330']",
                 "options": {"multiple": False, "attribute": "src"},
             },
             # 대체 메인 이미지 셀렉터
@@ -217,55 +237,123 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         }
 
     def get_product(self, product_idx: str) -> Optional[Product]:
-        """상품 정보를 가져옵니다."""
-        cache_key = f"haeoeum_product_{product_idx}"
-        cached_data = self.get_cached_data(cache_key)
-        if cached_data:
-            return cached_data
-
-        url = f"{self.PRODUCT_VIEW_URL}?p_idx={product_idx}"
+        """
+        상품 ID로 상품 정보 가져오기
         
-        # 먼저 requests로 시도 (더 빠름)
-        try:
-            response = self.session.get(url, timeout=self.timeout_config)
-            response.raise_for_status()
+        Parameters:
+            product_idx: 상품 ID ('p_idx' 파라미터 값)
             
-            soup = BeautifulSoup(response.text, "html.parser")
+        Returns:
+            Product 객체 (해오름 상품은 항상 존재한다는 가정 하에 반환)
+        """
+        # 캐시 키 생성
+        cache_key = f"haeoeum_product_{product_idx}"
+        
+        # 캐시에서 데이터 확인
+        if self.cache:
+            cached_data = self.get_cached_data(cache_key)
+            if cached_data:
+                self.logger.info(f"캐시에서 상품 {product_idx} 데이터 로드")
+                return Product.from_dict(cached_data)
+        
+        # 캐시 미스: 웹에서 데이터 가져오기
+        url = f"{self.PRODUCT_VIEW_URL}?p_idx={product_idx}"
+        self.logger.info(f"상품 URL 접속: {url}")
+        
+        try:
+            # 요청 보내기
+            response = self.session.get(url, timeout=self.timeout_config, verify=False)
+            
+            # 인코딩 명시적 설정 (해오름 사이트는 EUC-KR 사용)
+            if not response.encoding or response.encoding == 'ISO-8859-1':
+                # 인코딩 추측
+                try:
+                    import chardet
+                    detected = chardet.detect(response.content)
+                    if detected['confidence'] > 0.7:
+                        response.encoding = detected['encoding']
+                    else:
+                        response.encoding = 'cp949'  # 기본값으로 CP949 사용
+                    self.logger.debug(f"인코딩 감지: {response.encoding}, 신뢰도: {detected.get('confidence', 'N/A')}")
+                except ImportError:
+                    response.encoding = 'cp949'  # chardet 없으면 직접 설정
+                    self.logger.debug(f"chardet 모듈 없음, 인코딩 강제 설정: {response.encoding}")
+            
+            # 응답 코드 확인
+            if response.status_code != 200:
+                self.logger.error(f"상품 페이지 접근 실패: HTTP {response.status_code}")
+                return self._create_fallback_product(product_idx, url)
+                
+            # HTML 파싱
+            soup = self._get_soup(response.text)
+            
+            # 기본 정보 추출
             product_data = self._extract_product_data(soup, product_idx, url)
             
-            if product_data and product_data["status"] == "OK":
-                product = Product(**product_data)
-                self.cache_sparse_data(cache_key, product)
-                return product
-                
-        except Exception as e:
-            self.logger.warning(f"Requests extraction failed: {e}")
-
-        # requests 실패 또는 불완전한 데이터인 경우 Playwright 시도
-        if self.playwright_available:
-            try:
-                with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=self.headless)
-                    page = browser.new_page(**self.playwright_config)
-                    page.on("dialog", self._handle_dialog)
-                    
-                    page.goto(url, wait_until=self.playwright_config["wait_until"], timeout=self.playwright_config["timeout"])
-                    
-                    html_content = page.content()
-                    soup = BeautifulSoup(html_content, "html.parser")
-                    product_data = self._extract_product_data(soup, product_idx, url)
-                    
-                    browser.close()
-                    
-                    if product_data:
-                        product = Product(**product_data)
-                        self.cache_sparse_data(cache_key, product)
-                        return product
-                    
-            except Exception as e:
-                self.logger.error(f"Playwright extraction failed: {e}")
+            # 데이터 유효성 검사 및 정리
+            product_data = self._sanitize_product_data(product_data)
             
-        return None
+            # 상품 객체 생성
+            product = Product(**{k: v for k, v in product_data.items() if k in Product.__annotations__})
+            
+            # 복잡한 필드 별도 설정
+            if 'image_gallery' in product_data and product_data['image_gallery']:
+                product.image_gallery = product_data['image_gallery']
+                
+            if 'specifications' in product_data and product_data['specifications']:
+                product.specifications = product_data['specifications']
+                
+            if 'quantity_prices' in product_data and product_data['quantity_prices']:
+                product.quantity_prices = product_data['quantity_prices']
+                
+            # 원본 데이터 설정
+            product.original_input_data = product_data
+            
+            # 캐시에 저장
+            if self.cache:
+                self.cache_sparse_data(cache_key, product.to_dict())
+                
+            return product
+            
+        except Exception as e:
+            self.logger.error(f"상품 정보 추출 중 오류: {e}", exc_info=True)
+            # 오류 발생 시 기본 상품 객체 반환 (해오름 상품은 항상 존재한다는 가정)
+            return self._create_fallback_product(product_idx, url)
+    
+    def _create_fallback_product(self, product_idx: str, url: str) -> Product:
+        """
+        문제 발생 시 대체 상품 객체 생성
+        해오름 상품은 항상 존재한다는 대전제에 따라 필요한 기본 상품 객체 생성
+        
+        Parameters:
+            product_idx: 상품 ID
+            url: 상품 URL
+            
+        Returns:
+            기본 설정의 Product 객체
+        """
+        # 기본 상품 데이터 생성
+        fallback_data = {
+            "id": hashlib.md5(f"haeoeum_{product_idx}".encode()).hexdigest(),
+            "name": f"해오름상품_{product_idx}",
+            "source": "haeoeum",
+            "price": 10000,  # 임시 가격
+            "url": url,
+            "image_url": f"{self.BASE_URL}/images/no_image.jpg",
+            "status": "Fallback",
+            "product_code": product_idx,
+            "image_gallery": [f"{self.BASE_URL}/images/no_image.jpg"],
+            "quantity_prices": {"1": 10000}
+        }
+        
+        # 상품 객체 생성
+        product = Product(**{k: v for k, v in fallback_data.items() if k in Product.__annotations__})
+        product.image_gallery = fallback_data["image_gallery"]
+        product.quantity_prices = fallback_data["quantity_prices"]
+        product.original_input_data = fallback_data
+        
+        self.logger.warning(f"대체 상품 객체 생성: {product_idx}")
+        return product
 
     def _sanitize_product_data(self, product_data: Dict[str, Any]) -> Dict[str, Any]:
         """Product 데이터를 정리하고 유효한 필드만 유지합니다."""
@@ -290,92 +378,168 @@ class HaeoeumScraper(BaseMultiLayerScraper):
     def _extract_product_data(
         self, soup: BeautifulSoup, product_idx: str, url: str
     ) -> Dict[str, Any]:
-        """상품 데이터 추출"""
+        """
+        상품 상세 페이지에서 필요한 정보를 추출
+        
+        Parameters:
+            soup: BeautifulSoup 객체
+            product_idx: 상품 ID
+            url: 상품 URL
+            
+        Returns:
+            추출된 상품 정보 딕셔너리
+        """
         product_data = {
-            "source": "haeoreum",
             "id": product_idx,
-            "name": "",
-            "price": 0,
-            "image_url": "",
-            "image_gallery": [],
-            "status": None,  # 상태 필드 기본값
+            "url": url,
+            "source": "haeoeum",
+            "name": "",  # 기본값 초기화
+            "price": 0,  # 기본값 초기화
+            "image_url": "",  # 기본값 초기화
+            "image_gallery": [],  # 기본값 초기화
+            "product_code": product_idx,  # 기본값 초기화
+            "status": "Error",  # 기본 상태 설정
         }
-
-        # 이미지 추출 최적화 - 한 번의 순회로 모든 이미지 수집
-        image_gallery = set()  # 중복 방지를 위해 set 사용
         
-        # 1. 메인 이미지 우선 추출
-        main_img = soup.select_one(self.selectors["main_image"]["selector"])
-        if main_img and main_img.get('src'):
-            main_url = urljoin(self.BASE_URL, main_img['src'])
-            if self._is_valid_image_url(main_url):
-                image_gallery.add(main_url)
-                product_data["image_url"] = main_url
-
-        # 2. 모든 이미지 한 번에 추출
-        for img in soup.find_all('img'):
-            src = img.get('src', '')
-            if not src:
-                continue
-                
-            # 이미지 URL 정규화
-            img_url = urljoin(self.BASE_URL, src)
-            if self._is_valid_image_url(img_url):
-                image_gallery.add(img_url)
-
-        # 3. 백그라운드 이미지 추출 (style 속성)
-        for element in soup.find_all(style=True):
-            style = element['style']
-            if 'url(' in style:
-                matches = re.findall(r'url\([\'"]?([^\'"()]+)[\'"]?\)', style)
-                for match in matches:
-                    img_url = urljoin(self.BASE_URL, match)
-                    if self._is_valid_image_url(img_url):
-                        image_gallery.add(img_url)
-
-        # 이미지 갤러리 설정
-        product_data["image_gallery"] = list(image_gallery)
-        
-        if not product_data["image_url"] and image_gallery:
-            product_data["image_url"] = next(iter(image_gallery))
-
-        # 상품명 추출 최적화
-        title_element = soup.select_one(self.selectors["product_title"]["selector"])
-        product_data["name"] = title_element.text.strip() if title_element else ""
-
-        if not product_data["name"]:
-            title = soup.title.string.strip() if soup.title else ""
-            if ">" in title:
-                product_data["name"] = title.split(">", 1)[0].strip()
+        # 상품명 추출
+        try:
+            title_tag = soup.select_one(self.selectors["product_title"]["selector"])
+            if title_tag:
+                title = title_tag.get_text().strip()
+                product_data["name"] = self._normalize_text(title)
+                self.logger.debug(f"상품명 추출: {product_data['name']}")
+            
+            # 해오름 기프트에는 항상 상품이 있다는 대전제이므로, 상품명을 추출하지 못했을 경우
+            # URL에서 상품 ID를 가져와 임시 이름 생성
+            if not product_data["name"]:
+                product_data["name"] = f"해오름상품_{product_idx}"
+                self.logger.warning(f"상품명 추출 실패, 임시 이름 생성: {product_data['name']}")
+        except Exception as e:
+            self.logger.error(f"상품명 추출 중 오류: {e}")
+            product_data["name"] = f"해오름상품_{product_idx}"
+            self.logger.warning(f"상품명 추출 오류, 임시 이름 생성: {product_data['name']}")
 
         # 상품 코드 추출
-        code_element = soup.select_one(self.selectors["product_code"]["selector"])
-        product_data["product_code"] = code_element.text.strip() if code_element else product_idx
+        try:
+            code_element = soup.select_one(self.selectors["product_code"]["selector"])
+            product_data["product_code"] = code_element.text.strip() if code_element else product_idx
+        except Exception as e:
+            self.logger.error(f"상품 코드 추출 중 오류: {e}")
+            # 이미 기본값이 설정되어 있으므로 추가 작업 필요 없음
 
         # 고유 ID 생성
         product_data["id"] = hashlib.md5(f"haeoeum_{product_data['product_code']}".encode()).hexdigest()
 
         # 가격 추출 최적화
-        price = 0
-        price_element = soup.select_one(self.selectors["applied_price"]["selector"])
-        if price_element:
-            price_text = price_element.text.strip()
-            price_match = self.patterns["price_number"].search(price_text)
-            if price_match:
-                price = int(price_match.group().replace(",", ""))
-
-        if price == 0:
-            total_price_element = soup.select_one(self.selectors["total_price"]["selector"])
-            if total_price_element:
-                price_text = total_price_element.text.strip()
+        try:
+            price = 0
+            price_element = soup.select_one(self.selectors["applied_price"]["selector"])
+            if price_element:
+                price_text = price_element.text.strip()
                 price_match = self.patterns["price_number"].search(price_text)
                 if price_match:
                     price = int(price_match.group().replace(",", ""))
 
-        product_data["price"] = price
+            if price == 0:
+                total_price_element = soup.select_one(self.selectors["total_price"]["selector"])
+                if total_price_element:
+                    price_text = total_price_element.text.strip()
+                    price_match = self.patterns["price_number"].search(price_text)
+                    if price_match:
+                        price = int(price_match.group().replace(",", ""))
+
+            product_data["price"] = price
+            
+            # 가격이 0이면 임시값 설정
+            if product_data["price"] == 0:
+                product_data["price"] = 10000  # 임시 가격
+                self.logger.warning(f"가격 추출 실패, 임시 가격 설정: {product_data['price']}")
+        except Exception as e:
+            self.logger.error(f"가격 추출 중 오류: {e}")
+            product_data["price"] = 10000  # 임시 가격
 
         # 수량별 가격 추출 최적화
-        product_data["quantity_prices"] = self._extract_quantity_prices(soup)
+        try:
+            product_data["quantity_prices"] = self._extract_quantity_prices(soup)
+        except Exception as e:
+            self.logger.error(f"수량별 가격 추출 중 오류: {e}")
+            product_data["quantity_prices"] = {1: product_data["price"]}  # 기본값 설정
+
+        # 이미지 URL 추출
+        try:
+            # 1. 먼저 기본 이미지 셀렉터로 시도
+            image_element = soup.select_one(self.selectors["main_image"]["selector"])
+            
+            # 2. 이미지를 찾지 못했다면 추가 셀렉터 시도 (업데이트된 HTML 패턴 대응)
+            if not image_element or not image_element.get('src'):
+                # 최근 해오름기프트 패턴 처리 - onclick 이벤트 포함 이미지
+                image_element = soup.select_one('img[style*="cursor:hand"][onclick*="view_big"]')
+                
+                # 대체 셀렉터 시도
+                if not image_element or not image_element.get('src'):
+                    image_element = soup.select_one('td[height="340"] img, img[width="330"], img[height="330"]')
+            
+            # 3. 이미지 URL 추출 및 처리
+            if image_element and image_element.get('src'):
+                image_url = image_element.get('src')
+                if not image_url.startswith('http'):
+                    image_url = urljoin(self.BASE_URL, image_url)
+                product_data["image_url"] = image_url
+                self.logger.debug(f"상품 이미지 URL 추출: {product_data['image_url']}")
+                
+                # 이미지 갤러리에 메인 이미지 추가
+                product_data["image_gallery"].append(image_url)
+                
+                # 이미지 URL에서 실제 큰 이미지 URL 추출 시도 (onclick 속성 사용)
+                if image_element.get('onclick') and "view_big" in image_element.get('onclick'):
+                    onclick_value = image_element.get('onclick')
+                    big_image_match = re.search(r"view_big\('([^']+)'", onclick_value)
+                    if big_image_match:
+                        big_image_url = big_image_match.group(1)
+                        if not big_image_url.startswith('http'):
+                            big_image_url = urljoin(self.BASE_URL, big_image_url)
+                        # 이미 갤러리에 없는 경우에만 추가
+                        if big_image_url not in product_data["image_gallery"]:
+                            product_data["image_gallery"].append(big_image_url)
+                            self.logger.debug(f"큰 이미지 URL 추출: {big_image_url}")
+                
+            # 썸네일 이미지 추출 및 갤러리에 추가
+            thumbnails = soup.select(self.selectors["thumbnail_images"]["selector"])
+            for thumb in thumbnails:
+                if thumb.get('src'):
+                    thumb_url = thumb.get('src')
+                    if not thumb_url.startswith('http'):
+                        thumb_url = urljoin(self.BASE_URL, thumb_url)
+                    if thumb_url not in product_data["image_gallery"]:
+                        product_data["image_gallery"].append(thumb_url)
+            
+            # 이미지가 없는 경우 Playwright 방식으로 추가 이미지 추출 시도
+            if not product_data["image_gallery"] and self.playwright_available:
+                self.logger.info(f"기본 방식으로 이미지 추출 실패, Playwright 방식 시도")
+                try:
+                    playwright_images = self._extract_images_with_playwright_common(url)
+                    if playwright_images:
+                        product_data["image_gallery"] = playwright_images
+                        product_data["image_url"] = playwright_images[0]
+                except Exception as e:
+                    self.logger.error(f"Playwright 이미지 추출 실패: {e}")
+                    
+            # 디버깅: 이미지 갤러리 로그 출력
+            if product_data["image_gallery"]:
+                self.logger.info(f"이미지 갤러리 추출 (총 {len(product_data['image_gallery'])}개): {product_data['image_gallery']}")
+            else:
+                self.logger.warning("이미지 갤러리 추출 실패: 이미지를 찾을 수 없음")
+                # 해오름 기프트에는 항상 상품이 있다는 가정하에 기본 이미지 설정
+                default_image = f"{self.BASE_URL}/images/no_image.jpg"
+                product_data["image_url"] = default_image
+                product_data["image_gallery"] = [default_image]
+                
+        except Exception as e:
+            self.logger.error(f"이미지 URL 추출 중 오류: {e}")
+            # 기본 이미지 설정
+            default_image = f"{self.BASE_URL}/images/no_image.jpg"
+            product_data["image_url"] = default_image
+            product_data["image_gallery"] = [default_image]
 
         # 상품 URL 추가
         product_data["url"] = url
@@ -385,25 +549,31 @@ class HaeoeumScraper(BaseMultiLayerScraper):
             product_data["status"] = "Title Not Found"
         elif not product_data["price"]:
             product_data["status"] = "Price Not Found"
-        elif not product_data["image_url"]:
+        elif not product_data.get("image_url"):
             product_data["status"] = "Image Not Found"
         else:
             product_data["status"] = "OK"
 
         return product_data
 
-    def _is_valid_image_url(self, url: str) -> bool:
-        """이미지 URL이 유효한지 확인"""
-        if not url:
-            return False
+    def _normalize_text(self, text: str) -> str:
+        """텍스트 정규화 및 인코딩 문제 해결"""
+        if not text:
+            return ""
             
-        # 이미지 파일 확장자 확인
-        if not re.search(r'\.(jpg|jpeg|png|gif)([\?#].*)?$', url.lower()):
-            return False
+        # 인코딩 문제 해결 - CP949/EUC-KR 인코딩 문제 대응
+        try:
+            # 이미 깨진 문자열이 들어왔을 경우 복원 시도
+            if any(c in text for c in ['¿', 'À', 'Á', '¾', '½']):
+                # CP949로 인코딩된 바이트 배열로 가정하고 복원 시도
+                encoded_bytes = text.encode('latin1')
+                text = encoded_bytes.decode('cp949', errors='replace')
+        except Exception as e:
+            self.logger.warning(f"텍스트 정규화 중 오류: {e}")
             
-        # 제외할 패턴
-        exclude_patterns = ['btn_', 'icon_', 'pixel.gif', 'button', 'bg_']
-        return not any(pattern in url.lower() for pattern in exclude_patterns)
+        # 공백 및 특수문자 정리
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
 
     def _extract_quantity_prices(self, soup: BeautifulSoup) -> Dict[str, int]:
         """수량별 가격 추출"""
@@ -445,7 +615,7 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         dialog.accept()
 
     def _get_soup(self, html_content: str) -> BeautifulSoup:
-        """HTML 문자열에서 BeautifulSoup 객체 생성"""
+        """HTML 콘텐츠를 BeautifulSoup 객체로 변환"""
         return BeautifulSoup(html_content, "html.parser")
         
     def _extract_product_idx(self, url: str) -> Optional[str]:

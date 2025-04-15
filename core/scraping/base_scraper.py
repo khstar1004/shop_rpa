@@ -3,6 +3,8 @@
 """
 
 import logging
+import configparser
+import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 import requests
@@ -16,19 +18,39 @@ class BaseScraper(ABC):
     
     def __init__(
         self, 
-        max_retries: int = 3,  # 재시도 횟수 감소
-        timeout: int = 15,     # 타임아웃 감소
+        max_retries: Optional[int] = None,
+        timeout: Optional[int] = None,
         cache: Optional[Any] = None,
-        connect_timeout: int = 5,
-        read_timeout: int = 10
+        connect_timeout: Optional[int] = None,
+        read_timeout: Optional[int] = None
     ):
-        self.max_retries = max_retries
-        self.timeout = (connect_timeout, read_timeout)
+        # Load configuration
+        self.config = self._load_config()
+        
+        # Use provided values or fall back to config values
+        self.max_retries = max_retries or int(self.config.get('SCRAPING', 'max_retries', fallback='3'))
+        self.timeout = (connect_timeout or int(self.config.get('SCRAPING', 'connect_timeout', fallback='30')),
+                       read_timeout or int(self.config.get('SCRAPING', 'read_timeout', fallback='30')))
         self.cache = cache
         self.logger = logging.getLogger(self.__class__.__name__)
         
+        # Configure logging
+        logging.basicConfig(
+            level=getattr(logging, self.config.get('logging', 'level', fallback='INFO')),
+            format=self.config.get('logging', 'format', fallback='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        )
+        
         # 공유 세션 초기화
         self.session = self._create_optimized_session()
+        
+    def _load_config(self) -> configparser.ConfigParser:
+        """Load configuration from config.ini"""
+        config = configparser.ConfigParser()
+        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config.ini')
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Configuration file not found at {config_path}")
+        config.read(config_path, encoding='utf-8')
+        return config
         
     def _create_optimized_session(self) -> requests.Session:
         """최적화된 요청 세션을 생성합니다."""
@@ -37,16 +59,16 @@ class BaseScraper(ABC):
         # 재시도 전략 구성
         retry_strategy = Retry(
             total=self.max_retries,
-            backoff_factor=0.3,  # 재시도 간격을 더 짧게 설정
-            status_forcelist=[429, 500, 502, 503, 504],
+            backoff_factor=float(self.config.get('SCRAPING', 'backoff_factor', fallback='0.3')),
+            status_forcelist=[int(x) for x in self.config.get('SCRAPING', 'retry_on_specific_status', fallback='429,503,502,500').split(',')],
             allowed_methods=["HEAD", "GET", "OPTIONS"]
         )
         
         # 어댑터 구성
         adapter = HTTPAdapter(
             max_retries=retry_strategy,
-            pool_connections=10,
-            pool_maxsize=10,
+            pool_connections=int(self.config.get('SCRAPING', 'connection_pool_size', fallback='10')),
+            pool_maxsize=int(self.config.get('SCRAPING', 'connection_pool_size', fallback='10')),
             pool_block=False
         )
         
@@ -54,9 +76,15 @@ class BaseScraper(ABC):
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         
+        # SSL 검증 설정
+        session.verify = self.config.getboolean('SCRAPING', 'ssl_verification', fallback=True)
+        
+        # 리다이렉트 설정
+        session.max_redirects = int(self.config.get('SCRAPING', 'max_redirects', fallback='5'))
+        
         # 기본 헤더 설정
         session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "User-Agent": self.config.get('SCRAPING', 'user_agent', fallback='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
         })
         
         return session

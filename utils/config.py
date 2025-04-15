@@ -19,222 +19,122 @@ def load_config() -> Dict[str, Any]:
     try:
         config.read(config_path, encoding="utf-8")
     except Exception as e:
-        # Add 'from e' to the exception
-        # Disable W0719 as raising a general Exception with context is acceptable here.
-        raise Exception(f"Failed to read config file: {e}") from e # pylint: disable=broad-exception-raised
+        raise Exception(f"Failed to read config file: {e}") from e
 
     # Convert string values to appropriate types
     processed_config = {}
 
     try:
-        # API section - Load keys from environment variables first, then config.ini as fallback
-        processed_config["API"] = {
-            "naver_client_id": os.getenv(
-                "NAVER_CLIENT_ID", config["API"].get("NAVER_CLIENT_ID")
-            ),
-            "naver_client_secret": os.getenv(
-                "NAVER_CLIENT_SECRET", config["API"].get("NAVER_CLIENT_SECRET")
-            ),
+        # API section
+        processed_config["api"] = {
+            "naver_client_id": os.getenv("NAVER_CLIENT_ID", config["API"].get("naver_client_id")),
+            "naver_client_secret": os.getenv("NAVER_CLIENT_SECRET", config["API"].get("naver_client_secret")),
         }
-        # Add other API keys if needed
 
         # MATCHING section
-        processed_config["MATCHING"] = {
-            "TEXT_SIMILARITY_THRESHOLD": float(
-                config["MATCHING"]["TEXT_SIMILARITY_THRESHOLD"]
-            ),
-            "IMAGE_SIMILARITY_THRESHOLD": float(
-                config["MATCHING"]["IMAGE_SIMILARITY_THRESHOLD"]
-            ),
-            "TEXT_WEIGHT": float(config["MATCHING"]["TEXT_WEIGHT"]),
-            "IMAGE_WEIGHT": float(config["MATCHING"]["IMAGE_WEIGHT"]),
+        processed_config["matching"] = {
+            "text_similarity_threshold": float(config["MATCHING"]["text_similarity_threshold"]),
+            "image_similarity_threshold": float(config["MATCHING"]["image_similarity_threshold"]),
+            "text_weight": float(config["MATCHING"]["text_weight"]),
+            "image_weight": float(config["MATCHING"]["image_weight"]),
         }
 
         # PROCESSING section
-        processed_config["PROCESSING"] = {
-            "MAX_WORKERS": int(config["PROCESSING"]["MAX_WORKERS"]),
-            "MAX_RETRIES": int(config["PROCESSING"]["MAX_RETRIES"]),
-            "CACHE_DURATION": int(config["PROCESSING"]["CACHE_DURATION"]),
-            "CACHE_MAX_SIZE_MB": int(config["PROCESSING"]["CACHE_MAX_SIZE_MB"]),
-            "REQUEST_TIMEOUT": int(config["PROCESSING"]["REQUEST_TIMEOUT"]),
-            "BATCH_SIZE": int(config["PROCESSING"]["BATCH_SIZE"]),
-            "MEMORY_LIMIT_MB": int(config["PROCESSING"]["MEMORY_LIMIT_MB"]),
-            "ENABLE_COMPRESSION": config["PROCESSING"]["ENABLE_COMPRESSION"].lower()
-            == "true",
-            "COMPRESSION_LEVEL": int(config["PROCESSING"]["COMPRESSION_LEVEL"]),
+        processed_config["processing"] = {
+            "max_workers": int(config["PROCESSING"]["max_workers"]),
+            "max_retries": int(config["PROCESSING"]["max_retries"]),
+            "cache_duration": int(config["PROCESSING"]["cache_duration"]),
+            "cache_max_size_mb": int(config["PROCESSING"]["cache_max_size_mb"]),
+            "request_timeout": int(config["PROCESSING"]["request_timeout"]),
+            "batch_size": int(config["PROCESSING"]["batch_size"]),
+            "memory_limit_mb": int(config["PROCESSING"]["memory_limit_mb"]),
+            "enable_compression": config["PROCESSING"]["enable_compression"].lower() == "true",
+            "compression_level": int(config["PROCESSING"]["compression_level"]),
+            "auto_split_files": config["PROCESSING"]["auto_split_files"].lower() == "true",
+            "split_threshold": int(config["PROCESSING"]["split_threshold"]),
+            "auto_merge_results": config["PROCESSING"]["auto_merge_results"].lower() == "true",
+            "auto_clean_product_names": config["PROCESSING"]["auto_clean_product_names"].lower() == "true",
         }
-
-        # Add new settings for file handling based on manual workflow
-        if "FILE_HANDLING" in config:
-            processed_config["PROCESSING"]["AUTO_SPLIT_FILES"] = (
-                config["FILE_HANDLING"].get("AUTO_SPLIT_FILES", "true").lower()
-                == "true"
-            )
-            processed_config["PROCESSING"]["SPLIT_THRESHOLD"] = int(
-                config["FILE_HANDLING"].get("SPLIT_THRESHOLD", "300")
-            )
-            processed_config["PROCESSING"]["AUTO_MERGE_RESULTS"] = (
-                config["FILE_HANDLING"].get("AUTO_MERGE_RESULTS", "true").lower()
-                == "true"
-            )
-            processed_config["PROCESSING"]["AUTO_CLEAN_PRODUCT_NAMES"] = (
-                config["FILE_HANDLING"].get("AUTO_CLEAN_PRODUCT_NAMES", "true").lower()
-                == "true"
-            )
-        else:
-            # Default values if section doesn't exist
-            processed_config["PROCESSING"]["AUTO_SPLIT_FILES"] = True
-            processed_config["PROCESSING"]["SPLIT_THRESHOLD"] = 300
-            processed_config["PROCESSING"]["AUTO_MERGE_RESULTS"] = True
-            processed_config["PROCESSING"]["AUTO_CLEAN_PRODUCT_NAMES"] = True
-
-        # Add price comparison settings from manual
-        if "PRICE_COMPARISON" in config:
-            processed_config["PROCESSING"]["MIN_PRICE_DIFF_PERCENT"] = float(
-                config["PRICE_COMPARISON"].get("MIN_PRICE_DIFF_PERCENT", "10.0")
-            )
-            processed_config["PROCESSING"]["HIGHLIGHT_PRICE_DIFF"] = (
-                config["PRICE_COMPARISON"].get("HIGHLIGHT_PRICE_DIFF", "true").lower()
-                == "true"
-            )
-        else:
-            # Default values if section doesn't exist
-            processed_config["PROCESSING"]["MIN_PRICE_DIFF_PERCENT"] = 10.0
-            processed_config["PROCESSING"]["HIGHLIGHT_PRICE_DIFF"] = True
 
         # SCRAPING section
-        if "SCRAPING" in config:
-            processed_config["SCRAPING"] = {
-                "MAX_CONCURRENT_REQUESTS": int(
-                    config["SCRAPING"]["MAX_CONCURRENT_REQUESTS"]
-                ),
-                "EXTRACTION_TIMEOUT": int(config["SCRAPING"]["EXTRACTION_TIMEOUT"]),
-                "ENABLE_DOM_EXTRACTION": config["SCRAPING"][
-                    "ENABLE_DOM_EXTRACTION"
-                ].lower()
-                == "true",
-                "ENABLE_TEXT_EXTRACTION": config["SCRAPING"][
-                    "ENABLE_TEXT_EXTRACTION"
-                ].lower()
-                == "true",
-                "ENABLE_COORD_EXTRACTION": config["SCRAPING"][
-                    "ENABLE_COORD_EXTRACTION"
-                ].lower()
-                == "true",
-                "USE_FALLBACK_MECHANISM": config["SCRAPING"][
-                    "USE_FALLBACK_MECHANISM"
-                ].lower()
-                == "true",
-                "AUTO_DETECT_CONTENT_TYPE": config["SCRAPING"][
-                    "AUTO_DETECT_CONTENT_TYPE"
-                ].lower()
-                == "true",
-                "USE_SPARSE_STRUCTURES": config["SCRAPING"][
-                    "USE_SPARSE_STRUCTURES"
-                ].lower()
-                == "true",
-                "SELECTIVE_DOM_OBSERVATION": config["SCRAPING"][
-                    "SELECTIVE_DOM_OBSERVATION"
-                ].lower()
-                == "true",
-                "ASYNC_TASKS": config["SCRAPING"]["ASYNC_TASKS"].lower() == "true",
-                "SESSION_PERSISTENCE": config["SCRAPING"]["SESSION_PERSISTENCE"].lower()
-                == "true",
-                "POLITENESS_DELAY": int(config["SCRAPING"]["POLITENESS_DELAY"]),
-                "USER_EXPERIENCE_PRIORITY": config["SCRAPING"][
-                    "USER_EXPERIENCE_PRIORITY"
-                ].lower()
-                == "true",
-                "CONNECTION_POOL_SIZE": int(config["SCRAPING"]["CONNECTION_POOL_SIZE"]),
-                "SSL_VERIFICATION": config["SCRAPING"]["SSL_VERIFICATION"].lower()
-                == "true",
-                "FOLLOW_REDIRECTS": config["SCRAPING"]["FOLLOW_REDIRECTS"].lower()
-                == "true",
-                "MAX_REDIRECTS": int(config["SCRAPING"]["MAX_REDIRECTS"]),
-                "RETRY_ON_NETWORK_ERROR": config["SCRAPING"][
-                    "RETRY_ON_NETWORK_ERROR"
-                ].lower()
-                == "true",
-                "RETRY_ON_SPECIFIC_STATUS": [
-                    int(x.strip())
-                    for x in config["SCRAPING"]["RETRY_ON_SPECIFIC_STATUS"].split(",")
-                ],
-                "EXPONENTIAL_BACKOFF": config["SCRAPING"]["EXPONENTIAL_BACKOFF"].lower()
-                == "true",
-            }
-
-            # Add Naver search settings as per manual
-            processed_config["SCRAPING"]["MAX_PAGES"] = int(
-                config["SCRAPING"].get("MAX_PAGES", "3")
-            )
-            processed_config["SCRAPING"]["REQUIRE_IMAGE_MATCH"] = (
-                config["SCRAPING"].get("REQUIRE_IMAGE_MATCH", "true").lower() == "true"
-            )
+        processed_config["scraping"] = {
+            "max_concurrent_requests": int(config["SCRAPING"]["max_concurrent_requests"]),
+            "extraction_timeout": int(config["SCRAPING"]["extraction_timeout"]),
+            "enable_dom_extraction": config["SCRAPING"]["enable_dom_extraction"].lower() == "true",
+            "enable_text_extraction": config["SCRAPING"]["enable_text_extraction"].lower() == "true",
+            "enable_coord_extraction": config["SCRAPING"]["enable_coord_extraction"].lower() == "true",
+            "use_fallback_mechanism": config["SCRAPING"]["use_fallback_mechanism"].lower() == "true",
+            "auto_detect_content_type": config["SCRAPING"]["auto_detect_content_type"].lower() == "true",
+            "use_sparse_structures": config["SCRAPING"]["use_sparse_structures"].lower() == "true",
+            "selective_dom_observation": config["SCRAPING"]["selective_dom_observation"].lower() == "true",
+            "async_tasks": config["SCRAPING"]["async_tasks"].lower() == "true",
+            "session_persistence": config["SCRAPING"]["session_persistence"].lower() == "true",
+            "politeness_delay": int(config["SCRAPING"]["politeness_delay"]),
+            "user_experience_priority": config["SCRAPING"]["user_experience_priority"].lower() == "true",
+            "connection_pool_size": int(config["SCRAPING"]["connection_pool_size"]),
+            "ssl_verification": config["SCRAPING"]["ssl_verification"].lower() == "true",
+            "follow_redirects": config["SCRAPING"]["follow_redirects"].lower() == "true",
+            "max_redirects": int(config["SCRAPING"]["max_redirects"]),
+            "retry_on_network_error": config["SCRAPING"]["retry_on_network_error"].lower() == "true",
+            "retry_on_specific_status": [int(x.strip()) for x in config["SCRAPING"]["retry_on_specific_status"].split(",")],
+            "exponential_backoff": config["SCRAPING"]["exponential_backoff"].lower() == "true",
+        }
 
         # EXCEL section
-        if "EXCEL" in config:
-            processed_config["EXCEL"] = {
-                "SHEET_NAME": config["EXCEL"].get("DEFAULT_SHEET_NAME", "Sheet1"),
-                "START_ROW": int(config["EXCEL"].get("START_ROW", "2")),
-                "REQUIRED_COLUMNS": [
-                    x.strip() for x in config["EXCEL"].get("REQUIRED_COLUMNS", "").split(",")
-                    if x.strip()
-                ],
-                "OPTIONAL_COLUMNS": [
-                    x.strip() for x in config["EXCEL"].get("OPTIONAL_COLUMNS", "").split(",")
-                    if x.strip()
-                ],
-                "MAX_ROWS": int(config["EXCEL"].get("MAX_ROWS", "10000")),
-                "ENABLE_FORMATTING": config["EXCEL"].get("ENABLE_FORMATTING", "true").lower() == "true",
-                "DATE_FORMAT": config["EXCEL"].get("DATE_FORMAT", "YYYY-MM-DD"),
-                "NUMBER_FORMAT": config["EXCEL"].get("NUMBER_FORMAT", "#,##0"),
-                "MAX_FILE_SIZE_MB": int(config["EXCEL"].get("MAX_FILE_SIZE_MB", "200")),
-                "VALIDATION_RULES": config["EXCEL"].get("VALIDATION_RULES", "true").lower() == "true",
-                "PRICE_MIN": int(config["EXCEL"].get("PRICE_MIN", "0")),
-                "PRICE_MAX": int(config["EXCEL"].get("PRICE_MAX", "10000000000")),
-                "PRODUCT_CODE_PATTERN": config["EXCEL"].get("PRODUCT_CODE_PATTERN", r"^[A-Za-z0-9-_]+$"),
-                "URL_PATTERN": config["EXCEL"].get("URL_PATTERN", r"^(?:https?://)?(?:[\w-]+\.)+[a-z]{2,}(?:/[^/]*)*$"),
-                "ENABLE_DATA_QUALITY_METRICS": config["EXCEL"].get("ENABLE_DATA_QUALITY_METRICS", "true").lower() == "true",
-                "ENABLE_DUPLICATE_DETECTION": config["EXCEL"].get("ENABLE_DUPLICATE_DETECTION", "true").lower() == "true",
-                "ENABLE_AUTO_CORRECTION": config["EXCEL"].get("ENABLE_AUTO_CORRECTION", "true").lower() == "true",
-                "AUTO_CORRECTION_RULES": [
-                    x.strip() for x in config["EXCEL"].get("AUTO_CORRECTION_RULES", "").split(",")
-                    if x.strip()
-                ],
-                "REPORT_FORMATTING": config["EXCEL"].get("REPORT_FORMATTING", "true").lower() == "true",
-                "REPORT_STYLES": config["EXCEL"].get("REPORT_STYLES", "true").lower() == "true",
-                "REPORT_FILTERS": config["EXCEL"].get("REPORT_FILTERS", "true").lower() == "true",
-                "REPORT_SORTING": config["EXCEL"].get("REPORT_SORTING", "true").lower() == "true",
-                "REPORT_FREEZE_PANES": config["EXCEL"].get("REPORT_FREEZE_PANES", "true").lower() == "true",
-                "REPORT_AUTO_FIT": config["EXCEL"].get("REPORT_AUTO_FIT", "true").lower() == "true",
-                "ATTEMPT_ALL_SHEETS": config["EXCEL"].get("ATTEMPT_ALL_SHEETS", "true").lower() == "true",
-                "FLEXIBLE_COLUMN_MAPPING": config["EXCEL"].get("FLEXIBLE_COLUMN_MAPPING", "true").lower() == "true",
-                "CREATE_MISSING_COLUMNS": config["EXCEL"].get("CREATE_MISSING_COLUMNS", "true").lower() == "true"
-            }
+        processed_config["excel"] = {
+            "default_sheet_name": config["EXCEL"]["default_sheet_name"],
+            "alternative_sheet_names": [x.strip() for x in config["EXCEL"]["alternative_sheet_names"].split(",")],
+            "start_row": int(config["EXCEL"]["start_row"]),
+            "alternative_start_rows": [int(x.strip()) for x in config["EXCEL"]["alternative_start_rows"].split(",")],
+            "required_columns": [x.strip() for x in config["EXCEL"]["required_columns"].split(",")],
+            "column_alternatives": {
+                "상품명": [x.strip() for x in config["EXCEL"]["column_alternatives_상품명"].split(",")],
+                "판매단가": [x.strip() for x in config["EXCEL"]["column_alternatives_판매단가"].split(",")],
+                "상품code": [x.strip() for x in config["EXCEL"]["column_alternatives_상품code"].split(",")],
+                "이미지": [x.strip() for x in config["EXCEL"]["column_alternatives_이미지"].split(",")],
+                "링크": [x.strip() for x in config["EXCEL"]["column_alternatives_링크"].split(",")],
+            },
+            "optional_columns": [x.strip() for x in config["EXCEL"]["optional_columns"].split(",")],
+            "max_rows": int(config["EXCEL"]["max_rows"]),
+            "max_file_size_mb": int(config["EXCEL"]["max_file_size_mb"]),
+            "validation_rules": config["EXCEL"]["validation_rules"].lower() == "true",
+            "price_min": int(config["EXCEL"]["price_min"]),
+            "price_max": int(config["EXCEL"]["price_max"]),
+            "product_code_pattern": config["EXCEL"]["product_code_pattern"],
+            "url_pattern": config["EXCEL"]["url_pattern"],
+            "enable_data_quality_metrics": config["EXCEL"]["enable_data_quality_metrics"].lower() == "true",
+            "enable_duplicate_detection": config["EXCEL"]["enable_duplicate_detection"].lower() == "true",
+            "enable_auto_correction": config["EXCEL"]["enable_auto_correction"].lower() == "true",
+            "auto_correction_rules": [x.strip() for x in config["EXCEL"]["auto_correction_rules"].split(",")],
+            "report_formatting": config["EXCEL"]["report_formatting"].lower() == "true",
+            "report_styles": config["EXCEL"]["report_styles"].lower() == "true",
+            "report_filters": config["EXCEL"]["report_filters"].lower() == "true",
+            "report_sorting": config["EXCEL"]["report_sorting"].lower() == "true",
+            "report_freeze_panes": config["EXCEL"]["report_freeze_panes"].lower() == "true",
+            "report_auto_fit": config["EXCEL"]["report_auto_fit"].lower() == "true",
+            "attempt_all_sheets": config["EXCEL"]["attempt_all_sheets"].lower() == "true",
+            "flexible_column_mapping": config["EXCEL"]["flexible_column_mapping"].lower() == "true",
+            "create_missing_columns": config["EXCEL"]["create_missing_columns"].lower() == "true",
+            "enable_formatting": config["EXCEL"]["enable_formatting"].lower() == "true",
+            "date_format": config["EXCEL"]["date_format"],
+            "number_format": config["EXCEL"]["number_format"],
+        }
 
         # PATHS section
-        processed_config["PATHS"] = {
-            "CACHE_DIR": os.path.abspath(config["PATHS"]["CACHE_DIR"]),
-            "OUTPUT_DIR": os.path.abspath(config["PATHS"]["OUTPUT_DIR"]),
-            "LOG_DIR": os.path.abspath(config["PATHS"]["LOG_DIR"]),
-            "INTERMEDIATE_DIR": os.path.abspath(config["PATHS"]["INTERMEDIATE_DIR"]),
-            "FINAL_DIR": os.path.abspath(config["PATHS"]["FINAL_DIR"]),
+        processed_config["paths"] = {
+            "cache_dir": os.path.abspath(config["PATHS"]["cache_dir"]),
+            "output_dir": os.path.abspath(config["PATHS"]["output_dir"]),
+            "log_dir": os.path.abspath(config["PATHS"]["log_dir"]),
+            "temp_dir": os.path.abspath(config["PATHS"]["temp_dir"]),
+            "backup_dir": os.path.abspath(config["PATHS"]["backup_dir"]),
+            "intermediate_dir": os.path.abspath(config["PATHS"]["intermediate_dir"]),
+            "final_dir": os.path.abspath(config["PATHS"]["final_dir"]),
         }
 
-        # GUI section
-        processed_config["GUI"] = {
-            "WINDOW_WIDTH": int(config["GUI"]["WINDOW_WIDTH"]),
-            "WINDOW_HEIGHT": int(config["GUI"]["WINDOW_HEIGHT"]),
-            "MAX_LOG_LINES": int(config["GUI"]["MAX_LOG_LINES"]),
-            "ENABLE_DARK_MODE": config["GUI"]["ENABLE_DARK_MODE"].lower() == "true",
-            "SHOW_PROGRESS_BAR": config["GUI"]["SHOW_PROGRESS_BAR"].lower() == "true",
-            "AUTO_SAVE_INTERVAL": int(config["GUI"]["AUTO_SAVE_INTERVAL"]),
-            "DEBUG_MODE": config["GUI"]["DEBUG_MODE"].lower() == "true",
-        }
+        # GUI section - keep as ConfigParser object
+        processed_config["gui_config"] = config
 
     except Exception as e:
-        # Add 'from e' to the exception
-        # Disable W0719 as raising a general Exception with context is acceptable here.
-        raise Exception(f"Error processing config values: {e}") from e # pylint: disable=broad-exception-raised
+        raise Exception(f"Failed to process config values: {e}") from e
 
     return processed_config

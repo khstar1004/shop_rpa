@@ -1,7 +1,7 @@
 import logging
 import os
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 import pandas as pd
 
@@ -9,22 +9,36 @@ import pandas as pd
 class FileSplitter:
     """엑셀 파일 분할 및 병합을 담당하는 클래스"""
 
-    def __init__(self, config: Dict, logger: Optional[logging.Logger] = None):
+    def __init__(self, config: Union[Dict, Any], logger: Optional[logging.Logger] = None):
         """
         파일 분할기 초기화
 
         Args:
-            config: 애플리케이션 설정
+            config: 애플리케이션 설정 (ConfigParser 또는 Dict)
             logger: 로깅 인스턴스
         """
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
 
-        # 설정에서 분할 관련 옵션 추출
-        processing_config = config.get("PROCESSING", {})
-        self.auto_split_files = processing_config.get("AUTO_SPLIT_FILES", True)
-        self.split_threshold = processing_config.get("SPLIT_THRESHOLD", 300)
-        self.auto_merge_results = processing_config.get("AUTO_MERGE_RESULTS", True)
+        # config 객체 타입 확인 및 설정값 추출
+        if hasattr(config, 'sections') and callable(getattr(config, 'get', None)):
+            # ConfigParser 객체인 경우
+            try:
+                section = "PROCESSING"
+                self.auto_split_files = config.getboolean(section, "AUTO_SPLIT_FILES", fallback=True)
+                self.split_threshold = config.getint(section, "SPLIT_THRESHOLD", fallback=300)
+                self.auto_merge_results = config.getboolean(section, "AUTO_MERGE_RESULTS", fallback=True)
+            except Exception as e:
+                self.logger.warning(f"처리 설정을 불러오는 중 오류 발생: {str(e)}")
+                self.auto_split_files = True
+                self.split_threshold = 300
+                self.auto_merge_results = True
+        else:
+            # dict 객체인 경우
+            processing_config = config.get("PROCESSING", {})
+            self.auto_split_files = processing_config.get("AUTO_SPLIT_FILES", True)
+            self.split_threshold = processing_config.get("SPLIT_THRESHOLD", 300)
+            self.auto_merge_results = processing_config.get("AUTO_MERGE_RESULTS", True)
 
     def needs_splitting(self, df: pd.DataFrame) -> bool:
         """
