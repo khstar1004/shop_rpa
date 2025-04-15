@@ -107,7 +107,7 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                     "height": int(self.config.get('SCRAPING', 'viewport_height', fallback='720'))
                 },
                 "timeout": int(self.config.get('SCRAPING', 'wait_timeout', fallback='15000')),
-                "wait_until": "domcontentloaded",  # 더 빠른 페이지 로드 조건
+                "wait_until": "networkidle",  # 더 안정적인 페이지 로드 조건
                 "ignore_https_errors": not self.config.getboolean('SCRAPING', 'ssl_verification', fallback=True)
             }
         else:
@@ -208,6 +208,8 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                 r"(\d+)개[:\s]+([0-9,]+)원"
             ),  # 수량:가격 패턴 (예: "100개: 1,000원")
             "vat_included": re.compile(r"VAT\s*(포함|별도|제외)", re.IGNORECASE),
+            "image_url": re.compile(r'url\([\'"]?([^"\'()]+\.(jpg|jpeg|png|gif))[\'"]?\)', re.IGNORECASE),
+            "onclick_image": re.compile(r"view_big\('([^']+)'", re.IGNORECASE),
         }
 
     def get_cached_data(self, key: str) -> Optional[Any]:
@@ -238,88 +240,126 @@ class HaeoeumScraper(BaseMultiLayerScraper):
 
     def get_product(self, product_idx: str) -> Optional[Product]:
         """
-        상품 ID로 상품 정보 가져오기
-        
-        Parameters:
-            product_idx: 상품 ID ('p_idx' 파라미터 값)
-            
+        해오름 기프트 상품 페이지에서 상품 정보를 추출합니다.
+
+        Args:
+            product_idx: 상품 ID (p_idx 파라미터 값)
+
         Returns:
-            Product 객체 (해오름 상품은 항상 존재한다는 가정 하에 반환)
+            Product 객체 또는 None (실패 시)
         """
-        # 캐시 키 생성
-        cache_key = f"haeoeum_product_{product_idx}"
-        
-        # 캐시에서 데이터 확인
-        if self.cache:
-            cached_data = self.get_cached_data(cache_key)
-            if cached_data:
-                self.logger.info(f"캐시에서 상품 {product_idx} 데이터 로드")
-                return Product.from_dict(cached_data)
-        
-        # 캐시 미스: 웹에서 데이터 가져오기
+        # 캐시 확인
+        cache_key = f"haeoeum_product|{product_idx}"
+        cached_result = self.get_cached_data(cache_key)
+        if cached_result:
+            self.logger.info(f"캐시된 상품 데이터 사용: p_idx={product_idx}")
+            return Product.from_dict(cached_result)
+
         url = f"{self.PRODUCT_VIEW_URL}?p_idx={product_idx}"
-        self.logger.info(f"상품 URL 접속: {url}")
+        self.logger.info(f"상품 데이터 추출 시작: {url}")
+
+        product_data = None
+        soup = None
         
+        # 1. requests로 먼저 시도
         try:
-            # 요청 보내기
-            response = self.session.get(url, timeout=self.timeout_config, verify=False)
+            response = self.session.get(url, timeout=self.timeout_config)
+            response.raise_for_status()
             
-            # 인코딩 명시적 설정 (해오름 사이트는 EUC-KR 사용)
+            # 인코딩 처리
             if not response.encoding or response.encoding == 'ISO-8859-1':
-                # 인코딩 추측
                 try:
                     import chardet
                     detected = chardet.detect(response.content)
                     if detected['confidence'] > 0.7:
                         response.encoding = detected['encoding']
                     else:
-                        response.encoding = 'cp949'  # 기본값으로 CP949 사용
-                    self.logger.debug(f"인코딩 감지: {response.encoding}, 신뢰도: {detected.get('confidence', 'N/A')}")
+                        response.encoding = 'cp949'
                 except ImportError:
-                    response.encoding = 'cp949'  # chardet 없으면 직접 설정
-                    self.logger.debug(f"chardet 모듈 없음, 인코딩 강제 설정: {response.encoding}")
+                    response.encoding = 'cp949'
             
-            # 응답 코드 확인
-            if response.status_code != 200:
-                self.logger.error(f"상품 페이지 접근 실패: HTTP {response.status_code}")
-                return self._create_fallback_product(product_idx, url)
-                
-            # HTML 파싱
-            soup = self._get_soup(response.text)
-            
-            # 기본 정보 추출
+            soup = BeautifulSoup(response.text, "html.parser")
             product_data = self._extract_product_data(soup, product_idx, url)
             
-            # 데이터 유효성 검사 및 정리
-            product_data = self._sanitize_product_data(product_data)
-            
-            # 상품 객체 생성
+            # 이미지 추출
+            images = self._extract_images(url, soup)
+            if images:
+                product_data["image_url"] = images[0]
+                product_data["image_gallery"] = images
+                
+        except Exception as e:
+            self.logger.error(f"requests를 사용한 상품 데이터 추출 실패: {e}")
+
+        # 2. Playwright로 시도 (requests 실패 시 또는 이미지가 없는 경우)
+        if (not product_data or not product_data.get("image_gallery")) and self.playwright_available:
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=self.headless)
+                    page = browser.new_page()
+                    page.goto(url, wait_until=self.playwright_config["wait_until"])
+                    
+                    # 이미지가 로드될 때까지 대기
+                    page.wait_for_selector("img", timeout=5000)
+                    
+                    # HTML 파싱
+                    html = page.content()
+                    soup = BeautifulSoup(html, "html.parser")
+                    
+                    # 상품 데이터 추출
+                    if not product_data:
+                        product_data = self._extract_product_data(soup, product_idx, url)
+                    
+                    # 이미지 추출
+                    images = self._extract_images(url, soup)
+                    if images:
+                        product_data["image_url"] = images[0]
+                        product_data["image_gallery"] = images
+                    
+                    browser.close()
+                    
+            except Exception as e:
+                self.logger.error(f"Playwright를 사용한 상품 데이터 추출 실패: {e}")
+
+        # 3. 데이터 검증 및 기본값 설정
+        if not product_data:
+            self.logger.warning(f"상품 데이터 추출 실패, 기본값 사용: {product_idx}")
+            product_data = {
+                "id": hashlib.md5(f"haeoeum_{product_idx}".encode()).hexdigest(),
+                "name": f"해오름상품_{product_idx}",
+                "source": "haeoeum",
+                "price": 10000,  # 임시 가격
+                "url": url,
+                "image_url": f"{self.BASE_URL}/images/no_image.jpg",
+                "status": "Error",
+                "product_code": product_idx,
+                "image_gallery": [f"{self.BASE_URL}/images/no_image.jpg"],
+                "quantity_prices": {"1": 10000}
+            }
+        
+        # 4. Product 객체 생성
+        try:
             product = Product(**{k: v for k, v in product_data.items() if k in Product.__annotations__})
             
-            # 복잡한 필드 별도 설정
-            if 'image_gallery' in product_data and product_data['image_gallery']:
+            # 복잡한 필드 설정
+            if 'image_gallery' in product_data:
                 product.image_gallery = product_data['image_gallery']
-                
-            if 'specifications' in product_data and product_data['specifications']:
+            if 'specifications' in product_data:
                 product.specifications = product_data['specifications']
-                
-            if 'quantity_prices' in product_data and product_data['quantity_prices']:
+            if 'quantity_prices' in product_data:
                 product.quantity_prices = product_data['quantity_prices']
-                
-            # 원본 데이터 설정
+            
+            # 원본 데이터 저장
             product.original_input_data = product_data
             
             # 캐시에 저장
-            if self.cache:
-                self.cache_sparse_data(cache_key, product.to_dict())
-                
+            self.cache_sparse_data(cache_key, product.to_dict())
+            
             return product
             
         except Exception as e:
-            self.logger.error(f"상품 정보 추출 중 오류: {e}", exc_info=True)
-            # 오류 발생 시 기본 상품 객체 반환 (해오름 상품은 항상 존재한다는 가정)
-            return self._create_fallback_product(product_idx, url)
-    
+            self.logger.error(f"Product 객체 생성 실패: {e}")
+            return None
+
     def _create_fallback_product(self, product_idx: str, url: str) -> Product:
         """
         문제 발생 시 대체 상품 객체 생성
@@ -379,9 +419,9 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         self, soup: BeautifulSoup, product_idx: str, url: str
     ) -> Dict[str, Any]:
         """
-        상품 상세 페이지에서 필요한 정보를 추출
+        상품 상세 페이지에서 필요한 정보를 추출합니다.
         
-        Parameters:
+        Args:
             soup: BeautifulSoup 객체
             product_idx: 상품 ID
             url: 상품 URL
@@ -390,49 +430,46 @@ class HaeoeumScraper(BaseMultiLayerScraper):
             추출된 상품 정보 딕셔너리
         """
         product_data = {
-            "id": product_idx,
-            "url": url,
+            "id": hashlib.md5(f"haeoeum_{product_idx}".encode()).hexdigest(),
             "source": "haeoeum",
-            "name": "",  # 기본값 초기화
-            "price": 0,  # 기본값 초기화
-            "image_url": "",  # 기본값 초기화
-            "image_gallery": [],  # 기본값 초기화
-            "product_code": product_idx,  # 기본값 초기화
-            "status": "Error",  # 기본 상태 설정
+            "url": url,
+            "name": "",
+            "price": 0,
+            "image_url": "",
+            "image_gallery": [],
+            "product_code": product_idx,
+            "status": "Processing",
+            "specifications": {},
+            "quantity_prices": {},
+            "description": "",
         }
-        
-        # 상품명 추출
+
         try:
-            title_tag = soup.select_one(self.selectors["product_title"]["selector"])
-            if title_tag:
-                title = title_tag.get_text().strip()
+            # 1. 상품명 추출
+            title_element = soup.select_one(self.selectors["product_title"]["selector"])
+            if title_element:
+                title = title_element.text.strip()
                 product_data["name"] = self._normalize_text(title)
                 self.logger.debug(f"상품명 추출: {product_data['name']}")
             
-            # 해오름 기프트에는 항상 상품이 있다는 대전제이므로, 상품명을 추출하지 못했을 경우
-            # URL에서 상품 ID를 가져와 임시 이름 생성
             if not product_data["name"]:
                 product_data["name"] = f"해오름상품_{product_idx}"
-                self.logger.warning(f"상품명 추출 실패, 임시 이름 생성: {product_data['name']}")
-        except Exception as e:
-            self.logger.error(f"상품명 추출 중 오류: {e}")
-            product_data["name"] = f"해오름상품_{product_idx}"
-            self.logger.warning(f"상품명 추출 오류, 임시 이름 생성: {product_data['name']}")
+                self.logger.warning(f"상품명 추출 실패, 임시 이름 사용: {product_data['name']}")
 
-        # 상품 코드 추출
-        try:
+            # 2. 상품 코드 추출
             code_element = soup.select_one(self.selectors["product_code"]["selector"])
-            product_data["product_code"] = code_element.text.strip() if code_element else product_idx
-        except Exception as e:
-            self.logger.error(f"상품 코드 추출 중 오류: {e}")
-            # 이미 기본값이 설정되어 있으므로 추가 작업 필요 없음
+            if code_element:
+                product_data["product_code"] = code_element.text.strip()
+            else:
+                # 텍스트에서 상품 코드 패턴 찾기
+                text_content = soup.get_text()
+                code_match = self.patterns["product_code"].search(text_content)
+                if code_match:
+                    product_data["product_code"] = code_match.group(1)
 
-        # 고유 ID 생성
-        product_data["id"] = hashlib.md5(f"haeoeum_{product_data['product_code']}".encode()).hexdigest()
-
-        # 가격 추출 최적화
-        try:
+            # 3. 가격 추출
             price = 0
+            # 3.1 적용 가격 확인
             price_element = soup.select_one(self.selectors["applied_price"]["selector"])
             if price_element:
                 price_text = price_element.text.strip()
@@ -440,6 +477,7 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                 if price_match:
                     price = int(price_match.group().replace(",", ""))
 
+            # 3.2 총 가격 확인
             if price == 0:
                 total_price_element = soup.select_one(self.selectors["total_price"]["selector"])
                 if total_price_element:
@@ -448,116 +486,110 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                     if price_match:
                         price = int(price_match.group().replace(",", ""))
 
-            product_data["price"] = price
+            # 3.3 VAT 포함 여부 확인 및 처리
+            text_content = soup.get_text().lower()
+            vat_included = bool(self.patterns["vat_included"].search(text_content))
+            if not vat_included and price > 0:
+                price = int(price * 1.1)  # VAT 10% 추가
+
+            product_data["price"] = price or 10000  # 가격이 0이면 임시 가격 설정
+
+            # 4. 수량별 가격 추출
+            quantity_prices = {}
             
-            # 가격이 0이면 임시값 설정
-            if product_data["price"] == 0:
-                product_data["price"] = 10000  # 임시 가격
-                self.logger.warning(f"가격 추출 실패, 임시 가격 설정: {product_data['price']}")
+            # 4.1 가격표에서 추출
+            price_table = soup.select_one(self.selectors["price_table"]["selector"])
+            if price_table:
+                rows = price_table.select("tr:not(:first-child)")
+                for row in rows:
+                    cells = row.select("td")
+                    if len(cells) >= 2:
+                        qty_match = re.search(r"\d+", cells[0].text.strip())
+                        price_match = self.patterns["price_number"].search(cells[1].text.strip())
+                        if qty_match and price_match:
+                            qty = int(qty_match.group())
+                            price = int(price_match.group().replace(",", ""))
+                            if not vat_included:
+                                price = int(price * 1.1)
+                            quantity_prices[str(qty)] = price
+
+            # 4.2 드롭다운에서 추출
+            if not quantity_prices:
+                dropdown = soup.select_one(self.selectors["quantity_dropdown"]["selector"])
+                if dropdown:
+                    for option in dropdown.select("option"):
+                        option_text = option.text.strip()
+                        qty_match = self.patterns["quantity"].search(option_text)
+                        price_match = self.patterns["price_number"].search(option_text)
+                        if qty_match and price_match:
+                            qty = int(qty_match.group(1))
+                            price = int(price_match.group().replace(",", ""))
+                            if not vat_included:
+                                price = int(price * 1.1)
+                            quantity_prices[str(qty)] = price
+
+            # 4.3 텍스트에서 수량별 가격 정보 찾기
+            if not quantity_prices:
+                matches = self.patterns["quantity_price"].findall(text_content)
+                for match in matches:
+                    qty = int(match[0])
+                    price = int(match[1].replace(",", ""))
+                    if not vat_included:
+                        price = int(price * 1.1)
+                    quantity_prices[str(qty)] = price
+
+            # 4.4 기본 수량 가격 추가
+            if not quantity_prices and product_data["price"] > 0:
+                quantity_prices["1"] = product_data["price"]
+
+            product_data["quantity_prices"] = quantity_prices
+
+            # 5. 사양 정보 추출
+            specs_table = soup.select_one(self.selectors["product_info_table"]["selector"])
+            if specs_table:
+                rows = specs_table.select("tr")
+                for row in rows:
+                    th = row.select_one("th")
+                    td = row.select_one("td")
+                    if th and td:
+                        key = th.text.strip().replace("·", "").strip()
+                        value = td.text.strip()
+                        if key and value:
+                            product_data["specifications"][key] = value
+
+            # 6. 제품 설명 추출
+            desc_elements = soup.select("div.product_view_img, div.prd_detail, div.item_detail")
+            if desc_elements:
+                description = "\n".join([elem.text.strip() for elem in desc_elements])
+                product_data["description"] = description
+
+            # 7. 품절 여부 확인
+            sold_out_element = soup.select_one(self.selectors["sold_out"]["selector"])
+            is_sold_out = bool(sold_out_element)
+            
+            if not is_sold_out:
+                if "품절" in text_content or "sold out" in text_content:
+                    is_sold_out = True
+
+            product_data["is_sold_out"] = is_sold_out
+            product_data["status"] = "Sold Out" if is_sold_out else "OK"
+
         except Exception as e:
-            self.logger.error(f"가격 추출 중 오류: {e}")
-            product_data["price"] = 10000  # 임시 가격
-
-        # 수량별 가격 추출 최적화
-        try:
-            product_data["quantity_prices"] = self._extract_quantity_prices(soup)
-        except Exception as e:
-            self.logger.error(f"수량별 가격 추출 중 오류: {e}")
-            product_data["quantity_prices"] = {1: product_data["price"]}  # 기본값 설정
-
-        # 이미지 URL 추출
-        try:
-            # 1. 먼저 기본 이미지 셀렉터로 시도
-            image_element = soup.select_one(self.selectors["main_image"]["selector"])
-            
-            # 2. 이미지를 찾지 못했다면 추가 셀렉터 시도 (업데이트된 HTML 패턴 대응)
-            if not image_element or not image_element.get('src'):
-                # 최근 해오름기프트 패턴 처리 - onclick 이벤트 포함 이미지
-                image_element = soup.select_one('img[style*="cursor:hand"][onclick*="view_big"]')
-                
-                # 대체 셀렉터 시도
-                if not image_element or not image_element.get('src'):
-                    image_element = soup.select_one('td[height="340"] img, img[width="330"], img[height="330"]')
-            
-            # 3. 이미지 URL 추출 및 처리
-            if image_element and image_element.get('src'):
-                image_url = image_element.get('src')
-                if not image_url.startswith('http'):
-                    image_url = urljoin(self.BASE_URL, image_url)
-                product_data["image_url"] = image_url
-                self.logger.debug(f"상품 이미지 URL 추출: {product_data['image_url']}")
-                
-                # 이미지 갤러리에 메인 이미지 추가
-                product_data["image_gallery"].append(image_url)
-                
-                # 이미지 URL에서 실제 큰 이미지 URL 추출 시도 (onclick 속성 사용)
-                if image_element.get('onclick') and "view_big" in image_element.get('onclick'):
-                    onclick_value = image_element.get('onclick')
-                    big_image_match = re.search(r"view_big\('([^']+)'", onclick_value)
-                    if big_image_match:
-                        big_image_url = big_image_match.group(1)
-                        if not big_image_url.startswith('http'):
-                            big_image_url = urljoin(self.BASE_URL, big_image_url)
-                        # 이미 갤러리에 없는 경우에만 추가
-                        if big_image_url not in product_data["image_gallery"]:
-                            product_data["image_gallery"].append(big_image_url)
-                            self.logger.debug(f"큰 이미지 URL 추출: {big_image_url}")
-                
-            # 썸네일 이미지 추출 및 갤러리에 추가
-            thumbnails = soup.select(self.selectors["thumbnail_images"]["selector"])
-            for thumb in thumbnails:
-                if thumb.get('src'):
-                    thumb_url = thumb.get('src')
-                    if not thumb_url.startswith('http'):
-                        thumb_url = urljoin(self.BASE_URL, thumb_url)
-                    if thumb_url not in product_data["image_gallery"]:
-                        product_data["image_gallery"].append(thumb_url)
-            
-            # 이미지가 없는 경우 Playwright 방식으로 추가 이미지 추출 시도
-            if not product_data["image_gallery"] and self.playwright_available:
-                self.logger.info(f"기본 방식으로 이미지 추출 실패, Playwright 방식 시도")
-                try:
-                    playwright_images = self._extract_images_with_playwright_common(url)
-                    if playwright_images:
-                        product_data["image_gallery"] = playwright_images
-                        product_data["image_url"] = playwright_images[0]
-                except Exception as e:
-                    self.logger.error(f"Playwright 이미지 추출 실패: {e}")
-                    
-            # 디버깅: 이미지 갤러리 로그 출력
-            if product_data["image_gallery"]:
-                self.logger.info(f"이미지 갤러리 추출 (총 {len(product_data['image_gallery'])}개): {product_data['image_gallery']}")
-            else:
-                self.logger.warning("이미지 갤러리 추출 실패: 이미지를 찾을 수 없음")
-                # 해오름 기프트에는 항상 상품이 있다는 가정하에 기본 이미지 설정
-                default_image = f"{self.BASE_URL}/images/no_image.jpg"
-                product_data["image_url"] = default_image
-                product_data["image_gallery"] = [default_image]
-                
-        except Exception as e:
-            self.logger.error(f"이미지 URL 추출 중 오류: {e}")
-            # 기본 이미지 설정
-            default_image = f"{self.BASE_URL}/images/no_image.jpg"
-            product_data["image_url"] = default_image
-            product_data["image_gallery"] = [default_image]
-
-        # 상품 URL 추가
-        product_data["url"] = url
-
-        # 상태 설정
-        if not product_data["name"]:
-            product_data["status"] = "Title Not Found"
-        elif not product_data["price"]:
-            product_data["status"] = "Price Not Found"
-        elif not product_data.get("image_url"):
-            product_data["status"] = "Image Not Found"
-        else:
-            product_data["status"] = "OK"
+            self.logger.error(f"상품 데이터 추출 중 오류: {e}")
+            product_data["status"] = "Error"
 
         return product_data
 
     def _normalize_text(self, text: str) -> str:
-        """텍스트 정규화 및 인코딩 문제 해결"""
+        """
+        텍스트 정규화 및 인코딩 문제를 해결합니다.
+        
+        Args:
+            text: 정규화할 텍스트
+            
+        Returns:
+            정규화된 텍스트
+        """
         if not text:
             return ""
             
@@ -575,70 +607,45 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         text = re.sub(r'\s+', ' ', text)
         return text.strip()
 
-    def _extract_quantity_prices(self, soup: BeautifulSoup) -> Dict[str, int]:
-        """수량별 가격 추출"""
-        quantity_prices = {}
-        
-        # 1. 가격표에서 추출
-        price_table = soup.select_one(self.selectors["price_table"]["selector"])
-        if price_table:
-            rows = price_table.select("tr:not(:first-child)")
-            for row in rows:
-                cells = row.select("td")
-                if len(cells) >= 2:
-                    qty_match = re.search(r"\d+", cells[0].text.strip())
-                    price_match = self.patterns["price_number"].search(cells[1].text.strip())
-                    if qty_match and price_match:
-                        qty = int(qty_match.group())
-                        price = int(price_match.group().replace(",", ""))
-                        quantity_prices[str(qty)] = price
-                        
-        # 2. 드롭다운에서 추출 (가격표가 없는 경우)
-        if not quantity_prices:
-            dropdown = soup.select_one(self.selectors["quantity_dropdown"]["selector"])
-            if dropdown:
-                for option in dropdown.select("option"):
-                    option_text = option.text.strip()
-                    qty_match = self.patterns["quantity"].search(option_text)
-                    price_match = self.patterns["price_number"].search(option_text)
-                    if qty_match and price_match:
-                        qty = int(qty_match.group(1))
-                        price = int(price_match.group().replace(",", ""))
-                        quantity_prices[str(qty)] = price
-
-        return quantity_prices
-
-    def _handle_dialog(self, dialog):
-        """대화 상자 처리 (품절 등 상태 메시지 확인용)"""
-        self.dialog_message = dialog.message
-        self.logger.debug(f"Dialog message: {dialog.message}")
-        dialog.accept()
-
-    def _get_soup(self, html_content: str) -> BeautifulSoup:
-        """HTML 콘텐츠를 BeautifulSoup 객체로 변환"""
-        return BeautifulSoup(html_content, "html.parser")
-        
     def _extract_product_idx(self, url: str) -> Optional[str]:
-        """URL에서 제품 ID(p_idx) 추출"""
+        """
+        URL에서 제품 ID를 추출합니다.
+        
+        Args:
+            url: 제품 URL
+            
+        Returns:
+            제품 ID 또는 None (추출 실패 시)
+        """
         try:
             parsed_url = urlparse(url)
-            # Query string 파싱
-            from urllib.parse import parse_qs
-            query_params = parse_qs(parsed_url.query)
+            query_params = dict(param.split('=') for param in parsed_url.query.split('&'))
             
             # p_idx 파라미터 찾기
             if 'p_idx' in query_params:
-                return query_params['p_idx'][0]
+                return query_params['p_idx']
                 
-            # 만약 p_idx가 없다면 다른 가능한 ID 파라미터 확인
+            # 다른 가능한 ID 파라미터 확인
             for param in ['idx', 'id', 'no', 'product_id']:
                 if param in query_params:
-                    return query_params[param][0]
+                    return query_params[param]
             
             return None
         except Exception as e:
             self.logger.error(f"URL에서 제품 ID 추출 실패: {e}")
             return None
+
+    def _handle_dialog(self, dialog):
+        """
+        대화 상자를 처리합니다.
+        품절 등 상태 메시지를 확인하는 데 사용됩니다.
+        
+        Args:
+            dialog: Playwright 대화 상자 객체
+        """
+        self.dialog_message = dialog.message
+        self.logger.debug(f"대화 상자 메시지: {dialog.message}")
+        dialog.accept()
 
     def get_price_table(self, url: str) -> Tuple[Optional[pd.DataFrame], bool, str]:
         """URL에서 가격표 가져오기"""
@@ -889,21 +896,79 @@ class HaeoeumScraper(BaseMultiLayerScraper):
             return None, False, str(e)
 
     def check_stock_status(self, url: str) -> Tuple[bool, str]:
-        """상품 URL에서 재고 상태 확인"""
-        _, is_sold_out, message = self.get_price_table(url)
-        return not is_sold_out, message
+        """
+        상품 URL에서 재고 상태를 확인합니다.
+        
+        Args:
+            url: 상품 URL
+            
+        Returns:
+            (재고 있음 여부, 상태 메시지) 튜플
+        """
+        try:
+            # requests로 먼저 시도
+            response = self.session.get(url, timeout=self.timeout_config)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # 품절 표시 확인
+            sold_out_element = soup.select_one(self.selectors["sold_out"]["selector"])
+            if sold_out_element:
+                return False, sold_out_element.text.strip() or "품절"
+            
+            # 텍스트에서 품절 키워드 확인
+            text_content = soup.get_text().lower()
+            if "품절" in text_content or "sold out" in text_content:
+                return False, "품절"
+            
+            # Playwright로 추가 확인 (필요한 경우)
+            if self.playwright_available:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=self.headless)
+                    page = browser.new_page()
+                    page.on("dialog", self._handle_dialog)
+                    
+                    page.goto(url, wait_until=self.playwright_config["wait_until"])
+                    
+                    # 대화 상자 메시지 확인
+                    if self.dialog_message and any(keyword in self.dialog_message.lower() for keyword in ["품절", "재고", "sold out"]):
+                        return False, self.dialog_message
+                    
+                    # 품절 요소 확인
+                    sold_out = page.locator(self.selectors["sold_out"]["selector"]).count() > 0
+                    if sold_out:
+                        return False, "품절"
+                    
+                    browser.close()
+            
+            return True, "재고 있음"
+            
+        except Exception as e:
+            self.logger.error(f"재고 상태 확인 중 오류: {e}")
+            return False, f"확인 실패: {str(e)}"
 
     def search_product(self, query: str, max_items: int = 50) -> List[Product]:
-        """해오름 기프트에서 상품을 검색합니다."""
+        """
+        해오름 기프트에서 상품을 검색합니다.
+
+        Args:
+            query: 검색어
+            max_items: 최대 검색 결과 수
+
+        Returns:
+            List[Product]: 검색된 상품 목록
+        """
         self.logger.info(f"해오름 기프트에서 '{query}' 검색 시작")
         
         # 캐시 확인
         cache_key = f"haeoeum_search|{query}"
-        cached_result = self.get_sparse_data(cache_key)
+        cached_result = self.get_cached_data(cache_key)
         if cached_result:
             self.logger.info(f"캐시된 검색 결과 사용: '{query}'")
-            return cached_result
+            return [Product.from_dict(p) for p in cached_result]
 
+        products = []
         try:
             # 검색 URL 구성
             search_url = f"{self.BASE_URL}/product/product_list.asp"
@@ -912,40 +977,110 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                 "search_type": "all"
             }
             
-            response = self.session.get(search_url, params=params, verify=False)
-            response.raise_for_status()
-            
-            soup = self._get_soup(response.text)
-            product_elements = soup.select(self.selectors["product_list"]["selector"])
-            
-            if not product_elements:
-                self.logger.warning(f"❌ 상품이 존재하지 않음: '{query}' 검색 결과 없음")
-                return []
-            
-            products = []
-            for element in product_elements[:max_items]:
+            # requests로 먼저 시도
+            try:
+                response = self.session.get(search_url, params=params, verify=False)
+                response.raise_for_status()
+                
+                # 인코딩 처리
+                if not response.encoding or response.encoding == 'ISO-8859-1':
+                    try:
+                        import chardet
+                        detected = chardet.detect(response.content)
+                        if detected['confidence'] > 0.7:
+                            response.encoding = detected['encoding']
+                        else:
+                            response.encoding = 'cp949'
+                    except ImportError:
+                        response.encoding = 'cp949'
+                
+                soup = BeautifulSoup(response.text, "html.parser")
+                product_elements = soup.select(self.selectors["product_list"]["selector"])
+                
+                if product_elements:
+                    for element in product_elements[:max_items]:
+                        try:
+                            product_link = element.select_one(self.selectors["product_link"]["selector"])
+                            if not product_link:
+                                continue
+                            
+                            product_url = urljoin(self.BASE_URL, product_link["href"])
+                            product_idx = self._extract_product_idx(product_url)
+                            
+                            if not product_idx:
+                                continue
+                            
+                            product = self.get_product(product_idx)
+                            if product:
+                                products.append(product)
+                            
+                        except Exception as e:
+                            self.logger.error(f"상품 추출 중 오류 발생: {str(e)}")
+                            continue
+                
+            except Exception as e:
+                self.logger.error(f"requests를 사용한 검색 실패: {e}")
+
+            # Playwright로 시도 (requests 실패 시)
+            if not products and self.playwright_available:
                 try:
-                    product_link = element.select_one(self.selectors["product_link"]["selector"])
-                    if not product_link:
-                        continue
-                    
-                    product_url = urljoin(self.BASE_URL, product_link["href"])
-                    product_idx = self._extract_product_idx(product_url)
-                    
-                    if not product_idx:
-                        continue
-                    
-                    product = self.get_product(product_idx)
-                    if product:
-                        products.append(product)
-                    
+                    with sync_playwright() as p:
+                        browser = p.chromium.launch(headless=self.headless)
+                        page = browser.new_page()
+                        
+                        # 검색 페이지 로드
+                        page.goto(search_url, params=params, wait_until=self.playwright_config["wait_until"])
+                        
+                        # 상품 목록 대기
+                        page.wait_for_selector(self.selectors["product_list"]["selector"], timeout=5000)
+                        
+                        # HTML 파싱
+                        html = page.content()
+                        soup = BeautifulSoup(html, "html.parser")
+                        product_elements = soup.select(self.selectors["product_list"]["selector"])
+                        
+                        if product_elements:
+                            for element in product_elements[:max_items]:
+                                try:
+                                    product_link = element.select_one(self.selectors["product_link"]["selector"])
+                                    if not product_link:
+                                        continue
+                                    
+                                    product_url = urljoin(self.BASE_URL, product_link["href"])
+                                    product_idx = self._extract_product_idx(product_url)
+                                    
+                                    if not product_idx:
+                                        continue
+                                    
+                                    product = self.get_product(product_idx)
+                                    if product:
+                                        products.append(product)
+                                    
+                                except Exception as e:
+                                    self.logger.error(f"상품 추출 중 오류 발생: {str(e)}")
+                                    continue
+                        
+                        browser.close()
+                        
                 except Exception as e:
-                    self.logger.error(f"상품 추출 중 오류 발생: {str(e)}")
-                    continue
-            
+                    self.logger.error(f"Playwright를 사용한 검색 실패: {e}")
+
+            # 검색 결과가 없으면 "동일상품 없음" 반환
             if not products:
                 self.logger.warning(f"❌ 상품이 존재하지 않음: '{query}' 검색 결과 없음")
-                return []
+                no_match_product = Product(
+                    id=hashlib.md5(f"no_match_haeoeum_{query}".encode()).hexdigest(),
+                    name=f"동일상품 없음 - {query}",
+                    source="haeoeum",
+                    price=0,
+                    url="",
+                    image_url=f"{self.BASE_URL}/images/no_image.jpg",
+                    status="Not Found"
+                )
+                products = [no_match_product]
+            
+            # 캐시에 저장
+            self.cache_sparse_data(cache_key, [p.to_dict() for p in products])
             
             self.logger.info(f"해오름 기프트에서 '{query}' 검색 완료 - {len(products)}개 상품 발견")
             return products
@@ -1024,43 +1159,120 @@ class HaeoeumScraper(BaseMultiLayerScraper):
         
         return test_results
 
-    def _extract_images_with_stubborn_method(self, url: str, product_name: str) -> List[str]:
+    def _extract_images(self, url: str, soup: Optional[BeautifulSoup] = None) -> List[str]:
         """
-        까다로운 경우를 위한 특수 이미지 추출 방법.
-        일반적인 방법으로 이미지를 찾을 수 없을 때 사용합니다.
-        
+        상품 페이지에서 이미지를 추출합니다.
+        여러 방법을 순차적으로 시도하여 최대한 많은 이미지를 찾습니다.
+
         Args:
-            url: 제품 페이지 URL
-            product_name: 제품 이름 (확인용)
-            
+            url: 상품 페이지 URL
+            soup: 이미 파싱된 BeautifulSoup 객체 (선택적)
+
         Returns:
-            추출된 이미지 URL 목록
+            List[str]: 추출된 이미지 URL 목록
         """
-        self.logger.info(f"Using stubborn method to extract images for: {product_name}")
+        images = []
+        
+        # 1. BeautifulSoup으로 먼저 시도
+        if soup:
+            images.extend(self._extract_images_with_soup(soup, url))
+            
+        # 2. Playwright로 시도 (이미지가 없거나 Playwright가 사용 가능한 경우)
+        if (not images or len(images) < 2) and self.playwright_available:
+            try:
+                playwright_images = self._extract_images_with_playwright(url)
+                images.extend(playwright_images)
+            except Exception as e:
+                self.logger.warning(f"Playwright 이미지 추출 실패: {e}")
+        
+        # 3. 이미지가 여전히 없으면 마지막 수단으로 시도
+        if not images and self.playwright_available:
+            try:
+                stubborn_images = self._extract_images_with_stubborn_method(url)
+                images.extend(stubborn_images)
+            except Exception as e:
+                self.logger.warning(f"Stubborn 이미지 추출 실패: {e}")
+        
+        # 중복 제거 및 URL 정규화
+        unique_images = []
+        for img_url in images:
+            if img_url:
+                try:
+                    full_url = urljoin(url, img_url)
+                    if not any(x in full_url.lower() for x in ['icon', 'button', 'btn_', 'pixel.gif']):
+                        if full_url not in unique_images:
+                            unique_images.append(full_url)
+                except Exception:
+                    continue
+        
+        # 이미지가 없으면 기본 이미지 반환
+        if not unique_images:
+            default_image = f"{self.BASE_URL}/images/no_image.jpg"
+            unique_images.append(default_image)
+            
+        return unique_images
+
+    def _extract_images_with_soup(self, soup: BeautifulSoup, base_url: str) -> List[str]:
+        """BeautifulSoup을 사용한 이미지 추출"""
+        images = []
+        
+        # 1. 메인 이미지 추출
+        main_image = soup.select_one(self.selectors["main_image"]["selector"])
+        if main_image and main_image.get('src'):
+            img_url = main_image.get('src')
+            if img_url:
+                images.append(img_url)
+                
+            # onclick 속성에서 큰 이미지 URL 추출
+            onclick = main_image.get('onclick', '')
+            if onclick:
+                onclick_match = self.patterns["onclick_image"].search(onclick)
+                if onclick_match:
+                    big_img_url = onclick_match.group(1)
+                    if big_img_url:
+                        images.append(big_img_url)
+        
+        # 2. 대체 메인 이미지 추출
+        alt_image = soup.select_one(self.selectors["alt_main_image"]["selector"])
+        if alt_image and alt_image.get('src'):
+            images.append(alt_image.get('src'))
+        
+        # 3. 썸네일 이미지 추출
+        thumbnails = soup.select(self.selectors["thumbnail_images"]["selector"])
+        for thumb in thumbnails:
+            if thumb.get('src'):
+                images.append(thumb.get('src'))
+        
+        # 4. 상품 설명 이미지 추출
+        desc_images = soup.select(self.selectors["description_images"]["selector"])
+        for img in desc_images:
+            if img.get('src'):
+                images.append(img.get('src'))
+        
+        # 5. style 속성에서 배경 이미지 URL 추출
+        for element in soup.select('[style*="background"]'):
+            style = element.get('style', '')
+            matches = self.patterns["image_url"].findall(style)
+            for match in matches:
+                if match[0]:  # match[0]는 전체 URL
+                    images.append(match[0])
+        
+        return images
+
+    def _extract_images_with_playwright(self, url: str) -> List[str]:
+        """Playwright를 사용한 이미지 추출"""
         images = []
         
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=self.headless)
+                page = browser.new_page()
                 
-                # 확장된 viewport로 컨텍스트 생성 (더 많은 컨텐츠 로드)
-                context = browser.new_context(
-                    viewport={"width": 1920, "height": 1080},
-                    user_agent=self.user_agent
-                )
+                # 페이지 로드
+                page.goto(url, wait_until=self.playwright_config["wait_until"])
+                page.wait_for_selector("img", timeout=5000)
                 
-                page = context.new_page()
-                
-                # 대화 상자 처리
-                page.on("dialog", self._handle_dialog)
-                
-                # 타임아웃 연장하여 더 오래 기다리기
-                page.goto(url, timeout=60000, wait_until="networkidle")
-                
-                # 페이지가 완전히 로드될 때까지 기다리기
-                self._wait_for_load(page)
-                
-                # 모든 이미지 요소 수집
+                # JavaScript로 이미지 추출
                 images = page.evaluate("""() => {
                     function isValidImage(url) {
                         return url && 
@@ -1075,7 +1287,7 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                         .map(img => img.src)
                         .filter(isValidImage);
                     
-                    // 큰 이미지만 수집 (getComputedStyle 사용)
+                    // 큰 이미지만 수집
                     const largeImages = Array.from(document.querySelectorAll('img')).filter(img => {
                         const style = window.getComputedStyle(img);
                         const width = parseInt(style.width);
@@ -1097,97 +1309,111 @@ class HaeoeumScraper(BaseMultiLayerScraper):
                         return urlMatch ? urlMatch[1] : null;
                     }).filter(url => isValidImage(url));
                     
-                    // 결과 합치기 (중복 제거)
-                    const uniqueImages = [...new Set([...largeImages, ...allImages, ...bgImages])];
-                    return uniqueImages;
+                    return [...new Set([...largeImages, ...allImages, ...bgImages])];
                 }""")
                 
-                # 스크린샷 저장 (분석용)
-                try:
-                    screenshot_path = f"{self.output_dir}/stubborn_{hashlib.md5(url.encode()).hexdigest()[:8]}.png"
-                    page.screenshot(path=screenshot_path)
-                    self.logger.info(f"Saved screenshot to {screenshot_path}")
-                except Exception as e:
-                    self.logger.warning(f"Failed to save screenshot: {e}")
-                    
-                # 이미지 요소가 없는 경우, 스크롤 후 다시 시도
-                if not images:
-                    self.logger.info("No images found on initial load, scrolling and retrying...")
-                    
-                    # 페이지 전체 스크롤
-                    page.evaluate("""() => {
-                        return new Promise((resolve) => {
-                            let totalHeight = 0;
-                            const distance = 100;
-                            const timer = setInterval(() => {
-                                const scrollHeight = document.body.scrollHeight;
-                                window.scrollBy(0, distance);
-                                totalHeight += distance;
-                                
-                                if(totalHeight >= scrollHeight) {
-                                    clearInterval(timer);
-                                    resolve();
-                                }
-                            }, 100);
-                        });
-                    }""")
-                    
-                    # 잠시 대기 후 다시 이미지 검색
-                    page.wait_for_timeout(2000)
-                    
-                    # 다시 이미지 수집
-                    images = page.evaluate("""() => {
-                        const allImages = Array.from(document.querySelectorAll('img'))
-                            .map(img => img.src)
-                            .filter(url => url && 
-                                   url.trim() !== '' && 
-                                   !url.includes('btn_') &&
-                                   !url.includes('icon_'));
-                        return [...new Set(allImages)];
-                    }""")
-                
-                # 마지막 수단: 이미지 검색을 위한 DOM 검사
-                if not images:
-                    self.logger.info("Still no images, trying DOM inspection...")
-                    html_content = page.content()
-                    
-                    # HTML 내용에서 이미지 URL 패턴 검색
-                    img_patterns = [
-                        r'src=[\'"]([^"\']+\.(jpg|jpeg|png|gif))[\'"]',
-                        r'url\([\'"]?([^"\'()]+\.(jpg|jpeg|png|gif))[\'"]?\)',
-                        r'background(-image)?:[^;]+url\([\'"]?([^"\'()]+)[\'"]?\)'
-                    ]
-                    
-                    for pattern in img_patterns:
-                        matches = re.findall(pattern, html_content)
-                        if matches:
-                            for match in matches:
-                                img_url = match[0] if isinstance(match, tuple) else match
-                                img_url = urljoin(url, img_url)
-                                if img_url not in images:
-                                    images.append(img_url)
-
                 browser.close()
-        
+                
         except Exception as e:
-            self.logger.error(f"Stubborn image extraction failed: {e}", exc_info=True)
+            self.logger.error(f"Playwright 이미지 추출 실패: {e}")
+            
+        return images
+
+    def _extract_images_with_stubborn_method(self, url: str) -> List[str]:
+        """까다로운 경우를 위한 특수 이미지 추출 방법"""
+        images = []
         
-        # 추출된 이미지 필터링 및 정리
-        filtered_images = []
-        for img_url in images:
-            # 유효한 이미지 URL인지 확인 (상대 URL 처리)
-            if img_url:
-                try:
-                    full_url = urljoin(url, img_url)
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=self.headless)
+                context = browser.new_context(
+                    viewport={"width": 1920, "height": 1080},
+                    user_agent=self.user_agent
+                )
+                
+                page = context.new_page()
+                page.on("dialog", self._handle_dialog)
+                
+                # 페이지 로드 및 대기
+                page.goto(url, timeout=60000, wait_until="networkidle")
+                page.wait_for_selector("img", timeout=10000)
+                
+                # 전체 페이지 스크롤
+                page.evaluate("""() => {
+                    return new Promise((resolve) => {
+                        let totalHeight = 0;
+                        const distance = 100;
+                        const timer = setInterval(() => {
+                            const scrollHeight = document.body.scrollHeight;
+                            window.scrollBy(0, distance);
+                            totalHeight += distance;
+                            
+                            if(totalHeight >= scrollHeight) {
+                                clearInterval(timer);
+                                resolve();
+                            }
+                        }, 100);
+                    });
+                }""")
+                
+                # 잠시 대기
+                page.wait_for_timeout(2000)
+                
+                # 이미지 추출
+                images = page.evaluate("""() => {
+                    function isValidImage(url) {
+                        return url && 
+                               url.trim() !== '' && 
+                               !url.includes('btn_') &&
+                               !url.includes('icon_') &&
+                               url.match(/\\.(jpg|jpeg|png|gif)(\\?|$)/i);
+                    }
                     
-                    # 작은 아이콘, 버튼 등 필터링
-                    if not any(x in full_url.lower() for x in ['icon', 'button', 'btn_', 'pixel.gif']):
-                        filtered_images.append(full_url)
-                except Exception:
-                    continue
-        
-        self.logger.info(f"Stubborn method found {len(filtered_images)} images")
-        return filtered_images
+                    // 모든 이미지 수집
+                    const allImages = Array.from(document.querySelectorAll('img'))
+                        .map(img => img.src)
+                        .filter(isValidImage);
+                    
+                    // 큰 이미지만 수집
+                    const largeImages = Array.from(document.querySelectorAll('img')).filter(img => {
+                        const style = window.getComputedStyle(img);
+                        const width = parseInt(style.width);
+                        const height = parseInt(style.height);
+                        return (width > 150 || height > 150) && isValidImage(img.src);
+                    }).map(img => img.src);
+                    
+                    // 백그라운드 이미지 URL 수집
+                    const bgElements = Array.from(document.querySelectorAll('*')).filter(el => {
+                        const style = window.getComputedStyle(el);
+                        const bgImage = style.backgroundImage || '';
+                        return bgImage.includes('url(') && !bgImage.includes('gradient');
+                    });
+                    
+                    const bgImages = bgElements.map(el => {
+                        const style = window.getComputedStyle(el);
+                        const bgImage = style.backgroundImage;
+                        const urlMatch = bgImage.match(/url\\(['"]?([^'"\\)]+)['"]?\\)/);
+                        return urlMatch ? urlMatch[1] : null;
+                    }).filter(url => isValidImage(url));
+                    
+                    // onclick 속성에서 이미지 URL 추출
+                    const onclickImages = Array.from(document.querySelectorAll('[onclick*="view_big"]'))
+                        .map(el => {
+                            const onclick = el.getAttribute('onclick');
+                            const match = onclick.match(/view_big\\(['"]([^'"]+)['"]\\)/);
+                            return match ? match[1] : null;
+                        })
+                        .filter(url => isValidImage(url));
+                    
+                    return [...new Set([...largeImages, ...allImages, ...bgImages, ...onclickImages])];
+                }""")
+                
+                browser.close()
+                
+        except Exception as e:
+            self.logger.error(f"Stubborn 이미지 추출 실패: {e}")
+            
+        return images
 
     def _extract_images_with_playwright_common(self, url: str) -> list:
         self.logger.info("Extracting images using shared Playwright method")
