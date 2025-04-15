@@ -270,20 +270,6 @@ def apply_excel_formatting(file_path: str) -> bool:
             else:
                 ws.row_dimensions[row_idx].height = 20  # 일반 행 높이
         
-        # 특정 컬럼 식별 (가격차이 컬럼)
-        price_diff_cols = []
-        for idx, cell in enumerate(ws[1]):
-            cell_value = str(cell.value).lower() if cell.value else ""
-            if "가격차이" in cell_value and "%" not in cell_value:
-                price_diff_cols.append(idx + 1)  # 1-based 인덱스
-        
-        # 상태 컬럼 식별
-        status_cols = []
-        for idx, cell in enumerate(ws[1]):
-            cell_value = str(cell.value).lower() if cell.value else ""
-            if "상태" in cell_value:
-                status_cols.append(idx + 1)  # 1-based 인덱스
-        
         # 각 행의 셀에 서식 적용
         for row_idx, row in enumerate(ws.iter_rows(min_row=2), 2):  # 2부터 시작 (헤더 제외)
             for col_idx, cell in enumerate(row, 1):
@@ -296,39 +282,10 @@ def apply_excel_formatting(file_path: str) -> bool:
                     cell.alignment = CENTER_ALIGNMENT
                     continue
                 
-                # 가격차이 컬럼이고 음수 값이면 노란색 배경
-                if col_idx in price_diff_cols:
-                    try:
-                        value = cell.value
-                        if isinstance(value, (int, float)) and value < 0:
-                            cell.fill = YELLOW_FILL
-                            cell.font = BOLD_FONT
-                        elif isinstance(value, str) and ('-' in value or '－' in value):
-                            # 문자열 형태의 음수 처리 ('-123', '－456' 등)
-                            cell.fill = YELLOW_FILL
-                            cell.font = BOLD_FONT
-                    except:
-                        pass
-                
-                # 상태 컬럼의 특정 값에 따른 배경색 설정
-                if col_idx in status_cols and cell.value:
-                    status_value = str(cell.value).lower()
-                    # 상품을 찾을 수 없음 - 빨간색 배경
-                    if "찾을 수 없" in status_value or "없음" in status_value:
-                        cell.fill = RED_FILL
-                    # 유사 이미지가 없음 - 연한 파란색 배경
-                    elif "이미지" in status_value and "없음" in status_value:
-                        cell.fill = BLUE_FILL
-                    # 텍스트 유사도 낮음 - 연한 보라색 배경
-                    elif "텍스트" in status_value and "낮음" in status_value:
-                        cell.fill = PURPLE_FILL
-                    # 오류 - 회색 배경
-                    elif "오류" in status_value:
-                        cell.fill = LIGHT_GRAY_FILL
-                    # 정상 - 연한 초록색 배경
-                    elif "정상" in status_value:
-                        cell.fill = GREEN_FILL
-            
+                # 텍스트 셀인 경우 왼쪽 정렬
+                if isinstance(cell.value, str):
+                    cell.alignment = LEFT_ALIGNMENT
+        
         # 파일 저장
         wb.save(file_path)
         logger.info(f"서식 적용 완료: {file_path}")
@@ -434,10 +391,10 @@ def run_scraping_for_excel(df: pd.DataFrame) -> pd.DataFrame:
         from core.scraping.koryo_scraper import KoryoScraper
         koryo_scraper = KoryoScraper()
         cache = Cache(
-            directory="cache",
+            cache_dir="cache",
             max_size_mb=1024,
-            ttl=3600,
-            compression=True
+            duration_seconds=3600,
+            enable_compression=True
         )
         logger.info(f"Cache initialized at 'cache' with duration 3600 seconds. Current size: {cache.current_size_mb:.2f}MB, Max size: {cache.max_size_mb}MB. Compression enabled.")
         logger.info("고려 스크래퍼 초기화 완료")

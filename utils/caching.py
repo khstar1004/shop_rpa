@@ -12,7 +12,7 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 
-class FileCache:
+class Cache:
     """Simple file-based cache with expiration and size management."""
 
     def __init__(
@@ -258,7 +258,7 @@ class FileCache:
 
 # Decorator for function caching
 def cache_result(
-    cache: Optional[FileCache], key_prefix: str = "func", ttl: Optional[int] = None
+    cache: Optional[Cache], key_prefix: str = "func", ttl: Optional[int] = None
 ) -> Callable:
     """Decorator to cache the result of a function."""
 
@@ -312,3 +312,6 @@ def cache_result(
         return wrapper
 
     return decorator
+
+# For backward compatibility
+FileCache = Cache
